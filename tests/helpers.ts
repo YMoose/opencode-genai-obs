@@ -1,5 +1,5 @@
 /**
- * 测试工具：本地假 Phoenix 服务器、可控 SSE 事件流、mock 插件 ctx、env 快照。
+ * 测试工具：本地假 OTLP 后端服务器、可控 SSE 事件流、mock 插件 ctx、env 快照。
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"

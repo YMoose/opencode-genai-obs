@@ -2,7 +2,7 @@
  * OTLP/HTTP protobuf 编码器 + POST —— otlp.py 的 TS 移植，无外部依赖。
  * 编码 opentelemetry/proto/collector/trace/v1 ExportTraceServiceRequest 的
  * 稳定子集：Resource/Scope/Span/KeyValue/AnyValue/Status。
- * Phoenix /v1/traces 只收 application/x-protobuf（已验证）。
+ * 标准接收器（OTel Collector 等）对 /v1/traces 要求 application/x-protobuf。
  */
 
 export type AttrValue = string | number | boolean
@@ -95,9 +95,9 @@ function spanMessage(span: SpanRecord): Buffer {
 }
 
 export interface OtlpOptions {
-  /** Phoenix project 名（openinference.project.name） */
+  /** project 名（openinference.project.name resource 属性，OpenInference 约定） */
   readonly project?: string
-  /** 额外请求头（认证等）；不覆盖 content-type/x-project-name */
+  /** 额外请求头（认证等）；不覆盖 content-type */
   readonly headers?: Record<string, string>
   /** 并入 resource 块的自定义属性（对齐 OTEL_RESOURCE_ATTRIBUTES；与内置键冲突时保留内置值） */
   readonly resourceAttributes?: Record<string, string>
@@ -118,19 +118,19 @@ export function buildBody(spans: readonly SpanRecord[], options: OtlpOptions = {
   return ld(1, resourceSpans) // ExportTraceServiceRequest.resource_spans = 1
 }
 
-/** POST 一批 span 到 Phoenix。失败抛错（调用方负责重试队列）。 */
+/** POST 一批 span 到 OTLP/HTTP 后端。失败抛错（调用方负责重试队列）。 */
 export async function postSpans(
   spans: readonly SpanRecord[],
   endpoint: string,
   options: OtlpOptions = {},
 ): Promise<void> {
   const body = buildBody(spans, options)
-  // 自定义头在前，内置头最后覆盖（防 content-type/x-project-name 被冲掉）
+  // 自定义头在前，内置头最后覆盖（防 content-type 被冲掉）；project 语义走
+  // resource 属性 openinference.project.name，不发任何后端专属请求头
   const headers: Record<string, string> = {
     ...(options.headers ?? {}),
     "content-type": "application/x-protobuf",
   }
-  if (options.project) headers["x-project-name"] = options.project
   const response = await fetch(endpoint.replace(/\/+$/, "") + "/v1/traces", {
     method: "POST",
     headers,

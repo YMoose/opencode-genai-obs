@@ -1,6 +1,6 @@
 /**
  * OTLP 发送队列：内存 FIFO + 指数退避重试。
- * Phoenix 重启期间 span 攒着；超过上限后丢弃并 warn-log（tracing 是观测面，永不阻塞主路径）。
+ * 后端重启期间 span 攒着；超过上限后丢弃并 warn-log（tracing 是观测面，永不阻塞主路径）。
  */
 
 import { postSpans, type SpanRecord } from "./otlp.js"
@@ -14,7 +14,7 @@ export interface SenderOptions {
   readonly resourceAttributes?: Record<string, string>
   /** 单批最大 span 数（OTLP HTTP 无 gRPC 4MB 限制，但批太大重试代价高） */
   readonly batchSize?: number
-  /** 队列满时丢弃最老的 span（防 Phoenix 长期宕机撑爆内存） */
+  /** 队列满时丢弃最老的 span（防后端长期宕机撑爆内存） */
   readonly maxQueue?: number
   /** 重试基础退避毫秒数，默认 1s */
   readonly retryDelayMs?: number

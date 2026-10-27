@@ -1,16 +1,17 @@
 /**
- * Phoenix session annotations 实时写入（Phase 2.5）。
+ * Session annotations 实时写入（Phase 2.5，可选增强）。
  *
- * 对应 sync.py 的 annotate_sessions：POST /v1/session_annotations?sync=true，
- * project/title 两条 CODE annotation，Phoenix 把它们渲染成 Sessions 表的列。
+ * 走 Phoenix 兼容后端的 POST /v1/session_annotations?sync=true（project/title
+ * 两条 CODE annotation，渲染成 Sessions 表的列）。这是后端专属 REST API 而非
+ * OTLP 标准 —— 项目定位不绑定平台，因此由 tracing.annotations.enabled 控制
+ * （默认 true 以兼容既有部署；非 Phoenix 后端建议关闭）。
  * DO_UPDATE upsert 语义 —— title 改名后重写即可刷新。
  *
- * 只给根会话打：Phoenix 每条 trace 只按根 span 的 session.id 建 ProjectSession，
- * subagent 会话没有对应记录，打了会整批 404（sync.py 同款边界）。
+ * 只给根会话打：Phoenix 类后端每条 trace 只按根 span 的 session.id 建
+ * ProjectSession，subagent 会话没有对应记录，打了会整批 404（sync.py 同款边界）。
  *
- * 失败只告警不中断：Phoenix 的 OTLP span 入库是异步队列，annotation 请求可能因
- * session 尚未建出 404 —— 重试 3 次（间隔 2s / 4s）。过期仍败则静默放弃，
- * 离线 sync.py 兜底。
+ * 失败只告警不中断：span 入库是异步队列，annotation 请求可能因 session 尚未
+ * 建出 404 —— 重试 3 次（间隔 2s / 4s）。过期仍败则静默放弃，离线 sync.py 兜底。
  */
 
 export interface SessionAnnotationFields {

@@ -41,8 +41,9 @@ test("无配置文件：全默认且无告警", () => {
   assert.strictEqual(config.enabled, true)
   assert.strictEqual(config.wire.enabled, false)
   assert.strictEqual(config.tracing.enabled, true)
-  assert.strictEqual(config.tracing.endpoint, "http://localhost:6006")
+  assert.strictEqual(config.tracing.endpoint, "http://localhost:4318", "默认走 OTLP 标准端口")
   assert.strictEqual(config.tracing.contentMaxLength, 0)
+  assert.strictEqual(config.tracing.annotations.enabled, true, "annotations 默认开（兼容既有部署）")
   assert.deepStrictEqual(warnings, [])
 })
 
@@ -96,6 +97,18 @@ test("content=false：toolDetails/toolContent 默认关，可单独拉回", () =
   assert.strictEqual(config.tracing.contentGates.userPrompts, true)
   assert.strictEqual(config.tracing.contentGates.toolDetails, false)
   assert.strictEqual(config.tracing.contentGates.toolContent, true)
+})
+
+test("annotations 开关：默认开、可关、坏类型回落并告警", () => {
+  const off = loadFrom(`{ "tracing": { "annotations": { "enabled": false } } }`)
+  assert.strictEqual(off.config.tracing.annotations.enabled, false, "非 Phoenix 后端可显式关闭")
+
+  const badType = loadFrom(`{ "tracing": { "annotations": { "enabled": "false" } } }`)
+  assert.strictEqual(badType.config.tracing.annotations.enabled, true, "字符串 'false' 不得生效")
+  assert.ok(badType.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("tracing.annotations.enabled")))
+
+  const unknown = loadFrom(`{ "tracing": { "annotations": { "auto": true } } }`)
+  assert.ok(unknown.warnings.some((warning) => warning.kind === "unknown-key" && warning.message.includes("tracing.annotations.auto")))
 })
 
 test("OTEL env 覆盖文件层：endpoint 归一化、headers 合并、坏对告警", () => {

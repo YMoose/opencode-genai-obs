@@ -1,8 +1,9 @@
 /**
- * index.ts 插件级集成测试（mock ctx + 假 Phoenix）：
+ * index.ts 插件级集成测试（mock ctx + 假 OTLP 后端）：
  * - Bug 1：tracing.enabled=false 的 wire-only 配置不订阅事件流、不外发任何 HTTP，
  *          wire JSONL 照常落盘
  * - Bug 5：owner 实例卸载后，存活实例的 hook 触发 pipeline 补选，采集恢复
+ * - 去平台化：annotations.enabled=false 时不发后端专属的 /v1/session_annotations
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -63,6 +64,46 @@ test("Bug 1：wire-only（tracing.enabled=false）不外发任何请求，wire J
   await unload()
 })
 
+test("去平台化：annotations.enabled=false 时只走标准 /v1/traces，不发 session_annotations", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-noannot-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      tracing: { enabled: true, endpoint: server.url, project: "t", annotations: { enabled: false } },
+    }),
+    "utf-8",
+  )
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  const feed = mock.feeds[0]!
+  const now = Date.now()
+  feed.push({ type: "session.created", created: now, data: { sessionID: "s1", agent: "build" } })
+  feed.push({ type: "session.step.started", created: now, data: { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } } })
+  feed.push({ type: "session.step.ended", created: now, data: { sessionID: "s1", assistantMessageID: "a1" } })
+  feed.push({ type: "session.execution.succeeded", created: now, data: { sessionID: "s1" } })
+
+  await waitFor(() => server.requests.some((request) => request.path === "/v1/traces" && request.body.length > 0), 5_000)
+  assert.ok(
+    server.requests.every((request) => !request.path.includes("session_annotations")),
+    "annotation 关闭时不得发后端专属 /v1/session_annotations 请求",
+  )
+})
+
 test("Bug 5：owner 卸载后，存活实例 hook 触发补选，span 恢复外发", async (t) => {
   const snapshot = snapshotEnv()
   t.after(() => restoreEnv(snapshot))
@@ -102,7 +143,7 @@ test("Bug 5：owner 卸载后，存活实例 hook 触发补选，span 恢复外�
   b.fire("prompt", { sessionID: "s1", messageID: "m1", prompt: { text: "re-elect" } })
   await waitFor(() => b.feeds.length === 1, 5_000)
 
-  // 跑一轮完整 turn，span 应到达假 Phoenix
+  // 跑一轮完整 turn，span 应到达假后端
   const feed = b.feeds[0]!
   const now = Date.now()
   feed.push({ type: "session.created", created: now, data: { sessionID: "s1", agent: "build" } })

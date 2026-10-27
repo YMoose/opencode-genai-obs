@@ -30,7 +30,7 @@ test("buildBody：内置 resource 键优先，自定义属性并入", () => {
   assert.ok(body.includes(Buffer.from("team", "utf-8")), "自定义属性键必须在")
 })
 
-test("postSpans：成功路径带 protobuf 头与 project 头", async (t) => {
+test("postSpans：成功路径带 protobuf 头，且不发送任何后端专属头", async (t) => {
   const server: TestServer = await startServer((_req, res) => {
     res.statusCode = 200
     res.end()
@@ -40,7 +40,8 @@ test("postSpans：成功路径带 protobuf 头与 project 头", async (t) => {
   assert.strictEqual(server.requests.length, 1)
   assert.strictEqual(server.requests[0]!.path, "/v1/traces")
   assert.strictEqual(server.requests[0]!.headers["content-type"], "application/x-protobuf")
-  assert.strictEqual(server.requests[0]!.headers["x-project-name"], "p1")
+  // 去平台化契约：project 语义只走 resource 属性，不得有 x-project-name 之类后端专属头
+  assert.strictEqual(server.requests[0]!.headers["x-project-name"], undefined)
   assert.ok(server.requests[0]!.body.length > 0, "应发送 protobuf body")
 })
 

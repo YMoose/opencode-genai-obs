@@ -2,7 +2,7 @@
  * opencode-genai-obs — 插件入口。
  *
  * Phase 1：wire body 采集（v2 session hook → JSONL 落盘 + pending 槽）
- * Phase 2：事件驱动 span builder（ctx.event.subscribe → OTLP span → Phoenix）
+ * Phase 2：事件驱动 span builder（ctx.event.subscribe → OTLP span → 任意 OTLP/HTTP 后端）
  *
  * 安装：~/.config/opencode/opencode.json 的 plugin 数组加本目录绝对路径
  * 配置：~/.config/opencode/ocg-obs.json（可选，JSONC）
@@ -11,7 +11,7 @@
  * - session hook（ws.send / http.request / prompt）按 session 所在 location 的
  *   实例派发 —— 每个实例都注册 hook，回调统一委托 globalThis 上的共享 pipeline
  * - SSE 事件订阅每实例 1:1 活着 —— span pipeline 只允许 owner realm 建立
- *   （确定性 span id + Phoenix DO_NOTHING 下重复发不出错，但浪费且竞态 wire 帧）
+ *   （确定性 span id + Phoenix 类后端 DO_NOTHING 下重复发不出错，但浪费且竞态 wire 帧）
  * - globalThis 是同进程多 module realm 间唯一的共享点
  * - owner 掉线补选：若热重载先载新实例再卸旧 owner，存活实例的 hook 回调发现
  *   pipeline 缺失时用自身 ctx 触发补选（dispatch → elect），采集不静默失效
@@ -94,10 +94,9 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     },
     log,
   )
-  const annotator = createAnnotator(
-    { endpoint: config.tracing.endpoint, headers: config.tracing.headers },
-    log,
-  )
+  const annotator = config.tracing.annotations.enabled
+    ? createAnnotator({ endpoint: config.tracing.endpoint, headers: config.tracing.headers }, log)
+    : undefined
   const spanBuilder = createSpanBuilder(
     {
       gates: config.tracing.contentGates,
@@ -123,11 +122,14 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   )
 
   /**
-   * session.created / session.renamed → 实时打 project/title annotation。
-   * subagent 会话（有 parentID）跳过：Phoenix 只给根会话建 ProjectSession，打了 404。
+   * session.created / session.renamed → 实时打 project/title annotation
+   * （可选增强，默认开：走 Phoenix 兼容后端的 /v1/session_annotations，
+   * 非 OTLP 标准，tracing.annotations.enabled 可关）。
+   * subagent 会话（有 parentID）跳过：Phoenix 类后端只给根会话建 ProjectSession，打了 404。
    * directory 经 session.get 取（basename 即 project label，sync.py 同款）。
    */
   const annotateFromEvent = (sessionID: string, data: Record<string, unknown>) => {
+    if (!annotator) return
     if (data.parentID) return
     void (async () => {
       let title = typeof data.title === "string" ? data.title : undefined
@@ -179,7 +181,12 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   })()
 
   if (config.wire.enabled) log("wire capture on", { directory: config.wire.directory })
-  log("tracing on", { endpoint: config.tracing.endpoint, project: config.tracing.project, content: config.tracing.content })
+  log("tracing on", {
+    endpoint: config.tracing.endpoint,
+    project: config.tracing.project,
+    content: config.tracing.content,
+    annotations: config.tracing.annotations.enabled,
+  })
 
   return {
     generation: pipelineGlobal.nextGeneration(),

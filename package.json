@@ -1,7 +1,7 @@
 {
   "name": "opencode-genai-obs",
   "version": "0.1.0",
-  "description": "OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, for Phoenix",
+  "description": "OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, OTLP/HTTP to any compatible backend",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,10 +16,10 @@
     "opencode",
     "opencode-plugin",
     "opentelemetry",
+    "otlp",
     "genai",
-    "phoenix",
-    "tracing",
-    "llm"
+    "llm",
+    "tracing"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

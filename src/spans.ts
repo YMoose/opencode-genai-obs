@@ -510,7 +510,7 @@ export function createSpanBuilder(
         ["opencode.cost.usd", cost],
         ["gen_ai.output.messages", outputMessages],
         ["opencode.reasoning", reasoningText],
-        // Phoenix / OpenInference mirrors
+        // OpenInference mirrors（跨后端语义约定，非平台绑定）
         ["openinference.span.kind", "LLM"],
         ["llm.model_name", model.id],
         ["llm.token_count.prompt", inputTokens],

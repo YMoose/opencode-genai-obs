@@ -45,12 +45,21 @@ export interface ContentGates {
   readonly wireBody: boolean
 }
 
-export interface TracingConfig {
-  /** 默认 true：事件流 → OTLP span → Phoenix */
+export interface AnnotationsConfig {
+  /**
+   * 默认 true：session.created/renamed → 实时 project/title annotation。
+   * 走 Phoenix 兼容后端的 /v1/session_annotations REST API（非 OTLP 标准，
+   * 其他后端接不到会 404），非 Phoenix 后端建议显式关闭。
+   */
   readonly enabled: boolean
-  /** Phoenix OTLP HTTP endpoint，默认 http://localhost:6006 */
+}
+
+export interface TracingConfig {
+  /** 默认 true：事件流 → OTLP span → OTLP/HTTP 后端 */
+  readonly enabled: boolean
+  /** OTLP/HTTP endpoint（任意兼容后端：OTel Collector / Phoenix / SigNoz …），默认 http://localhost:4318 */
   readonly endpoint: string
-  /** Phoenix project 名（openinference.project.name），默认 "opencode" */
+  /** project 名（openinference.project.name resource 属性，OpenInference 约定），默认 "opencode" */
   readonly project: string
   /** 额外请求头（认证等），同时用于 /v1/traces 与 /v1/session_annotations */
   readonly headers: Record<string, string>
@@ -65,6 +74,7 @@ export interface TracingConfig {
   readonly contentMaxLength: number
   /** 并入 OTLP resource 块的自定义属性（host.name / team 等；与内置键冲突时保留内置值） */
   readonly resourceAttributes: Record<string, string>
+  readonly annotations: AnnotationsConfig
 }
 
 export interface Config {
@@ -90,8 +100,10 @@ const TRACING_KEYS = new Set([
   "contentGates",
   "contentMaxLength",
   "resourceAttributes",
+  "annotations",
 ])
 const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "toolContent", "wireBody"])
+const ANNOTATION_KEYS = new Set(["enabled"])
 
 // ---------------------------------------------------------------------------
 // 类型校验 + 默认值回落
@@ -213,13 +225,14 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
     },
     tracing: {
       enabled: true,
-      endpoint: "http://localhost:6006",
+      endpoint: "http://localhost:4318",
       project: "opencode",
       headers: {},
       content: true,
       contentGates: resolveGates(true, {}, warnings),
       contentMaxLength: 0,
       resourceAttributes: {},
+      annotations: { enabled: true },
     },
   }
 
@@ -246,6 +259,8 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
 
         const gatesRaw = section(tracingRaw.contentGates, "tracing.contentGates", warnings)
         unknownKeys(gatesRaw, GATE_KEYS, "tracing.contentGates", configPath, warnings)
+        const annotationsRaw = section(tracingRaw.annotations, "tracing.annotations", warnings)
+        unknownKeys(annotationsRaw, ANNOTATION_KEYS, "tracing.annotations", configPath, warnings)
 
         const content = boolField(tracingRaw.content, "tracing.content", defaults.tracing.content, warnings)
         fileConfig = {
@@ -263,6 +278,9 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
             contentGates: resolveGates(content, gatesRaw, warnings),
             contentMaxLength: intField(tracingRaw.contentMaxLength, "tracing.contentMaxLength", defaults.tracing.contentMaxLength, warnings),
             resourceAttributes: recordField(tracingRaw.resourceAttributes, "tracing.resourceAttributes", warnings),
+            annotations: {
+              enabled: boolField(annotationsRaw.enabled, "tracing.annotations.enabled", defaults.tracing.annotations.enabled, warnings),
+            },
           },
         }
         log("loaded config", { path: configPath, wireEnabled: fileConfig.wire.enabled })
