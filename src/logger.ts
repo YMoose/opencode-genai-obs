@@ -1,5 +1,5 @@
 /**
- * Process-wide singleton logger: file + stderr fallback + 7-day retention + secret
+ * @fileoverview Process-wide singleton logger: file + stderr fallback + 7-day retention + secret
  * redaction. Adapted from oh-my-opencode-slim src/utils/logger.ts.
  *
  * - File names carry an ISO timestamp + pid (no clashes across processes/instances)

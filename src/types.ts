@@ -1,5 +1,5 @@
 /**
- * One JSONL record of a raw LLM request body (wire body).
+ * @fileoverview One JSONL record of a raw LLM request body (wire body).
  * Fields align with obsystem/otel-span-exportor/RAW-REQUESTS.md.
  */
 export interface WireRecord {

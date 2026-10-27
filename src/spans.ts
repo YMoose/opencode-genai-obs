@@ -1,5 +1,5 @@
 /**
- * Event-driven span builder (the real-time lane) — a streaming version of adapter.py's
+ * @fileoverview Event-driven span builder (the real-time lane) — a streaming version of adapter.py's
  * projection logic.
  *
  * State machine (see obsystem/otel-span-exportor/MERGED-PLUGIN.md §2):
@@ -32,6 +32,10 @@ import type { SpanRecord, AttrValue } from "./otlp.js"
 
 const KIND_INTERNAL = 1
 const KIND_CLIENT = 3
+
+// Session registry cap: sessions are unbounded in long-lived processes; evict the
+// oldest past the cap (Map iteration order = insertion order)
+const MAX_SESSIONS = 2048
 
 function hash(input: string, bytes: number): string {
   return createHash("sha256").update(input).digest("hex").slice(0, bytes * 2)
@@ -173,10 +177,6 @@ export function createSpanBuilder(
   const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint }>()
   /** Turn counters per root session */
   const turnCounters = new Map<string, number>()
-
-  // Session registry cap: sessions are unbounded in long-lived processes; evict the
-  // oldest past the cap (Map iteration order = insertion order)
-  const MAX_SESSIONS = 2048
 
   const registerSession = (sid: string, info: SessionInfoLite): void => {
     sessions.set(sid, info)

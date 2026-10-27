@@ -1,5 +1,5 @@
 /**
- * OTLP send queue: in-memory FIFO with exponential-backoff retry.
+ * @fileoverview OTLP send queue: in-memory FIFO with exponential-backoff retry.
  * Spans buffer while the backend restarts; past the cap they are dropped with a
  * warn-log (tracing is the observability plane and never blocks the main path).
  */
@@ -73,6 +73,7 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
               lastError: String(error),
             })
           } else {
+            // Safe: batch is non-empty (the loop only runs while queue.length > 0)
             const delay = baseDelay * 2 ** (batch[0]!.attempts - 1)
             schedule(delay)
             return

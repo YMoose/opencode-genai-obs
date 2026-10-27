@@ -1,5 +1,5 @@
 /**
- * OTLP/HTTP protobuf encoder + POST — a dependency-free TS port of otlp.py.
+ * @fileoverview OTLP/HTTP protobuf encoder + POST — a dependency-free TS port of otlp.py.
  * Encodes a stable subset of opentelemetry/proto/collector/trace/v1
  * ExportTraceServiceRequest: Resource/Scope/Span/KeyValue/AnyValue/Status.
  * Standard receivers (OTel Collector etc.) require application/x-protobuf on /v1/traces.

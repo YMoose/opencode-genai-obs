@@ -1,5 +1,5 @@
 /**
- * opencode-genai-obs — plugin entry.
+ * @fileoverview opencode-genai-obs — plugin entry.
  *
  * Phase 1: wire body capture (v2 session hook → JSONL + pending slots)
  * Phase 2: event-driven span builder (ctx.event.subscribe → OTLP spans → any OTLP/HTTP backend)
@@ -259,7 +259,7 @@ export default Plugin.define({
           const revived = pipelineGlobal.get()
           if (revived && !unloading) deliver(revived)
         })
-        .catch((error) => log("pipeline re-elect failed", { error: String(error) }))
+        .catch((error) => { log("pipeline re-elect failed", { error: String(error) }) })
     }
 
     // --- Every instance registers hooks: dispatched per location, delegating to the shared pipeline ---
@@ -280,12 +280,13 @@ export default Plugin.define({
         const promptEvent = event as unknown as { sessionID: string; messageID: string; prompt: { text: string } }
         dispatch("prompt", (pipeline) => pipeline.handlePrompt(promptEvent.sessionID, promptEvent.messageID, promptEvent.prompt.text))
       })
-      disposers.push(() => promptReg.dispose())
+      disposers.push(() => { promptReg.dispose() })
     }
 
     // --- First election: the first instance to arrive builds and publishes the shared pipeline ---
-    if (pipelineGlobal.get() !== undefined) {
-      log(`pipeline owned by another realm (gen ${pipelineGlobal.get()!.generation}); observer instance`)
+    const existing = pipelineGlobal.get()
+    if (existing !== undefined) {
+      log(`pipeline owned by another realm (gen ${existing.generation}); observer instance`)
     } else {
       await elect("setup")
     }

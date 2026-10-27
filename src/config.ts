@@ -1,5 +1,5 @@
 /**
- * Config loading: ~/.config/opencode/ocg-obs.json (JSONC, comments allowed).
+ * @fileoverview Config loading: ~/.config/opencode/ocg-obs.json (JSONC, comments allowed).
  *
  * Three precedence levels (high → low), aligned with the OTEL env conventions of the
  * Claude Code monitoring-usage docs:

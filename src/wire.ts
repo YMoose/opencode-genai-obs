@@ -1,5 +1,5 @@
 /**
- * Wire body capture: hangs off opencode v2 session hooks and appends every raw LLM
+ * @fileoverview Wire body capture: hangs off opencode v2 session hooks and appends every raw LLM
  * request body as JSONL.
  *
  * Main path: experimental.ws.send (websocket transport, frame: string)
@@ -15,6 +15,12 @@ import { createWriteStream, mkdirSync, chmodSync, type WriteStream } from "node:
 import { join } from "node:path"
 import type { WireRecord, WireHookEvent } from "./types.js"
 import type { WireConfig } from "./config.js"
+
+// Per-session cap of pending frames (a normal turn has far fewer steps; guards abnormal paths)
+const PENDING_CAP = 8
+// Handle cap for long-lived processes: past the cap close the oldest stream (reopened
+// in append mode on that session's next write — no data lost)
+const MAX_OPEN_STREAMS = 64
 
 export interface WireRecorder {
   /** Handle a ws.send event (frame: string) */
@@ -44,8 +50,6 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     return slot
   }
 
-  const PENDING_CAP = 8 // per-session cap of pending frames (a normal turn has far fewer steps; guards abnormal paths)
-
   const stash = (sessionID: string, kind: string, frame: string, seq: number) => {
     const slot = pendingFor(sessionID)
     if (kind === "primary") {
@@ -70,16 +74,12 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   const streams = new Map<string, WriteStream>()
   let seq = 0
 
-  // Handle cap for long-lived processes: past the cap close the oldest stream (reopened
-  // in append mode on that session's next write — no data lost)
-  const MAX_OPEN_STREAMS = 64
-
   const streamFor = (sessionID: string): WriteStream => {
     let stream = streams.get(sessionID)
     if (stream) return stream
     const path = join(config.directory, `${sessionID}.jsonl`)
     stream = createWriteStream(path, { flags: "a", mode: 0o600 })
-    stream.on("error", (error) => log(`wire write error ${path}: ${error}`))
+    stream.on("error", (error) => { log(`wire write error ${path}: ${error}`) })
     streams.set(sessionID, stream)
     if (streams.size > MAX_OPEN_STREAMS) {
       const oldest = streams.keys().next().value
@@ -147,7 +147,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
             frame: body,
           })
         })
-        .catch((error) => log(`http.request body read error: ${error}`))
+        .catch((error) => { log(`http.request body read error: ${error}`) })
     },
 
     consumePending(sessionID) {

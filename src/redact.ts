@@ -1,5 +1,5 @@
 /**
- * Secret redaction: every log sink (file, stderr) goes through this function; callers
+ * @fileoverview Secret redaction: every log sink (file, stderr) goes through this function; callers
  * cannot bypass it. Shape-based rules, not an adversarial guarantee — the goal is to
  * keep tokens from leaking via previews/error messages.
  * Adapted from oh-my-opencode-slim src/utils/redact.ts.
