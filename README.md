@@ -1,12 +1,14 @@
 # opencode-genai-obs
 
-OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出到任意 OTLP/HTTP 兼容后端（OTel Collector / Phoenix / SigNoz / Jaeger …）。只对齐语义约定（OTel GenAI semconv + OpenInference），不绑定特定观测平台。
+<b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 
-> **当前状态：运行中**。wire body 采集（Phase 1）+ 实时 OTLP tracing（Phase 2）已上线实测。**插件只做实时**；历史/崩溃数据补灌走 `obsystem/otel-span-exportor` 的离线链路（export → adapter → send，与插件幂等 id 一致）。
+OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, exporting to any OTLP/HTTP-compatible backend (OTel Collector / Phoenix / SigNoz / Jaeger …). It aligns with semantic conventions only (OTel GenAI semconv + OpenInference) and is not tied to any specific observability platform.
 
-## 安装
+> **Status: running in production.** Wire body capture (Phase 1) and real-time OTLP tracing (Phase 2) are live and battle-tested. **The plugin handles real-time only**; historical/crash backfill goes through the offline lane in `obsystem/otel-span-exportor` (export → adapter → send, sharing the plugin's idempotent id scheme).
 
-在 `~/.config/opencode/opencode.json` 的 `plugin` 数组里加本仓库的绝对路径：
+## Installation
+
+Add this repository's absolute path to the `plugin` array in `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -14,68 +16,68 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 }
 ```
 
-重启 opencode。
+Restart opencode.
 
-## 功能：实时 OTLP tracing（Phase 2）
+## Feature: Real-time OTLP tracing (Phase 2)
 
-默认开启：session 事件流 → OTel GenAI semconv span → OTLP/HTTP 后端（protobuf）。一轮对话 = 一条 trace（轮根 span = 用户消息摘要），chat span（LLM 调用，带完整 wire body）/ execute_tool span 秒级实时可见。子 agent 会话整棵挂进调用它的 tool span。
+On by default: session event stream → OTel GenAI semconv spans → OTLP/HTTP backend (protobuf). One conversation turn = one trace (the root span carries the user-message summary); chat spans (LLM calls, with the full wire body) and `execute_tool` spans show up within seconds. Sub-agent sessions attach as a subtree under the tool span that spawned them.
 
 ```jsonc
 {
   "tracing": {
-    "enabled": true,                    // 默认 true
-    "endpoint": "http://localhost:4318",// 任意 OTLP/HTTP 后端；4318 = OTLP 标准端口
-                                        // （Phoenix 用户配 http://localhost:6006）
-    "project": "opencode",              // openinference.project.name resource 属性
-    "headers": {},                      // 附加请求头（认证），/v1/traces 与 /v1/session_annotations 共用
-    "content": true,                    // 粗开关：false → toolDetails / toolContent 默认关
-    "contentGates": {                   // 细粒度门（均可单独覆盖，对齐 Claude Code OTEL_LOG_* 语义）
-      "userPrompts": true,              //   轮根 span input.value（用户消息）
-      "assistantResponses": true,       //   轮根 output.value、chat output.value、gen_ai.output.messages、reasoning
-      "toolDetails": true,              //   tool call arguments（默认跟随 content）
-      "toolContent": true,              //   tool call result（默认跟随 content）
-      "wireBody": true                  //   wire body 进 chat span input.value（false = 只落盘 JSONL）
+    "enabled": true,                    // default true
+    "endpoint": "http://localhost:4318",// any OTLP/HTTP backend; 4318 = standard OTLP port
+                                        // (Phoenix users: http://localhost:6006)
+    "project": "opencode",              // openinference.project.name resource attribute
+    "headers": {},                      // extra request headers (auth), shared by /v1/traces and /v1/session_annotations
+    "content": true,                    // coarse switch: false → toolDetails / toolContent default off
+    "contentGates": {                   // fine-grained gates (each overridable, mirrors Claude Code OTEL_LOG_* semantics)
+      "userPrompts": true,              //   root-span input.value (user message)
+      "assistantResponses": true,       //   root output.value, chat output.value, gen_ai.output.messages, reasoning
+      "toolDetails": true,              //   tool call arguments (defaults to follow content)
+      "toolContent": true,              //   tool call result (defaults to follow content)
+      "wireBody": true                  //   wire body into chat-span input.value (false = JSONL only)
     },
-    "contentMaxLength": 0,              // 内容类属性最大字符数，0 = 不截断；
-                                        // 截断追加 [TRUNCATED] 标记并补 *_original_length 属性
-    "resourceAttributes": {},           // 并入 OTLP resource 块（host.name / team.* 等；内置键不覆盖）
-    "annotations": { "enabled": true }  // session project/title 实时列（走 Phoenix 兼容后端的
-                                        // /v1/session_annotations，非 OTLP 标准；其他后端建议关闭）
+    "contentMaxLength": 0,              // max chars for content attributes, 0 = no truncation;
+                                        // truncation appends an [TRUNCATED] marker plus *_original_length attributes
+    "resourceAttributes": {},           // merged into the OTLP resource block (host.name / team.*; builtin keys win)
+    "annotations": { "enabled": true }  // real-time session project/title columns (Phoenix-compatible
+                                        // /v1/session_annotations, not an OTLP standard; disable for other backends)
   },
-  "wire": { "enabled": true }           // wire body 落盘 + 喂进 chat span input.value
+  "wire": { "enabled": true }           // wire body to disk + into chat-span input.value
 }
 ```
 
-### 环境变量（覆盖配置文件，对齐标准 OTEL 惯例）
+### Environment variables (override the config file, standard OTEL conventions)
 
-组织级统一部署可以不改每人配置，直接 shell env 驱动：
+For organization-wide rollout, drive everything via shell env — no per-user config edits:
 
-| 环境变量 | 作用 |
+| Variable | Effect |
 |---|---|
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回落 `OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`；`/v1/traces` 尾路径自动剥掉 |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`；traces 专用优先） |
-| `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（同格式） |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint`; a trailing `/v1/traces` path is stripped automatically |
+| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`; traces-specific wins) |
+| `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (same format) |
 
-优先级：**env > 配置文件 > 默认**（同 Claude Code monitoring-usage 文档惯例）。
-配置文件查找：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`。
+Precedence: **env > config file > defaults** (same convention as the Claude Code monitoring-usage docs).
+Config file lookup: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`.
 
-配置校验：所有字段做类型检查，类型不匹配（如 `"false"` 字符串）**告警并回落默认值**，不按 JS 真值性静默生效；根级与 `wire` / `tracing` / `contentGates` 层的未知 key（拼写错误）同样告警。告警见日志。
+Config validation: every field is type-checked; a mismatch (e.g. the string `"false"`) **warns and falls back to the default** instead of silently passing through JS truthiness. Unknown keys (typos) are reported at the root, `wire`, `tracing`, and `contentGates` levels. Warnings go to the log.
 
-行为要点：
+Behavior notes:
 
-- `tracing.enabled: false` + `wire.enabled: true` = **wire-only 模式**：只落 JSONL，不订阅事件流，任何数据不离开本进程
-- 默认 endpoint 为 OTLP 标准端口 `http://localhost:4318`；此前默认 Phoenix 端口 `6006`，依赖默认值的 Phoenix 部署需显式配置 endpoint（**迁移提示**）
-- 不发送任何后端专属请求头；project 语义统一走 `openinference.project.name` resource 属性
-- `tracing.annotations.enabled: false` 可关闭 Phoenix 兼容后端专属的 session annotation（非 Phoenix 后端建议关闭，避免 404 重试噪音）
-- OTLP POST 与 session annotation 请求带 30s 超时，对端挂死不会卡住发送队列/插件卸载
-- `session.deleted` 事件触发该会话全部内存状态清理（长驻进程防泄漏）
-- 插件热重载若先卸旧 owner，存活实例的 hook 回调会自动触发 pipeline 补选，采集不中断
+- `tracing.enabled: false` + `wire.enabled: true` = **wire-only mode**: JSONL capture only, no event-stream subscription, nothing leaves the process
+- The default endpoint is the standard OTLP port `http://localhost:4318`; it previously defaulted to the Phoenix port `6006` — Phoenix deployments relying on the default must now set the endpoint explicitly (**migration note**)
+- No backend-specific request headers are sent; the project semantic goes exclusively through the `openinference.project.name` resource attribute
+- `tracing.annotations.enabled: false` turns off the Phoenix-compatible session annotations (recommended for non-Phoenix backends to avoid 404-retry noise)
+- OTLP POSTs and annotation requests carry a 30s timeout; a hung backend can no longer stall the send queue or plugin unload
+- `session.deleted` events clean up all in-memory state for that session (leak protection for long-lived processes)
+- If a hot reload unloads the old pipeline owner first, surviving instances' hook callbacks re-elect a new owner automatically — capture keeps running
 
-## 功能：wire body 采集
+## Feature: Wire body capture
 
-每次发往 LLM 的原始请求体（完整 system prompt + 裁剪后 messages + tools schema + 采样参数 + provider 专属 options）落盘成 JSONL。
+Every raw request body sent to the LLM (full system prompt + trimmed messages + tools schema + sampling params + provider-specific options) is appended to a JSONL file.
 
-**默认关闭**。开启：创建 `~/.config/opencode/ocg-obs.json`：
+**Off by default.** To enable, create `~/.config/opencode/ocg-obs.json`:
 
 ```json
 {
@@ -85,7 +87,7 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 }
 ```
 
-落盘位置：`~/.local/share/opencode/raw-requests/<sessionID>.jsonl`，每行一条记录：
+Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record per line:
 
 ```json
 {
@@ -101,72 +103,81 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 }
 ```
 
-- `hook`：从哪个 hook 拿到的（`ws.send` 是主路径，`http.request` 是兜底）
-- `kind`：`primary` | `compaction` | `title` | `generate`（opencode 自带的请求分类）
-- `frame`：完整 wire body（ws 是 frame 字符串，http 是 request body 文本）
-- `seq`：进程级单调递增序号
+- `hook`: which hook captured it (`ws.send` is the main path, `http.request` is the fallback)
+- `kind`: `primary` | `compaction` | `title` | `generate` (opencode's own request classification)
+- `frame`: the full wire body (frame string for ws, request-body text for http)
+- `seq`: process-wide monotonically increasing sequence number
 
-**隐私**：body 里有完整 system prompt + 历史 + tools。文件权限 0600，不入 git，不外传。不用了删文件即可。
+**Privacy**: bodies contain the full system prompt + history + tools. Files are mode 0600, never committed to git, never sent anywhere. Delete the files when you no longer need them.
 
-## 路线图
+## Roadmap / TODO
 
-- [x] **Phase 1**：wire body 采集（v2 `experimental.ws.send` + `http.request` hook → JSONL）
-      ✅ 2026-10-27 实测通过：frame 为 provider 原生 JSON（system/messages/tools/max_tokens/thinking），
-      volces/kimi-k3 走 `http.request` 路径（dúan hook 双挂是必要的），
-      compaction 请求同样被捕获，多实例加载未见重复写入。
-      注意体积：单条 primary frame 约 1.4MB（336 messages + 21 tools），磁盘增长快。
-- [x] **Phase 2**：事件驱动 span builder（`session.step.*` / `session.tool.*` 事件 → OTel GenAI span，实时发 Phoenix）
-      ✅ 2026-10-27 实测通过：chat/tool span 秒级入 Phoenix；wire 帧精确进 `input.value`（OpenInference）；
-      轮根 span 押后至 execution 结束；subagent 挂接点按 metadata.sessionID 注册。
-      关键障碍记备：opencode 为每 location 加载独立 module realm（实测 3/进程），
-      hook 按 location 派发、事件订阅每实例一条 → 用 globalThis pipeline 单例化解。
-- [ ] ~~**Phase 3**：启动重放（从 storage 全量投影，崩溃/漏事件兜底）~~ **砍掉**（2026-10-27 拍板）：
-      插件只做实时。崩溃补根/历史补灌/重灌由 `obsystem/otel-span-exportor` 官方离线链路承接
-      （id 算法与 `src/spans.ts` 逐字节一致 → Phoenix `DO_NOTHING` 幂等去重）。
-      理由：四场景都不是实时需求，且自动重放是危险的默认副作用。详见设计文档 §3。
-- [x] **Phase 2.5**：实时 session annotation（`session.created`/`session.renamed` →
-      POST `/v1/session_annotations`，Phoenix 兼容后端 Sessions 页 project/title 列秒级更新；
-      subagent 会话跳过，3 次重试 + 离线 sync.py 兜底；现由 `tracing.annotations.enabled`
-      控制，非 Phoenix 后端可关）✅ 2026-10-27 实测通过
-- [ ] ~~**Phase 5**：替代 `obsystem/otel-span-exportor` 全套脚本链路~~ **砍掉**：
-      该链路升级为官方离线 repair/backfill 通道，与插件并存（见 Phase 3 说明）
-- [ ] **TODO（未来方向，非承诺）**：OTLP **metrics + logs/events**（参照 Claude Code
-      monitoring-usage 同文档的 metrics/logs 节；**当前重心仍是 traces，此项不影响 tracing 路径**）
-      - metrics 候选（数据源 = 现有 session 事件流，零新增采集）：
-        `opencode.session.count`（created）、`opencode.llm.tokens{model,direction}`（step.ended）、
-        `opencode.cost.usd`（step.ended cost）、`opencode.tool.calls{tool,status}`（tool.success/failed）、
-        turn/tool duration histogram；发送走 OTLP/HTTP JSON（Phoenix 不收 metrics，
-        目标后端 SigNoz / OTLP collector → Prometheus）
-      - logs/events 候选：`user_prompt` / `tool_result` / `step_failed` 事件，
-        复用 contentGates 做内容门；走 OTLP logs 协议
-      - 配置沿用现有 OTEL env 惯例（`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` /
-        `_LOGS_ENDPOINT` 分路），tracing 不升级 gRPC
-- [ ] **TODO（未来方向，非承诺）**：**后端专属能力扩展点（注册/回调机制）** —— 把
-      Phoenix 类后端独有字段的获取与写入（现 `annotations.ts` 的 session
-      project/title）从核心链路抽象成可注册的扩展点，核心只实现语义（OTel
-      GenAI semconv + OpenInference），平台专属行为全部走扩展：
-      - 回调注册 API：如 `onSessionCreated` / `onTurnEnded` / `onSpanEmitted`，
-        现有 Phoenix annotation 降级为第一个内置扩展（`tracing.annotations.*`
-        配置保持兼容），第三方可注册自己的后端适配器
-      - 用户自定义入口：配置文件声明扩展模块路径（对齐 opencode 插件目录加载
-        惯例）或编程式注册；扩展内可拿到 endpoint/headers/project 配置与
-        contentGates 内容门
-      - 约束：扩展回调一律 fire-and-forget + 超时保护（同 annotation 现状），
-        不得阻塞 span 主路径；扩展故障只告警不影响 tracing
+- [x] **Phase 1**: wire body capture (v2 `experimental.ws.send` + `http.request` hooks → JSONL)
+      ✅ Verified in production 2026-10-27: frames are provider-native JSON
+      (system/messages/tools/max_tokens/thinking); volces/kimi-k3 goes through the
+      `http.request` path (registering both hooks is required); compaction requests are
+      captured as well; no duplicate writes observed with multi-instance loading.
+      Size note: a single primary frame is ~1.4MB (336 messages + 21 tools) — disk grows fast.
+- [x] **Phase 2**: event-driven span builder (`session.step.*` / `session.tool.*` events →
+      OTel GenAI spans, exported in real time)
+      ✅ Verified in production 2026-10-27: chat/tool spans land within seconds; wire frames
+      flow precisely into `input.value` (OpenInference); the turn root span is held back until
+      execution ends; sub-agent attachment points register via metadata.sessionID.
+      Key obstacle on record: opencode loads an isolated module realm per location (observed
+      3 per process); hooks dispatch per location and each instance gets its own event
+      subscription → resolved via a globalThis pipeline singleton.
+- [ ] ~~**Phase 3**: startup replay (full projection from storage, as a crash/missed-event
+      backstop)~~ **Dropped** (decided 2026-10-27): the plugin handles real-time only.
+      Crash repair / historical backfill / re-ingestion belongs to the official offline lane
+      in `obsystem/otel-span-exportor` (its id algorithm is byte-identical to `src/spans.ts`
+      → idempotent dedup via Phoenix-style `DO_NOTHING` upserts).
+      Rationale: none of the four scenarios is a real-time need, and automatic replay is a
+      dangerous default side effect. See the design doc §3.
+- [x] **Phase 2.5**: real-time session annotations (`session.created`/`session.renamed` →
+      POST `/v1/session_annotations`; project/title columns update within seconds on
+      Phoenix-compatible backends; sub-agent sessions are skipped; 3 retries with the
+      offline sync.py as backstop; now controlled by `tracing.annotations.enabled` and can
+      be turned off for non-Phoenix backends) ✅ Verified 2026-10-27
+- [ ] ~~**Phase 5**: replace the full `obsystem/otel-span-exportor` script chain~~ **Dropped**:
+      that chain has been promoted to the official offline repair/backfill lane and coexists
+      with the plugin (see the Phase 3 note)
+- [ ] **TODO (future direction, not a commitment)**: OTLP **metrics + logs/events** (following
+      the metrics/logs sections of the same Claude Code monitoring-usage doc; **traces remain
+      the current focus — this does not affect the tracing path**)
+      - Metric candidates (data source = the existing session event stream, zero new capture):
+        `opencode.session.count` (created), `opencode.llm.tokens{model,direction}` (step.ended),
+        `opencode.cost.usd` (step.ended cost), `opencode.tool.calls{tool,status}`
+        (tool.success/failed), turn/tool duration histograms; export via OTLP/HTTP JSON
+        (Phoenix does not ingest metrics; target backends are SigNoz / OTel collector → Prometheus)
+      - Logs/events candidates: `user_prompt` / `tool_result` / `step_failed` events, reusing
+        contentGates as the content gate; via the OTLP logs protocol
+      - Configuration follows the existing OTEL env conventions (separate
+        `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` / `_LOGS_ENDPOINT` routes); tracing stays on HTTP, no gRPC
+- [ ] **TODO (future direction, not a commitment)**: **Backend-specific capability extension
+      points (registration/callback mechanism)** — abstract the acquisition and writing of
+      backend-exclusive fields (currently `annotations.ts`'s session project/title) out of the
+      core path into registrable extension points. The core implements semantics only
+      (OTel GenAI semconv + OpenInference); all platform-specific behavior moves to extensions:
+      - Callback registration API: e.g. `onSessionCreated` / `onTurnEnded` / `onSpanEmitted`;
+        the existing Phoenix annotation becomes the first built-in extension (the
+        `tracing.annotations.*` config stays compatible), and third parties can register
+        their own backend adapters
+      - User-defined entry points: declare extension module paths in the config file (aligned
+        with opencode's plugin directory-loading convention) or register programmatically;
+        extensions receive the endpoint/headers/project config and the contentGates content gate
+      - Constraints: extension callbacks are always fire-and-forget with timeout protection
+        (as annotations are today), must never block the span hot path; extension failures
+        only warn and never affect tracing
 
-设计文档：`../obsystem/otel-span-exportor/MERGED-PLUGIN.md`  
-调研：`../obsystem/otel-span-exportor/RESEARCH.md`
+Design doc: `../obsystem/otel-span-exportor/MERGED-PLUGIN.md`  
+Research: `../obsystem/otel-span-exportor/RESEARCH.md`
 
-## 开发
+## Development
 
 ```bash
-npm run build      # 编译 src/ → dist/
-npm run typecheck  # 类型检查
-npm test           # 编译并跑 node:test 测试套件（tests/ → dist-test/）
+npm run build      # compile src/ → dist/
+npm run typecheck  # type check
+npm test           # compile and run the node:test suite (tests/ → dist-test/)
 ```
 
-测试覆盖：span 状态机（确定性 id、内容门、malformed 事件守卫、session 清理）、
-OTLP 编码/POST（超时、非 200）、发送队列（重试、丢弃）、annotation 重试、
-wire 落盘/刷盘、配置校验、脱敏与日志（参考 oh-my-opencode-slim 的测试模式），
-插件公共合同（禁用不触 ctx、幂等 unload、reload 重建、hook 注销对称），
-以及依赖契约（运行时依赖闭包最小化 + src import 图不越界）。
+Test coverage: the span state machine (deterministic ids, content gates, malformed-event guards, session cleanup), OTLP encoding/POST (timeout, non-200), the send queue (retry, dropping), annotation retries, wire capture/flush, config validation, redaction and logging (patterns adopted from oh-my-opencode-slim), plugin contracts (disabled setup never touches ctx, idempotent unload, reload re-establishment, symmetric hook deregistration), and a dependency contract (minimal runtime dependency closure + src import-graph boundary).
