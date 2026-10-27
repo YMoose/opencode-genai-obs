@@ -12,6 +12,10 @@
  *   success/failed → emit the tool span immediately
  * - text.ended → accumulate message text (chat-span output.value + the root turn's
  *   final-answer candidate)
+ * - compaction.started/ended/failed → one standalone trace per compaction run (a
+ *   self-contained LLM summarization job outside any turn; model/usage from ended)
+ * - retry.scheduled → stamped onto the session's NEXT chat span (the failed step's
+ *   span is already emitted by the time the retry is scheduled)
  * - execution.succeeded/failed/interrupted → finish: emit the turn root span (root
  *   session) or the invoke_agent container span (sub-agent session)
  * - Sub-agent attachment: the parent's tool.success registers an attachment point from
@@ -25,6 +29,8 @@
  *   chatSpanId   = sha256("opencode-chat:{assistantMessageID}")       first 8 bytes
  *   toolSpanId   = sha256("opencode-tool:{assistantMessageID}:{toolCallID}") first 8 bytes
  *   sessionSpanId= sha256("opencode-session:{childSessionID}")        first 8 bytes
+ *   compactionTrace = sha256("opencode-compaction:{sid}:{startedMs}")     first 16 bytes
+ *   compactionSpanId= sha256("opencode-compaction-span:{sid}:{startedMs}") first 8 bytes
  */
 
 import { createHash } from "node:crypto"
@@ -129,6 +135,14 @@ interface ToolState {
   readonly startedNano: bigint
 }
 
+/** One open compaction run (session.compaction.started → ended/failed) */
+interface CompactionState {
+  /** started-event timestamp (ms) — deterministic discriminator of the run */
+  readonly key: string
+  readonly reason: string
+  readonly startedNano: bigint
+}
+
 export interface SpanBuilderOptions {
   /** Fine-grained content gates (defaults in config.ts; mirrors Claude Code's OTEL_LOG_* three-gate semantics) */
   readonly gates: {
@@ -177,6 +191,10 @@ export function createSpanBuilder(
   const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint }>()
   /** Turn counters per root session */
   const turnCounters = new Map<string, number>()
+  /** Open compaction runs per session */
+  const compactions = new Map<string, CompactionState>()
+  /** Retry stamps per session: applied to the next chat span (step.failed emits before retry.scheduled arrives) */
+  const pendingRetries = new Map<string, { attempt: number; error?: { type?: string; message?: string } }>()
 
   const registerSession = (sid: string, info: SessionInfoLite): void => {
     sessions.set(sid, info)
@@ -198,6 +216,8 @@ export function createSpanBuilder(
     containers.delete(sid)
     turnCounters.delete(sid)
     pendingPrompts.delete(sid)
+    compactions.delete(sid)
+    pendingRetries.delete(sid)
   }
 
   const isChild = (sid: string): boolean => {
@@ -373,6 +393,36 @@ export function createSpanBuilder(
         return
       }
 
+      case "session.compaction.started": {
+        // One compaction = one trace: a self-contained LLM summarization job outside any turn
+        const state: CompactionState = {
+          key: String(event.created),
+          reason: typeof data.reason === "string" ? data.reason : "unknown",
+          startedNano: nano(event.created),
+        }
+        const previous = compactions.get(sid)
+        compactions.set(sid, state)
+        // Unterminated predecessor (started without ended/failed): flush it bare so the span is not lost
+        if (previous) emitCompactionSpan(sid, previous, {}, nano(event.created), false)
+        return
+      }
+
+      case "session.compaction.ended":
+      case "session.compaction.failed": {
+        const state = compactions.get(sid)
+        if (!state) return // ended/failed without a recorded start (e.g. plugin loaded mid-run)
+        compactions.delete(sid)
+        emitCompactionSpan(sid, state, data, nano(event.created), event.type === "session.compaction.failed")
+        return
+      }
+
+      case "session.retry.scheduled": {
+        const attempt = data.attempt
+        if (typeof attempt !== "number" || !Number.isFinite(attempt) || attempt <= 0) return // malformed guard
+        pendingRetries.set(sid, { attempt, error: data.error as { type?: string; message?: string } | undefined })
+        return
+      }
+
       case "session.step.ended":
       case "session.step.failed": {
         const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
@@ -487,6 +537,10 @@ export function createSpanBuilder(
     const texts = step?.texts ?? []
     const reasoning = step?.reasoning ?? []
     const wire = options.consumeWire(sid)
+    // retry.scheduled arrived after the failed span was emitted — stamp this (retrying) span instead
+    const retry = pendingRetries.get(sid)
+    if (retry) pendingRetries.delete(sid)
+    const retryError = retry?.error ? `${retry.error.type ?? "error"}: ${retry.error.message ?? ""}` : undefined
 
     const inputTokens = tokens ? tokens.input + tokens.cache.read + tokens.cache.write : undefined
     const outputTokens = tokens ? tokens.output + tokens.reasoning : undefined
@@ -540,6 +594,8 @@ export function createSpanBuilder(
         ["output.value_original_length", outputTrunc?.originalLength],
         ["opencode.message.id", assistantMessageID],
         ["opencode.agent", step?.agent],
+        ["opencode.retry.attempt", retry?.attempt],
+        ["opencode.retry.error", retryError],
         ["opencode.wire.seq", wireTrunc ? wire?.seq : undefined],
       ),
       status: error ? { code: 2, message: `${error.type ?? "error"}: ${error.message ?? "step failed"}` } : { code: 1 },
@@ -618,6 +674,64 @@ export function createSpanBuilder(
     })
   }
 
+  /**
+   * Compaction run → one standalone trace. `ended` carries model/native/text/cost/tokens,
+   * `failed` carries error/cost/tokens (opencode session.compaction.* schema); both are
+   * read defensively, so an unterminated flush (empty data) still emits a bare span.
+   */
+  const emitCompactionSpan = (
+    sid: string,
+    state: CompactionState,
+    data: Record<string, unknown>,
+    endNano: bigint,
+    failed: boolean,
+  ) => {
+    const model = (data.model ?? {}) as { id?: string; providerID?: string }
+    const tokens = data.tokens as TokenUsage | undefined
+    const cost = data.cost as number | undefined
+    const error = data.error as { type?: string; message?: string } | undefined
+    const inputTokens = tokens ? tokens.input + tokens.cache.read + tokens.cache.write : undefined
+    const outputTokens = tokens ? tokens.output + tokens.reasoning : undefined
+    const summaryTrunc =
+      options.gates.assistantResponses && typeof data.text === "string" ? truncate(data.text, options.contentMaxLength) : undefined
+
+    emit({
+      traceId: hash(`opencode-compaction:${sid}:${state.key}`, 16),
+      spanId: hash(`opencode-compaction-span:${sid}:${state.key}`, 8),
+      name: "compaction",
+      kind: KIND_CLIENT,
+      startTimeUnixNano: state.startedNano,
+      endTimeUnixNano: endNano,
+      attributes: attrs(
+        ["gen_ai.operation.name", "compaction"],
+        ["gen_ai.provider.name", model.providerID],
+        ["gen_ai.request.model", model.id],
+        ["gen_ai.response.model", model.id],
+        ["gen_ai.conversation.id", sid],
+        ["opencode.compaction.reason", state.reason],
+        ["opencode.compaction.native", data.native as boolean | undefined],
+        ["gen_ai.usage.input_tokens", inputTokens],
+        ["gen_ai.usage.output_tokens", outputTokens],
+        ["gen_ai.usage.reasoning.output_tokens", tokens?.reasoning],
+        ["gen_ai.usage.cache_read.input_tokens", tokens?.cache.read],
+        ["gen_ai.usage.cache_write.input_tokens", tokens?.cache.write],
+        ["opencode.cost.usd", cost],
+        // OpenInference mirrors (same set as chat spans)
+        ["openinference.span.kind", "LLM"],
+        ["llm.model_name", model.id],
+        ["llm.token_count.prompt", inputTokens],
+        ["llm.token_count.completion", outputTokens],
+        ["llm.token_count.total", tokens ? totalTokens(tokens) : undefined],
+        ["llm.total_cost", cost],
+        ["output.value", summaryTrunc?.value],
+        ["output.value_original_length", summaryTrunc?.originalLength],
+        ["session.id", sid],
+        ["opencode.session.id", sid],
+      ),
+      status: failed ? { code: 2, message: `${error?.type ?? "error"}: ${error?.message ?? "compaction failed"}` } : { code: 1 },
+    })
+  }
+
   /** Sub-agent session close: emit the invoke_agent container span */
   const flushContainer = async (sid: string, endNano: bigint, error?: { type?: string; message?: string }) => {
     const container = containers.get(sid)
@@ -660,6 +774,7 @@ export function createSpanBuilder(
       const now = nano(Date.now())
       for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now)
       for (const sid of [...containers.keys()]) await flushContainer(sid, now)
+      for (const [sid, state] of [...compactions]) emitCompactionSpan(sid, state, {}, now, false)
     },
     emit,
   }

@@ -20,7 +20,7 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 
 ## 功能：实时 OTLP tracing（Phase 2）
 
-默认开启：session 事件流 → OTel GenAI semconv span → OTLP/HTTP 后端（protobuf）。一轮对话 = 一条 trace（轮根 span = 用户消息摘要），chat span（LLM 调用，带完整 wire body）/ execute_tool span 秒级实时可见。子 agent 会话整棵挂进调用它的 tool span。
+默认开启：session 事件流 → OTel GenAI semconv span → OTLP/HTTP 后端（protobuf）。一轮对话 = 一条 trace（轮根 span = 用户消息摘要），chat span（LLM 调用，带完整 wire body）/ execute_tool span 秒级实时可见。子 agent 会话整棵挂进调用它的 tool span。每次 compaction 独立成一条 trace（model/usage/cost/摘要走 `assistantResponses` 门控）；重试则盖章到重试那次尝试的 chat span 上（`opencode.retry.attempt` / `opencode.retry.error`）。
 
 ```jsonc
 {

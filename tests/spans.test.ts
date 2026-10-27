@@ -173,3 +173,136 @@ test("content 门：content=false 时 toolDetails/toolContent 默认关", async 
   assert.ok(!keys.has("gen_ai.tool.call.arguments"), "toolDetails=false 时不应带调用参数")
   assert.ok(!keys.has("gen_ai.tool.call.result"), "toolContent=false 时不应带工具结果")
 })
+
+// ------------------------------------------------------------------ compaction（#35935 对齐）
+
+test("compaction：started→ended 独立成 trace，model/usage/cost/摘要齐备", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
+  builder.handleEvent(
+    event("session.compaction.ended", 3_000, {
+      sessionID: "s1",
+      reason: "auto",
+      model: { id: "kimi", providerID: "volces" },
+      native: false,
+      text: "summary of the conversation",
+      cost: 0.02,
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 10, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const compaction = spans.find((span) => span.name === "compaction")
+  assert.ok(compaction, "应发出 compaction span")
+  assert.strictEqual(compaction.traceId, hash("opencode-compaction:s1:2000", 16), "确定性 trace id")
+  assert.strictEqual(compaction.spanId, hash("opencode-compaction-span:s1:2000", 8), "确定性 span id")
+  assert.notStrictEqual(compaction.traceId, hash("opencode-turn:s1:m1", 16), "不得挂进 turn trace")
+  const attr = (name: string) => compaction.attributes.find(([key]) => key === name)?.[1]
+  assert.equal(attr("gen_ai.operation.name"), "compaction")
+  assert.equal(attr("gen_ai.request.model"), "kimi")
+  assert.equal(attr("opencode.compaction.reason"), "auto")
+  assert.equal(attr("opencode.compaction.native"), false)
+  assert.equal(attr("gen_ai.usage.input_tokens"), 110, "input 含 cache.read")
+  assert.equal(attr("gen_ai.usage.output_tokens"), 50)
+  assert.equal(attr("llm.token_count.total"), 160)
+  assert.equal(attr("opencode.cost.usd"), 0.02)
+  assert.equal(attr("output.value"), "summary of the conversation", "摘要进 output.value")
+  assert.equal(attr("openinference.span.kind"), "LLM")
+  assert.equal(compaction.status.code, 1)
+})
+
+test("compaction failed：status=2 且带错误信息", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "manual" }))
+  builder.handleEvent(
+    event("session.compaction.failed", 2_500, {
+      sessionID: "s1",
+      reason: "manual",
+      error: { type: "provider_error", message: "boom" },
+      cost: 0,
+      tokens: { input: 1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const compaction = spans.find((span) => span.name === "compaction")
+  assert.ok(compaction)
+  assert.equal(compaction.status.code, 2)
+  assert.ok(String(compaction.status.message).includes("boom"), "错误信息进 status")
+})
+
+test("compaction：assistantResponses=false 时摘要不落 span；ended 无 started 则忽略", async () => {
+  const gated = makeHarness({ gates: { ...GATES, assistantResponses: false } })
+  gated.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  gated.builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
+  gated.builder.handleEvent(
+    event("session.compaction.ended", 3_000, { sessionID: "s1", reason: "auto", model: { id: "m", providerID: "p" }, text: "secret summary" }),
+  )
+  await settle()
+  const keys = new Set(gated.spans.find((span) => span.name === "compaction")?.attributes.map(([key]) => key))
+  assert.ok(!keys.has("output.value"), "门控关闭时摘要不得落 span")
+
+  const orphan = makeHarness()
+  orphan.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  orphan.builder.handleEvent(event("session.compaction.ended", 3_000, { sessionID: "s1", reason: "auto" }))
+  await settle()
+  assert.ok(!orphan.spans.some((span) => span.name === "compaction"), "没有 started 的 ended 不应发 span")
+})
+
+test("compaction：started 后未结束，flushAll 兜底发出裸 span", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
+  await builder.flushAll()
+  const compaction = spans.find((span) => span.name === "compaction")
+  assert.ok(compaction, "flushAll 应兜底发出未完结的 compaction")
+  assert.equal(compaction.attributes.find(([key]) => key === "opencode.compaction.reason")?.[1], "auto")
+})
+
+// ------------------------------------------------------------------ retry（#35935 对齐）
+
+test("retry：scheduled 盖章到下一次尝试的 chat span，且只盖一次", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.failed", 1_200, { sessionID: "s1", assistantMessageID: "a1", error: { type: "rate_limit", message: "429" } }))
+  builder.handleEvent(
+    event("session.retry.scheduled", 1_250, { sessionID: "s1", assistantMessageID: "a1", attempt: 2, at: 1_300, error: { type: "rate_limit", message: "429" } }),
+  )
+  builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s1", assistantMessageID: "a2", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "s1", assistantMessageID: "a2" }))
+  builder.handleEvent(event("session.step.started", 1_500, { sessionID: "s1", assistantMessageID: "a3", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_600, { sessionID: "s1", assistantMessageID: "a3" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_700, { sessionID: "s1" }))
+  await settle()
+
+  const first = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
+  const second = spans.find((span) => span.spanId === hash("opencode-chat:a2", 8))
+  const third = spans.find((span) => span.spanId === hash("opencode-chat:a3", 8))
+  assert.ok(first && second && third)
+  assert.ok(!first.attributes.some(([key]) => key === "opencode.retry.attempt"), "失败当次的 span 已发出，不可能回填")
+  assert.equal(second.attributes.find(([key]) => key === "opencode.retry.attempt")?.[1], 2, "重试尝试号应盖在重试 span 上")
+  assert.ok(String(second.attributes.find(([key]) => key === "opencode.retry.error")?.[1]).includes("429"))
+  assert.ok(!third.attributes.some(([key]) => key === "opencode.retry.attempt"), "盖章一次性消费，不得泄漏到后续 span")
+})
+
+test("retry：attempt 非法（字符串/缺失/≤0）静默忽略", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.retry.scheduled", 1_100, { sessionID: "s1", attempt: "two" }))
+  builder.handleEvent(event("session.retry.scheduled", 1_110, { sessionID: "s1", attempt: 0 }))
+  builder.handleEvent(event("session.retry.scheduled", 1_120, { sessionID: "s1" }))
+  builder.handleEvent(event("session.step.started", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1" }))
+  await settle()
+  const chat = spans.find((span) => span.name === "chat unknown")
+  assert.ok(chat)
+  assert.ok(!chat.attributes.some(([key]) => key === "opencode.retry.attempt"), "非法 attempt 不得盖章")
+})

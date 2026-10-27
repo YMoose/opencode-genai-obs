@@ -20,7 +20,7 @@ Restart opencode.
 
 ## Feature: Real-time OTLP tracing (Phase 2)
 
-On by default: session event stream → OTel GenAI semconv spans → OTLP/HTTP backend (protobuf). One conversation turn = one trace (the root span carries the user-message summary); chat spans (LLM calls, with the full wire body) and `execute_tool` spans show up within seconds. Sub-agent sessions attach as a subtree under the tool span that spawned them.
+On by default: session event stream → OTel GenAI semconv spans → OTLP/HTTP backend (protobuf). One conversation turn = one trace (the root span carries the user-message summary); chat spans (LLM calls, with the full wire body) and `execute_tool` spans show up within seconds. Sub-agent sessions attach as a subtree under the tool span that spawned them. Each compaction run lands as its own trace (model, usage, cost, summary behind the `assistantResponses` gate), and retry attempts are stamped onto the retried chat span (`opencode.retry.attempt` / `opencode.retry.error`).
 
 ```jsonc
 {
@@ -138,6 +138,15 @@ Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record p
       Phoenix-compatible backends; sub-agent sessions are skipped; 3 retries with the
       offline sync.py as backstop; now controlled by `tracing.annotations.enabled` and can
       be turned off for non-Phoenix backends) ✅ Verified 2026-10-27
+- [x] **Phase 2.6**: compaction & retry coverage (opencode [#35935](https://github.com/anomalyco/opencode/pull/35935) parity)
+      ✅ `session.compaction.started/ended/failed` → one standalone trace per run
+      (`gen_ai.operation.name=compaction`, model, `gen_ai.usage.*`, `opencode.cost.usd`,
+      summary text behind the `assistantResponses` gate; failed → error status;
+      unterminated runs are flushed bare on unload). `session.retry.scheduled` →
+      `opencode.retry.attempt`/`opencode.retry.error` stamped onto the session's *next*
+      chat span (the failed step's span is already emitted by the time the retry is
+      scheduled); the stamp is consumed once. Deterministic ids:
+      `opencode-compaction:{sid}:{startedMs}` (2026-10-27)
 - [ ] ~~**Phase 5**: replace the full `obsystem/otel-span-exportor` script chain~~ **Dropped**:
       that chain has been promoted to the official offline repair/backfill lane and coexists
       with the plugin (see the Phase 3 note)
