@@ -52,9 +52,10 @@ function attrs(...pairs: ReadonlyArray<readonly [string, AttrValue | null | unde
   return out
 }
 
-function preview(text: string | null | undefined): string {
+/** 40 字符预览；空输入返回 undefined（让调用方走 title/key 回退） */
+function preview(text: string | null | undefined): string | undefined {
   const flat = (text ?? "").split(/\s+/).join(" ")
-  if (!flat) return "(empty)"
+  if (!flat) return undefined
   return flat.length > 40 ? flat.slice(0, 40) + "…" : flat
 }
 
@@ -110,7 +111,7 @@ interface StepState {
 
 interface ToolState {
   readonly callId: string
-  readonly assistantMessageID: string
+  readonly assistantMessageID: string | undefined
   name?: string
   input?: Record<string, unknown>
   readonly startedNano: bigint
@@ -165,6 +166,31 @@ export function createSpanBuilder(
   /** root 会话 turn 序号 */
   const turnCounters = new Map<string, number>()
 
+  // 会话注册表上限：长驻进程里会话数无界，超了逐出最旧的（Map 迭代序 = 插入序）
+  const MAX_SESSIONS = 2048
+
+  const registerSession = (sid: string, info: SessionInfoLite): void => {
+    sessions.set(sid, info)
+    if (sessions.size > MAX_SESSIONS) {
+      const oldest = sessions.keys().next().value
+      if (oldest !== undefined && oldest !== sid) {
+        sessions.delete(oldest)
+        log("session registry cap reached, evicted oldest", { sessionID: oldest })
+      }
+    }
+  }
+
+  /** session.deleted：补发未收尾的轮根，然后清掉该会话全部注册表项（防无界增长） */
+  const dropSession = (sid: string, nowNano: bigint): void => {
+    void flushTurnRoot(sid, nowNano) // 内部无轮则 no-op
+    openTurns.delete(sid)
+    sessions.delete(sid)
+    links.delete(sid)
+    containers.delete(sid)
+    turnCounters.delete(sid)
+    pendingPrompts.delete(sid)
+  }
+
   const isChild = (sid: string): boolean => {
     const link = links.get(sid)
     if (link) return true
@@ -211,7 +237,7 @@ export function createSpanBuilder(
     const span: SpanRecord = {
       traceId: turn.traceId,
       spanId: turn.spanId,
-      name: preview(turn.inputText) || merged.title || turn.key,
+      name: preview(turn.inputText) ?? merged.title ?? turn.key ?? "(empty)",
       kind: KIND_CLIENT,
       startTimeUnixNano: turn.startedNano,
       endTimeUnixNano: endNano > turn.startedNano ? endNano : turn.lastEndNano,
@@ -262,11 +288,16 @@ export function createSpanBuilder(
 
     switch (event.type) {
       case "session.created": {
-        sessions.set(sid, {
+        registerSession(sid, {
           parentID: data.parentID as string | undefined,
           agent: data.agent as string | undefined,
         })
         if (links.has(sid)) ensureContainer(sid, nano(event.created))
+        return
+      }
+
+      case "session.deleted": {
+        dropSession(sid, nano(event.created))
         return
       }
 
@@ -280,6 +311,8 @@ export function createSpanBuilder(
         // 首个 step 时按 prompt 暂存开 turn（此刻 session.created 已知，分类可靠）
         if (isChild(sid)) {
           pendingPrompts.delete(sid) // subagent 的 prompt 暂存不消费则丢弃
+          // 子会话容器可能在上一轮 execution 收尾时已 flush，这里按需重建
+          ensureContainer(sid, nano((data.started as number) ?? event.created))
         } else {
           const pending = pendingPrompts.get(sid)
           if (pending) {
@@ -295,7 +328,8 @@ export function createSpanBuilder(
             openTurn(sid, `auto:${event.created}`, "(auto)", event.created, data.agent as string | undefined)
           }
         }
-        const assistantMessageID = data.assistantMessageID as string
+        const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
+        if (!assistantMessageID) return // malformed 事件：不建 step（否则以 "undefined" 为 key 跨会话互相覆盖）
         const model = (data.model ?? {}) as { id?: string; providerID?: string }
         steps.set(assistantMessageID, {
           assistantMessageID,
@@ -327,12 +361,13 @@ export function createSpanBuilder(
 
       case "session.step.ended":
       case "session.step.failed": {
-        const assistantMessageID = data.assistantMessageID as string
-        const step = steps.get(assistantMessageID)
-        steps.delete(assistantMessageID)
+        const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
+        const step = assistantMessageID ? steps.get(assistantMessageID) : undefined
+        if (assistantMessageID) steps.delete(assistantMessageID)
         const endNano = nano(event.created)
         const error = event.type === "session.step.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
-        emitChatSpan(sid, assistantMessageID, step, data, endNano, error)
+        // malformed 事件（无 assistantMessageID）不发 chat span：确定性 id 会退化为 "undefined" 哈希
+        if (assistantMessageID) emitChatSpan(sid, assistantMessageID, step, data, endNano, error)
         const turn = openTurns.get(sid)
         if (turn) {
           if (endNano > turn.lastEndNano) turn.lastEndNano = endNano
@@ -344,10 +379,11 @@ export function createSpanBuilder(
       }
 
       case "session.tool.input.started": {
-        const callId = data.id as string
+        const callId = typeof data.id === "string" ? data.id : ""
+        if (!callId) return
         tools.set(callId, {
           callId,
-          assistantMessageID: data.assistantMessageID as string,
+          assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
           name: data.name as string,
           startedNano: nano(event.created),
         })
@@ -355,14 +391,15 @@ export function createSpanBuilder(
       }
 
       case "session.tool.called": {
-        const callId = data.id as string
+        const callId = typeof data.id === "string" ? data.id : ""
+        if (!callId) return
         const existing = tools.get(callId)
         if (existing) {
           existing.input = data.input as Record<string, unknown>
         } else {
           tools.set(callId, {
             callId,
-            assistantMessageID: data.assistantMessageID as string,
+            assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
             input: data.input as Record<string, unknown>,
             startedNano: nano(event.created),
           })
@@ -372,7 +409,8 @@ export function createSpanBuilder(
 
       case "session.tool.success":
       case "session.tool.failed": {
-        const callId = data.id as string
+        const callId = typeof data.id === "string" ? data.id : ""
+        if (!callId) return
         const tool = tools.get(callId)
         tools.delete(callId)
         const endNano = nano(event.created)
@@ -421,6 +459,7 @@ export function createSpanBuilder(
     endNano: bigint,
     error?: { type?: string; message?: string },
   ) => {
+    if (!assistantMessageID) return // 防御：无 id 的确定性哈希会互相碰撞
     const child = isChild(sid)
     const traceId = child ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
     const parentId = child ? childTrace(sid).containerId : openTurns.get(sid)?.spanId
@@ -503,7 +542,10 @@ export function createSpanBuilder(
     const child = isChild(sid)
     const traceId = child ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
     if (!traceId) return
-    const assistantMessageID = tool?.assistantMessageID ?? (data.assistantMessageID as string)
+    const assistantMessageID =
+      tool?.assistantMessageID ?? (typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined)
+    // 无 assistantMessageID 则父 chat span 哈希退化为 "undefined"，宁可不发（含 subagent 挂接注册）
+    if (!assistantMessageID) return
     // tool span 父链 = 发起它的 chat span（确定性 id，chat span 先发后到无所谓）
     const parentId = hash(`opencode-chat:${assistantMessageID}`, 8)
     const name = tool?.name ?? "unknown"
@@ -525,7 +567,7 @@ export function createSpanBuilder(
         links.set(childSid, { toolSpanId: spanId, traceId, parentSid: sid })
         ensureContainer(childSid, endNano)
         const info = sessions.get(childSid)
-        if (!info?.parentID) sessions.set(childSid, { ...info, parentID: sid })
+        if (!info?.parentID) registerSession(childSid, { ...info, parentID: sid })
       }
     }
 

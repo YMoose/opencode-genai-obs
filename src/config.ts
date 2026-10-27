@@ -11,6 +11,9 @@
  * 2. JSONC 配置文件：OCG_OBS_CONFIG > OPENCODE_CONFIG_DIR/ocg-obs.json
  *    > XDG_CONFIG_HOME/opencode/ocg-obs.json > ~/.config/opencode/ocg-obs.json
  * 3. 内置默认
+ *
+ * 所有文件字段做类型校验：类型不匹配（如 "false"/"500" 这类 JSON 笔误）告警并回落默认，
+ * 不再静默按 JS 真值性/隐式转换生效。根级与 wire/tracing/contentGates 层的未知 key 均告警。
  */
 import { readFileSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
@@ -72,8 +75,89 @@ export interface Config {
 }
 
 export interface ConfigWarning {
-  readonly kind: "invalid-json" | "read-error" | "unknown-key" | "bad-env"
+  readonly kind: "invalid-json" | "read-error" | "unknown-key" | "bad-env" | "bad-type"
   readonly message: string
+}
+
+const ROOT_KEYS = new Set(["enabled", "wire", "tracing"])
+const WIRE_KEYS = new Set(["enabled", "directory"])
+const TRACING_KEYS = new Set([
+  "enabled",
+  "endpoint",
+  "project",
+  "headers",
+  "content",
+  "contentGates",
+  "contentMaxLength",
+  "resourceAttributes",
+])
+const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "toolContent", "wireBody"])
+
+// ---------------------------------------------------------------------------
+// 类型校验 + 默认值回落
+// ---------------------------------------------------------------------------
+
+function boolField(value: unknown, path: string, fallback: boolean, warnings: ConfigWarning[]): boolean {
+  if (value === undefined) return fallback
+  if (typeof value !== "boolean") {
+    warnings.push({ kind: "bad-type", message: `${path}: expected boolean, got ${JSON.stringify(value)}; using ${fallback}` })
+    return fallback
+  }
+  return value
+}
+
+function stringField(value: unknown, path: string, fallback: string, warnings: ConfigWarning[]): string {
+  if (value === undefined) return fallback
+  if (typeof value !== "string") {
+    warnings.push({ kind: "bad-type", message: `${path}: expected string, got ${JSON.stringify(value)}; using default` })
+    return fallback
+  }
+  return value
+}
+
+function intField(value: unknown, path: string, fallback: number, warnings: ConfigWarning[]): number {
+  if (value === undefined) return fallback
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    warnings.push({ kind: "bad-type", message: `${path}: expected non-negative integer, got ${JSON.stringify(value)}; using ${fallback}` })
+    return fallback
+  }
+  return value
+}
+
+/** 字符串字典：值非 string 的键跳过并告警 */
+function recordField(value: unknown, path: string, warnings: ConfigWarning[]): Record<string, string> {
+  if (value === undefined || value === null) return {}
+  if (typeof value !== "object" || Array.isArray(value)) {
+    warnings.push({ kind: "bad-type", message: `${path}: expected object, got ${Array.isArray(value) ? "array" : typeof value}; using {}` })
+    return {}
+  }
+  const out: Record<string, string> = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item !== "string") {
+      warnings.push({ kind: "bad-type", message: `${path}.${key}: expected string, got ${typeof item}; skipped` })
+      continue
+    }
+    out[key] = item
+  }
+  return out
+}
+
+/** 取配置节：null/缺失 → {}；非对象 → 告警并按 {} 处理 */
+function section(value: unknown, path: string, warnings: ConfigWarning[]): Record<string, unknown> {
+  if (value === undefined || value === null) return {}
+  if (typeof value !== "object" || Array.isArray(value)) {
+    warnings.push({ kind: "bad-type", message: `${path}: expected object; section ignored` })
+    return {}
+  }
+  return value as Record<string, unknown>
+}
+
+function unknownKeys(raw: Record<string, unknown>, known: ReadonlySet<string>, path: string, configPath: string, warnings: ConfigWarning[]): void {
+  for (const key of Object.keys(raw)) {
+    if (!known.has(key)) {
+      warnings.push({ kind: "unknown-key", message: `unknown key "${path ? `${path}.${key}` : key}" in ${configPath}` })
+    }
+  }
 }
 
 function configSearchDir(): string {
@@ -107,13 +191,13 @@ function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/\/+$/, "").replace(/\/v1\/traces$/, "")
 }
 
-function resolveGates(content: boolean, raw: Record<string, unknown>): ContentGates {
+function resolveGates(content: boolean, raw: Record<string, unknown>, warnings: ConfigWarning[]): ContentGates {
   return {
-    userPrompts: (raw.userPrompts as boolean | undefined) ?? true,
-    assistantResponses: (raw.assistantResponses as boolean | undefined) ?? true,
-    toolDetails: (raw.toolDetails as boolean | undefined) ?? content,
-    toolContent: (raw.toolContent as boolean | undefined) ?? content,
-    wireBody: (raw.wireBody as boolean | undefined) ?? true,
+    userPrompts: boolField(raw.userPrompts, "tracing.contentGates.userPrompts", true, warnings),
+    assistantResponses: boolField(raw.assistantResponses, "tracing.contentGates.assistantResponses", true, warnings),
+    toolDetails: boolField(raw.toolDetails, "tracing.contentGates.toolDetails", content, warnings),
+    toolContent: boolField(raw.toolContent, "tracing.contentGates.toolContent", content, warnings),
+    wireBody: boolField(raw.wireBody, "tracing.contentGates.wireBody", true, warnings),
   }
 }
 
@@ -133,7 +217,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       project: "opencode",
       headers: {},
       content: true,
-      contentGates: resolveGates(true, {}),
+      contentGates: resolveGates(true, {}, warnings),
       contentMaxLength: 0,
       resourceAttributes: {},
     },
@@ -153,32 +237,32 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       if (parseErrors.length > 0 || !parsed || typeof parsed !== "object") {
         warnings.push({ kind: "invalid-json", message: `invalid JSON in ${configPath}: ${parseErrors.length} parse error(s)` })
       } else {
-        // 未知 key 警告（不拒绝，只提示）
-        const knownKeys = new Set(["enabled", "wire", "tracing"])
-        for (const key of Object.keys(parsed)) {
-          if (!knownKeys.has(key)) {
-            warnings.push({ kind: "unknown-key", message: `unknown key "${key}" in ${configPath}` })
-          }
-        }
+        unknownKeys(parsed, ROOT_KEYS, "", configPath, warnings)
 
-        const wireRaw = (parsed.wire ?? {}) as Record<string, unknown>
-        const tracingRaw = (parsed.tracing ?? {}) as Record<string, unknown>
-        const content = (tracingRaw.content as boolean | undefined) ?? defaults.tracing.content
+        const wireRaw = section(parsed.wire, "wire", warnings)
+        const tracingRaw = section(parsed.tracing, "tracing", warnings)
+        unknownKeys(wireRaw, WIRE_KEYS, "wire", configPath, warnings)
+        unknownKeys(tracingRaw, TRACING_KEYS, "tracing", configPath, warnings)
+
+        const gatesRaw = section(tracingRaw.contentGates, "tracing.contentGates", warnings)
+        unknownKeys(gatesRaw, GATE_KEYS, "tracing.contentGates", configPath, warnings)
+
+        const content = boolField(tracingRaw.content, "tracing.content", defaults.tracing.content, warnings)
         fileConfig = {
-          enabled: (parsed.enabled as boolean | undefined) ?? defaults.enabled,
+          enabled: boolField(parsed.enabled, "enabled", defaults.enabled, warnings),
           wire: {
-            enabled: (wireRaw.enabled as boolean | undefined) ?? defaults.wire.enabled,
-            directory: (wireRaw.directory as string | undefined) ?? defaults.wire.directory,
+            enabled: boolField(wireRaw.enabled, "wire.enabled", defaults.wire.enabled, warnings),
+            directory: stringField(wireRaw.directory, "wire.directory", defaults.wire.directory, warnings),
           },
           tracing: {
-            enabled: (tracingRaw.enabled as boolean | undefined) ?? defaults.tracing.enabled,
-            endpoint: (tracingRaw.endpoint as string | undefined) ?? defaults.tracing.endpoint,
-            project: (tracingRaw.project as string | undefined) ?? defaults.tracing.project,
-            headers: (tracingRaw.headers as Record<string, string> | undefined) ?? {},
+            enabled: boolField(tracingRaw.enabled, "tracing.enabled", defaults.tracing.enabled, warnings),
+            endpoint: stringField(tracingRaw.endpoint, "tracing.endpoint", defaults.tracing.endpoint, warnings),
+            project: stringField(tracingRaw.project, "tracing.project", defaults.tracing.project, warnings),
+            headers: recordField(tracingRaw.headers, "tracing.headers", warnings),
             content,
-            contentGates: resolveGates(content, (tracingRaw.contentGates ?? {}) as Record<string, unknown>),
-            contentMaxLength: (tracingRaw.contentMaxLength as number | undefined) ?? defaults.tracing.contentMaxLength,
-            resourceAttributes: (tracingRaw.resourceAttributes as Record<string, string> | undefined) ?? {},
+            contentGates: resolveGates(content, gatesRaw, warnings),
+            contentMaxLength: intField(tracingRaw.contentMaxLength, "tracing.contentMaxLength", defaults.tracing.contentMaxLength, warnings),
+            resourceAttributes: recordField(tracingRaw.resourceAttributes, "tracing.resourceAttributes", warnings),
           },
         }
         log("loaded config", { path: configPath, wireEnabled: fileConfig.wire.enabled })

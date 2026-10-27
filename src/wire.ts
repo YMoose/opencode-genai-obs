@@ -25,8 +25,8 @@ export interface WireRecorder {
    * 非 primary 帧（compaction/title）留在独立队列，不会污染主路径顺序。
    */
   readonly consumePending: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined
-  /** 关闭所有文件句柄（插件卸载时调用） */
-  readonly dispose: () => void
+  /** 关闭所有文件句柄并等待刷盘完成（插件卸载时调用） */
+  readonly dispose: () => void | Promise<void>
 }
 
 export function createWireRecorder(config: WireConfig, log: (msg: string, data?: unknown) => void): WireRecorder {
@@ -68,6 +68,9 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   const streams = new Map<string, WriteStream>()
   let seq = 0
 
+  // 长驻进程句柄上限：超了关最旧的流（下次该会话写入时以追加模式重开，数据不丢）
+  const MAX_OPEN_STREAMS = 64
+
   const streamFor = (sessionID: string): WriteStream => {
     let stream = streams.get(sessionID)
     if (stream) return stream
@@ -75,6 +78,14 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     stream = createWriteStream(path, { flags: "a", mode: 0o600 })
     stream.on("error", (error) => log(`wire write error ${path}: ${error}`))
     streams.set(sessionID, stream)
+    if (streams.size > MAX_OPEN_STREAMS) {
+      const oldest = streams.keys().next().value
+      if (oldest !== undefined && oldest !== sessionID) {
+        streams.get(oldest)?.end()
+        streams.delete(oldest)
+        log("wire stream cap reached, closed oldest session stream", { sessionID: oldest })
+      }
+    }
     // 已存在的文件可能非本进程创建，权限也顺手收紧
     try { chmodSync(path, 0o600) } catch { /* 文件可能刚创建 */ }
     return stream
@@ -138,16 +149,22 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
 
     consumePending(sessionID) {
       const slot = pending.get(sessionID)
-      const frame = slot?.primary.shift()
+      if (!slot) return undefined
+      const frame = slot.primary.shift()
+      // 空槽及时清掉：长驻进程里会话数无界，防 pending Map 泄漏
+      if (slot.primary.length === 0 && slot.other === 0) pending.delete(sessionID)
       return frame ?? undefined
     },
 
     dispose() {
-      for (const stream of streams.values()) {
-        stream.end()
-      }
+      const closing = [...streams.values()]
       streams.clear()
       pending.clear()
+      if (closing.length === 0) return
+      // 等所有流真正落盘（否则进程退出可能截断最后一行 JSONL）
+      return Promise.all(
+        closing.map((stream) => new Promise<void>((resolve) => stream.end(() => resolve()))),
+      ).then(() => undefined)
     },
   }
 }

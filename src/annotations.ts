@@ -35,12 +35,22 @@ export interface Annotator {
 }
 
 export function createAnnotator(
-  options: { readonly endpoint: string; readonly headers?: Record<string, string> },
+  options: {
+    readonly endpoint: string
+    readonly headers?: Record<string, string>
+    /** 单次请求超时毫秒数，默认 30s */
+    readonly timeoutMs?: number
+    /** 重试基础间隔毫秒（第 n 次失败后等 n×base），默认 2s */
+    readonly retryDelayMs?: number
+  },
   log: (msg: string, data?: unknown) => void,
 ): Annotator {
   const url = options.endpoint.replace(/\/+$/, "") + "/v1/session_annotations?sync=true"
-  const headers = { "content-type": "application/json", ...(options.headers ?? {}) }
-  headers["content-type"] = "application/json" // 内置键防覆盖
+  // 自定义头在前，内置头最后覆盖（防 content-type 被冲掉）
+  const headers: Record<string, string> = {
+    ...(options.headers ?? {}),
+    "content-type": "application/json",
+  }
 
   return {
     async annotate(sessionID, fields) {
@@ -61,6 +71,7 @@ export function createAnnotator(
             method: "POST",
             headers,
             body,
+            signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
           })
           if (response.status !== 200) {
             const text = await response.text().catch(() => "")
@@ -76,7 +87,7 @@ export function createAnnotator(
             error: String(error),
           })
           if (exhausted) return
-          await new Promise((resolve) => setTimeout(resolve, 2_000 * attempt))
+          await new Promise((resolve) => setTimeout(resolve, (options.retryDelayMs ?? 2_000) * attempt))
         }
       }
     },

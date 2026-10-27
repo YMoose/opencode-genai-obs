@@ -13,6 +13,8 @@
  * - SSE 事件订阅每实例 1:1 活着 —— span pipeline 只允许 owner realm 建立
  *   （确定性 span id + Phoenix DO_NOTHING 下重复发不出错，但浪费且竞态 wire 帧）
  * - globalThis 是同进程多 module realm 间唯一的共享点
+ * - owner 掉线补选：若热重载先载新实例再卸旧 owner，存活实例的 hook 回调发现
+ *   pipeline 缺失时用自身 ctx 触发补选（dispatch → elect），采集不静默失效
  */
 import { Plugin } from "@opencode/plugin"
 import { loadConfig, type Config } from "./config.js"
@@ -23,6 +25,7 @@ import { createSpanBuilder } from "./spans.js"
 import { createAnnotator } from "./annotations.js"
 
 const PIPELINE_KEY = "__ocgObsPipeline$"
+const GENERATION_KEY = "__ocgObsPipelineGen$"
 
 /** 共享 pipeline：owner 创建并发布到 globalThis；所有实例的 hook 回调委托到这里 */
 interface Pipeline {
@@ -39,6 +42,13 @@ const pipelineGlobal = {
   },
   set(pipeline: Pipeline | undefined): void {
     ;(globalThis as { [PIPELINE_KEY]?: Pipeline })[PIPELINE_KEY] = pipeline
+  },
+  /** 进程级代数计数（独立于 pipeline 对象存活，owner 更替后仍递增） */
+  nextGeneration(): number {
+    const holder = globalThis as { [GENERATION_KEY]?: number }
+    const next = (holder[GENERATION_KEY] ?? 0) + 1
+    holder[GENERATION_KEY] = next
+    return next
   },
 }
 
@@ -59,6 +69,22 @@ interface PipelineCtx {
 
 async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline> {
   const wire = createWireRecorder(config.wire, log)
+
+  // wire-only 模式（tracing.enabled=false）：只落 JSONL，不建 span/annotation/SSE 泵，
+  // 保证任何数据都不离开本进程
+  if (!config.tracing.enabled) {
+    log("wire-only mode; tracing disabled, nothing leaves the process")
+    return {
+      generation: pipelineGlobal.nextGeneration(),
+      async dispose() {
+        await wire.dispose()
+      },
+      recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),
+      recordHttpRequest: (event) => wire.recordHttpRequest(event as unknown as Parameters<typeof wire.recordHttpRequest>[0]),
+      handlePrompt: () => {},
+    }
+  }
+
   const sender = createSender(
     {
       endpoint: config.tracing.endpoint,
@@ -68,7 +94,10 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     },
     log,
   )
-  const annotator = createAnnotator({ endpoint: config.tracing.endpoint, headers: config.tracing.headers }, log)
+  const annotator = createAnnotator(
+    { endpoint: config.tracing.endpoint, headers: config.tracing.headers },
+    log,
+  )
   const spanBuilder = createSpanBuilder(
     {
       gates: config.tracing.contentGates,
@@ -153,13 +182,13 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   log("tracing on", { endpoint: config.tracing.endpoint, project: config.tracing.project, content: config.tracing.content })
 
   return {
-    generation: ((pipelineGlobal.get()?.generation ?? 0) + 1),
+    generation: pipelineGlobal.nextGeneration(),
     async dispose() {
       stopped = true
       await eventIterator.return?.()
       await spanBuilder.flushAll()
       await sender.drain()
-      wire.dispose()
+      await wire.dispose()
     },
     recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),
     recordHttpRequest: (event) => wire.recordHttpRequest(event as unknown as Parameters<typeof wire.recordHttpRequest>[0]),
@@ -182,15 +211,51 @@ export default Plugin.define({
       return
     }
 
+    const pipelineCapable = config.wire.enabled || config.tracing.enabled
+    let unloading = false
+    let owned: Pipeline | undefined
     const disposers: Array<() => void | Promise<void>> = []
 
+    /**
+     * 选举/补选 owner。首次 setup 与 hook 回调发现 pipeline 缺失（旧 owner 已卸载）时都会走到；
+     * 并发补选时先发布者获胜，后来者丢弃自己的 pipeline。
+     */
+    const elect = async (reason: string): Promise<void> => {
+      if (unloading || owned || pipelineGlobal.get() || !pipelineCapable) return
+      const candidate = await buildPipeline(ctx, config)
+      if (unloading || pipelineGlobal.get()) {
+        await candidate.dispose() // 并发补选/已开始卸载：丢弃自己的，避免双 pipeline
+        return
+      }
+      pipelineGlobal.set(candidate)
+      owned = candidate
+      log("pipeline owner established", { generation: candidate.generation, reason })
+    }
+
+    /** hook 回调统一入口：pipeline 在则投递；不在则触发补选并在完成后补投递本条事件 */
+    const dispatch = (hook: string, deliver: (pipeline: Pipeline) => void): void => {
+      const pipeline = pipelineGlobal.get()
+      if (pipeline) {
+        deliver(pipeline)
+        return
+      }
+      if (unloading) return
+      log("pipeline missing, re-electing", { hook })
+      void elect(`hook:${hook}`)
+        .then(() => {
+          const revived = pipelineGlobal.get()
+          if (revived && !unloading) deliver(revived)
+        })
+        .catch((error) => log("pipeline re-elect failed", { error: String(error) }))
+    }
+
     // --- 每实例都注册 hook：按 location 派发，回调委托共享 pipeline ---
-    if (config.wire.enabled || config.tracing.enabled) {
+    if (pipelineCapable) {
       const wsReg = await ctx.session.hook("experimental.ws.send", (event) => {
-        pipelineGlobal.get()?.recordWsSend(event as unknown as Record<string, unknown>)
+        dispatch("ws.send", (pipeline) => pipeline.recordWsSend(event as unknown as Record<string, unknown>))
       })
       const httpReg = await ctx.session.hook("http.request", (event) => {
-        pipelineGlobal.get()?.recordHttpRequest(event as unknown as Record<string, unknown>)
+        dispatch("http.request", (pipeline) => pipeline.recordHttpRequest(event as unknown as Record<string, unknown>))
       })
       disposers.push(() => {
         wsReg.dispose()
@@ -200,25 +265,31 @@ export default Plugin.define({
     if (config.tracing.enabled) {
       const promptReg = await ctx.session.hook("prompt", (event) => {
         const promptEvent = event as unknown as { sessionID: string; messageID: string; prompt: { text: string } }
-        pipelineGlobal.get()?.handlePrompt(promptEvent.sessionID, promptEvent.messageID, promptEvent.prompt.text)
+        dispatch("prompt", (pipeline) => pipeline.handlePrompt(promptEvent.sessionID, promptEvent.messageID, promptEvent.prompt.text))
       })
       disposers.push(() => promptReg.dispose())
     }
 
-    // --- owner 选举：第一个到达的实例建立并发布共享 pipeline ---
+    // --- 首次选举：第一个到达的实例建立并发布共享 pipeline ---
     if (pipelineGlobal.get() !== undefined) {
       log(`pipeline owned by another realm (gen ${pipelineGlobal.get()!.generation}); observer instance`)
-    } else if (config.tracing.enabled || config.wire.enabled) {
-      const owner = await buildPipeline(ctx, config)
-      pipelineGlobal.set(owner)
-      log("pipeline owner established", { generation: owner.generation })
-      disposers.push(async () => {
-        if (pipelineGlobal.get() === owner) pipelineGlobal.set(undefined)
-        await owner.dispose()
-      })
+    } else {
+      await elect("setup")
     }
 
+    // 本实例若持有 pipeline，卸载时负责回收（最后注册 → 最先执行，先于 hook 注销）
+    disposers.push(async () => {
+      unloading = true
+      if (!owned) return
+      if (pipelineGlobal.get() === owned) pipelineGlobal.set(undefined)
+      await owned.dispose()
+      owned = undefined
+    })
+
+    let unloaded = false
     return async () => {
+      if (unloaded) return
+      unloaded = true
       for (const dispose of disposers.reverse()) {
         try {
           await dispose()

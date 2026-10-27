@@ -24,7 +24,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf dist *.tsbuildinfo"
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/tests/*.test.js",
+    "clean": "rm -rf dist dist-test *.tsbuildinfo"
   },
   "peerDependencies": {
     "@opencode/plugin": "*",

@@ -56,6 +56,15 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 优先级：**env > 配置文件 > 默认**（同 Claude Code monitoring-usage 文档惯例）。
 配置文件查找：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`。
 
+配置校验：所有字段做类型检查，类型不匹配（如 `"false"` 字符串）**告警并回落默认值**，不按 JS 真值性静默生效；根级与 `wire` / `tracing` / `contentGates` 层的未知 key（拼写错误）同样告警。告警见日志。
+
+行为要点：
+
+- `tracing.enabled: false` + `wire.enabled: true` = **wire-only 模式**：只落 JSONL，不订阅事件流，任何数据不离开本进程
+- OTLP POST 与 session annotation 请求带 30s 超时，对端挂死不会卡住发送队列/插件卸载
+- `session.deleted` 事件触发该会话全部内存状态清理（长驻进程防泄漏）
+- 插件热重载若先卸旧 owner，存活实例的 hook 回调会自动触发 pipeline 补选，采集不中断
+
 ## 功能：wire body 采集
 
 每次发往 LLM 的原始请求体（完整 system prompt + 裁剪后 messages + tools schema + 采样参数 + provider 专属 options）落盘成 JSONL。
@@ -128,3 +137,15 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 
 设计文档：`../obsystem/otel-span-exportor/MERGED-PLUGIN.md`  
 调研：`../obsystem/otel-span-exportor/RESEARCH.md`
+
+## 开发
+
+```bash
+npm run build      # 编译 src/ → dist/
+npm run typecheck  # 类型检查
+npm test           # 编译并跑 node:test 测试套件（tests/ → dist-test/）
+```
+
+测试覆盖：span 状态机（确定性 id、内容门、malformed 事件守卫、session 清理）、
+OTLP 编码/POST（超时、非 200）、发送队列（重试、丢弃）、annotation 重试、
+wire 落盘/刷盘、配置校验，以及插件级集成（wire-only 不外发、owner 掉线补选）。

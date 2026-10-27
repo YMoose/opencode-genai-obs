@@ -16,6 +16,10 @@ export interface SenderOptions {
   readonly batchSize?: number
   /** 队列满时丢弃最老的 span（防 Phoenix 长期宕机撑爆内存） */
   readonly maxQueue?: number
+  /** 重试基础退避毫秒数，默认 1s */
+  readonly retryDelayMs?: number
+  /** 单次 POST 超时毫秒数（透传给 postSpans），默认 30s */
+  readonly timeoutMs?: number
 }
 
 interface Item {
@@ -35,6 +39,7 @@ export interface Sender {
 export function createSender(options: SenderOptions, log: (msg: string, data?: unknown) => void): Sender {
   const batchSize = options.batchSize ?? 32
   const maxQueue = options.maxQueue ?? 10_000
+  const baseDelay = options.retryDelayMs ?? BASE_DELAY_MS
   const queue: Item[] = []
   let timer: ReturnType<typeof setTimeout> | undefined
   let pumping = false
@@ -67,7 +72,7 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
               lastError: String(error),
             })
           } else {
-            const delay = BASE_DELAY_MS * 2 ** (batch[0]!.attempts - 1)
+            const delay = baseDelay * 2 ** (batch[0]!.attempts - 1)
             schedule(delay)
             return
           }

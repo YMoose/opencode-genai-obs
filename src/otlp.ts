@@ -101,6 +101,8 @@ export interface OtlpOptions {
   readonly headers?: Record<string, string>
   /** 并入 resource 块的自定义属性（对齐 OTEL_RESOURCE_ATTRIBUTES；与内置键冲突时保留内置值） */
   readonly resourceAttributes?: Record<string, string>
+  /** 单次请求超时毫秒数，默认 30s（防对端半开挂死 pump/卸载流程） */
+  readonly timeoutMs?: number
 }
 
 export function buildBody(spans: readonly SpanRecord[], options: OtlpOptions = {}): Buffer {
@@ -123,16 +125,17 @@ export async function postSpans(
   options: OtlpOptions = {},
 ): Promise<void> {
   const body = buildBody(spans, options)
+  // 自定义头在前，内置头最后覆盖（防 content-type/x-project-name 被冲掉）
   const headers: Record<string, string> = {
+    ...(options.headers ?? {}),
     "content-type": "application/x-protobuf",
-    ...(options.headers ?? {}), // 自定义头在前，内置头最后覆盖防冲突
   }
-  headers["content-type"] = "application/x-protobuf"
   if (options.project) headers["x-project-name"] = options.project
   const response = await fetch(endpoint.replace(/\/+$/, "") + "/v1/traces", {
     method: "POST",
     headers,
     body: new Uint8Array(body),
+    signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
   })
   if (response.status !== 200) {
     const text = await response.text().catch(() => "")
