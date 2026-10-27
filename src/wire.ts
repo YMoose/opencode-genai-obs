@@ -1,13 +1,14 @@
 /**
- * wire body 采集模块：挂 opencode v2 的 session hook，
- * 把每次发往 LLM 的原始请求体追加成 JSONL。
+ * Wire body capture: hangs off opencode v2 session hooks and appends every raw LLM
+ * request body as JSONL.
  *
- * 主路径：experimental.ws.send（websocket transport，frame: string）
- * 兜底：  http.request（非 ws provider / ws fallback / 旧 aisdk 路径，
- *          body 是 ReadableStream，opencode 侧已做 clone 回传）
+ * Main path: experimental.ws.send (websocket transport, frame: string)
+ * Fallback:  http.request (non-ws providers / ws fallback / legacy aisdk path;
+ *            the body is a ReadableStream, already cloned on the opencode side)
  *
- * 只读不改 frame —— hook 参数里的 frame 是 mutable，我们只记录、原样回传。
- * 写盘异步 fire-and-forget，hook 本体 O(1) 返回，绝不阻塞 ws/http。
+ * The frame is read-only for us — the hook's frame argument is mutable, we only record
+ * it and pass it through untouched. Disk writes are async fire-and-forget; the hook
+ * body returns in O(1) and never blocks ws/http.
  */
 
 import { createWriteStream, mkdirSync, chmodSync, type WriteStream } from "node:fs"
@@ -16,21 +17,22 @@ import type { WireRecord, WireHookEvent } from "./types.js"
 import type { WireConfig } from "./config.js"
 
 export interface WireRecorder {
-  /** 处理 ws.send 事件（frame: string） */
+  /** Handle a ws.send event (frame: string) */
   readonly recordWsSend: (event: WireHookEvent & { frame: string }) => void
-  /** 处理 http.request 事件（request: web Request，body 只读一次） */
+  /** Handle an http.request event (request: web Request; the body can be read once) */
   readonly recordHttpRequest: (event: WireHookEvent & { request: Request }) => void
   /**
-   * span builder 消费一帧：取该会话 kind=primary 的最早一帧（FIFO），无则 undefined。
-   * 非 primary 帧（compaction/title）留在独立队列，不会污染主路径顺序。
+   * Consume one frame for the span builder: the earliest kind=primary frame of the
+   * session (FIFO), or undefined. Non-primary frames (compaction/title) stay in a
+   * separate tally and never pollute the main-path ordering.
    */
   readonly consumePending: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined
-  /** 关闭所有文件句柄并等待刷盘完成（插件卸载时调用） */
+  /** Close all file handles and wait for flush completion (called on plugin unload) */
   readonly dispose: () => void | Promise<void>
 }
 
 export function createWireRecorder(config: WireConfig, log: (msg: string, data?: unknown) => void): WireRecorder {
-  /** pending 槽：per-session、per-kind 的 FIFO（kind=primary 队列被 span builder 消费） */
+  /** Pending slots: per-session, per-kind FIFO (the kind=primary queue is consumed by the span builder) */
   const pending = new Map<string, { primary: Array<{ frame: string; seq: number }>; other: number }>()
 
   const pendingFor = (sessionID: string) => {
@@ -42,7 +44,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     return slot
   }
 
-  const PENDING_CAP = 8 // 单会话待消费帧上限（正常一轮 step 数 << 8；防异常路径泄漏）
+  const PENDING_CAP = 8 // per-session cap of pending frames (a normal turn has far fewer steps; guards abnormal paths)
 
   const stash = (sessionID: string, kind: string, frame: string, seq: number) => {
     const slot = pendingFor(sessionID)
@@ -53,7 +55,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   }
 
   if (!config.enabled) {
-    // 禁用时返回空操作 —— 调用方无需每次判 enabled（consumePending 也无帧可取）
+    // No-ops when disabled — callers never need to check enabled (consumePending simply has nothing)
     return {
       recordWsSend: () => {},
       recordHttpRequest: () => {},
@@ -64,11 +66,12 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
 
   mkdirSync(config.directory, { recursive: true, mode: 0o700 })
 
-  /** 每会话一个 append 流（按文件名缓存），进程级 seq 计数器 */
+  /** One append stream per session (cached by file name), plus a process-wide seq counter */
   const streams = new Map<string, WriteStream>()
   let seq = 0
 
-  // 长驻进程句柄上限：超了关最旧的流（下次该会话写入时以追加模式重开，数据不丢）
+  // Handle cap for long-lived processes: past the cap close the oldest stream (reopened
+  // in append mode on that session's next write — no data lost)
   const MAX_OPEN_STREAMS = 64
 
   const streamFor = (sessionID: string): WriteStream => {
@@ -86,8 +89,8 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
         log("wire stream cap reached, closed oldest session stream", { sessionID: oldest })
       }
     }
-    // 已存在的文件可能非本进程创建，权限也顺手收紧
-    try { chmodSync(path, 0o600) } catch { /* 文件可能刚创建 */ }
+    // Pre-existing files may come from other processes; tighten permissions while we're here
+    try { chmodSync(path, 0o600) } catch { /* file may have just been created */ }
     return stream
   }
 
@@ -95,7 +98,8 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     try {
       const stream = streamFor(record.sessionID)
       const line = JSON.stringify(record) + "\n"
-      // write 返回 false 表示内核缓冲满，但我们 fire-and-forget，不背压
+      // write() returning false means the kernel buffer is full; we are
+      // fire-and-forget and do not apply backpressure
       stream.write(line, (error) => {
         if (error) log(`wire append error: ${error}`)
       })
@@ -124,8 +128,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     },
 
     recordHttpRequest(event) {
-      // body 是 ReadableStream，opencode 侧已 clone 过，我们这里 clone 一次再读
-      // 避免把 body 消耗掉（虽然 opencode 已经处理了）
+      // The body is a ReadableStream; clone before reading so the original is never consumed
       const recordSeq = ++seq
       const cloned = event.request.clone()
       cloned
@@ -151,7 +154,8 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
       const slot = pending.get(sessionID)
       if (!slot) return undefined
       const frame = slot.primary.shift()
-      // 空槽及时清掉：长驻进程里会话数无界，防 pending Map 泄漏
+      // Drop empty slots promptly: sessions are unbounded in long-lived processes;
+      // keeps the pending map from leaking
       if (slot.primary.length === 0 && slot.other === 0) pending.delete(sessionID)
       return frame ?? undefined
     },
@@ -161,7 +165,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
       streams.clear()
       pending.clear()
       if (closing.length === 0) return
-      // 等所有流真正落盘（否则进程退出可能截断最后一行 JSONL）
+      // Wait for real flush of every stream (process exit could otherwise truncate the last JSONL line)
       return Promise.all(
         closing.map((stream) => new Promise<void>((resolve) => stream.end(() => resolve()))),
       ).then(() => undefined)

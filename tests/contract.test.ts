@@ -1,9 +1,9 @@
 /**
- * 插件公共合同测试 —— 模式移植自 oh-my-opencode-slim src/index.test.ts：
- * - 禁用合同：enabled=false 时 setup 不读取任何 ctx 字段（throwing Proxy 验证）
- * - unload 是幂等 finalizer：重复调用不抛错
- * - 标准 reload 顺序（先卸旧再载新）：新实例直接成为 owner，globalThis 不留垃圾
- * - unload 后 hook 注销对称（注册了什么就注销什么）
+ * Plugin public-contract tests — pattern ported from oh-my-opencode-slim src/index.test.ts:
+ * - Disabled contract: with enabled=false, setup reads no ctx fields at all (verified via a throwing Proxy)
+ * - unload is an idempotent finalizer: repeated calls never throw
+ * - Standard reload order (unload old, then load new): the new instance becomes owner directly; no globalThis garbage left behind
+ * - Hook deregistration is symmetric after unload (whatever was registered gets unregistered)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -40,7 +40,7 @@ test("禁用合同：enabled=false 时不读取 ctx、不注册 hook、不建 pi
       },
     },
   )
-  const unload = await setup(ctx) // 不应抛错
+  const unload = await setup(ctx) // must not throw
   assert.strictEqual(unload, undefined, "禁用时 setup 不返回 unload")
   assert.strictEqual(pipelineGlobalValue(), undefined, "禁用时不发布 pipeline")
 })
@@ -62,7 +62,7 @@ test("unload 是幂等 finalizer：重复调用不抛错且注销全部 hook", a
   assert.ok(!mock.has("experimental.ws.send") && !mock.has("http.request") && !mock.has("prompt"), "unload 后 hook 全部注销")
   assert.strictEqual(pipelineGlobalValue(), undefined, "unload 后 globalThis pipeline 清空")
 
-  await unload!() // 幂等：第二次不得抛错
+  await unload!() // idempotent: the second call must not throw
   await unload!()
 })
 

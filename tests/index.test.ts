@@ -1,9 +1,10 @@
 /**
- * index.ts 插件级集成测试（mock ctx + 假 OTLP 后端）：
- * - Bug 1：tracing.enabled=false 的 wire-only 配置不订阅事件流、不外发任何 HTTP，
- *          wire JSONL 照常落盘
- * - Bug 5：owner 实例卸载后，存活实例的 hook 触发 pipeline 补选，采集恢复
- * - 去平台化：annotations.enabled=false 时不发后端专属的 /v1/session_annotations
+ * index.ts plugin-level integration tests (mock ctx + fake OTLP backend):
+ * - Bug 1: a wire-only config (tracing.enabled=false) subscribes to no event stream and
+ *          sends no HTTP at all, while wire JSONL still lands on disk
+ * - Bug 5: after the owner instance unloads, a surviving instance's hook triggers
+ *          pipeline re-election and capture resumes
+ * - De-platforming: annotations.enabled=false sends no backend-specific /v1/session_annotations
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -54,7 +55,7 @@ test("Bug 1：wire-only（tracing.enabled=false）不外发任何请求，wire J
     frame: JSON.stringify({ hello: "world" }),
   })
   await waitFor(() => existsSync(join(dir, "raw", "s1.jsonl")))
-  await new Promise((resolve) => setTimeout(resolve, 100)) // 留出可能的（不该发生的）外发窗口
+  await new Promise((resolve) => setTimeout(resolve, 100)) // leave a window for any (unexpected) outbound traffic
 
   const record = JSON.parse(readFileSync(join(dir, "raw", "s1.jsonl"), "utf-8").trim())
   assert.strictEqual(record.sessionID, "s1")
@@ -136,14 +137,14 @@ test("Bug 5：owner 卸载后，存活实例 hook 触发补选，span 恢复外�
   assert.strictEqual(a.feeds.length, 1, "首个实例成为 owner 并订阅事件流")
   assert.strictEqual(b.feeds.length, 0, "第二实例为 observer，不订阅")
 
-  // 旧 owner 卸载（热重载场景：先卸旧）→ globalThis pipeline 清空
+  // unload the old owner (hot-reload scenario: old unloads first) → the globalThis pipeline is cleared
   await unloadA()
 
-  // B 的 hook 触发补选；补选完成后本条 prompt 会被补投递
+  // B's hook triggers re-election; once done, this prompt event is redelivered
   b.fire("prompt", { sessionID: "s1", messageID: "m1", prompt: { text: "re-elect" } })
   await waitFor(() => b.feeds.length === 1, 5_000)
 
-  // 跑一轮完整 turn，span 应到达假后端
+  // run a full turn; spans should reach the fake backend
   const feed = b.feeds[0]!
   const now = Date.now()
   feed.push({ type: "session.created", created: now, data: { sessionID: "s1", agent: "build" } })

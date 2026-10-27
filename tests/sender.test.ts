@@ -1,8 +1,8 @@
 /**
- * sender.ts 队列测试：
- * - 失败重试后恢复（指数退避可注入短间隔）
- * - 对端持续失败时 drain() 有界完成（Bug 2 关联：超时保证不挂死卸载）
- * - 队列满丢弃最老 span 并留痕
+ * sender.ts queue tests:
+ * - Recovery after failed retries (exponential backoff with injectable short delays)
+ * - drain() completes in bounded time under persistent backend failure (Bug 2 follow-up: timeouts guarantee unload never hangs)
+ * - Queue full: drops the oldest span and logs it
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -56,7 +56,7 @@ test("对端持续失败：drain() 有界完成并丢弃剩余", async (t) => {
   sender.push(makeSpan())
   sender.push(makeSpan())
   await waitFor(() => server.requests.length >= 1, 5_000)
-  // drain 内部只做一次冲刷尝试，失败即丢——不允许永久挂起
+  // drain makes a single flush attempt and drops the rest on failure — it must never hang
   const start = Date.now()
   await sender.drain()
   assert.ok(Date.now() - start < 10_000, "drain 不应挂死")
@@ -64,7 +64,7 @@ test("对端持续失败：drain() 有界完成并丢弃剩余", async (t) => {
 })
 
 test("队列满时丢弃最老 span 并留痕", async (t) => {
-  // 一直 500 + 长退避：让首批发送失败后队列积压
+  // always 500 + long backoff: let the first batch fail and the queue back up
   const server = await startServer((_req, res) => {
     res.statusCode = 500
     res.end()
@@ -76,9 +76,9 @@ test("队列满时丢弃最老 span 并留痕", async (t) => {
     { endpoint: server.url, retryDelayMs: 60_000, maxQueue: 2, timeoutMs: 500 },
     (msg) => logs.push(msg),
   )
-  sender.push(makeSpan()) // 进入首批，立即开始发送
+  sender.push(makeSpan()) // joins the first batch; sending starts immediately
   sender.push(makeSpan())
-  sender.push(makeSpan()) // 队列长度达上限 → 丢最老
+  sender.push(makeSpan()) // queue hits the cap → oldest dropped
   await waitFor(() => server.requests.length >= 1, 5_000)
   assert.ok(logs.some((line) => line.includes("queue full") && line.includes("dropped oldest")), "应记录队列满丢弃")
   await sender.drain()

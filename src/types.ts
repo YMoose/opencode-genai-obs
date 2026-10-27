@@ -1,29 +1,25 @@
 /**
- * 发给 LLM 的原始请求体（wire body）的一行 JSONL 记录。
- * 字段与 obsystem/otel-span-exportor/RAW-REQUESTS.md 对齐。
+ * One JSONL record of a raw LLM request body (wire body).
+ * Fields align with obsystem/otel-span-exportor/RAW-REQUESTS.md.
  */
 export interface WireRecord {
-  /** 版本号，未来 schema 变更时 +1 */
+  /** Schema version; bump on breaking changes */
   readonly v: 1
-  /** ISO8601 毫秒 */
+  /** ISO8601 with milliseconds */
   readonly ts: string
-  /** 进程级单调递增序号，同会话内排序用 */
+  /** Process-wide monotonically increasing sequence, used for ordering within a session */
   readonly seq: number
-  /** 从哪个 hook 拿到的 */
   readonly hook: "ws.send" | "http.request"
-  /** opencode 会话 id */
   readonly sessionID: string
-  /** agent id（如 "sisyphus"） */
   readonly agent: string
-  /** 模型引用 { providerID, id } */
   readonly model: { readonly providerID: string; readonly id: string }
-  /** 请求分类：primary | compaction | title | generate */
+  /** Request classification: primary | compaction | title | generate */
   readonly kind: string
-  /** 完整 wire body：ws.send 的 frame 字符串，或 http.request 的 body 文本 */
+  /** Full wire body: the ws.send frame string, or the http.request body text */
   readonly frame: string
 }
 
-/** hook 事件的最小公共形状（v2 SessionHooks 里 ws.send / http.request 的参数） */
+/** Minimal common shape of hook events (args of ws.send / http.request in v2 SessionHooks) */
 export interface WireHookEvent {
   readonly sessionID: string
   readonly agent: string

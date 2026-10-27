@@ -1,9 +1,9 @@
 /**
- * config.ts 测试：
- * - 默认值 / JSONC 解析 / endpoint 归一化
- * - Bug 7：类型不匹配的字段告警并回落默认（不再按 JS 真值性静默生效）
- * - 未知 key 告警覆盖根级与 wire/tracing/contentGates 嵌套层
- * - OTEL env 覆盖优先级
+ * config.ts tests:
+ * - Defaults / JSONC parsing / endpoint normalization
+ * - Bug 7: type-mismatched fields warn and fall back to defaults (no more silent JS truthiness)
+ * - Unknown-key warnings across the root and wire/tracing/contentGates nesting levels
+ * - OTEL env override precedence
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -18,7 +18,7 @@ interface LoadResult {
   warnings: ConfigWarning[]
 }
 
-/** 把配置内容写入临时文件并以 OCG_OBS_CONFIG 加载（自动还原 env） */
+/** Write config content to a temp file and load it via OCG_OBS_CONFIG (env restored automatically) */
 function loadFrom(content: string | null, env: Record<string, string> = {}): LoadResult {
   const snapshot = snapshotEnv()
   try {
@@ -49,9 +49,9 @@ test("无配置文件：全默认且无告警", () => {
 
 test("JSONC：注释/尾逗号合法，endpoint 剥 /v1/traces 尾路径与尾斜杠", () => {
   const { config, warnings } = loadFrom(`{
-    // phoenix
+    // phoenix backend
     "tracing": {
-      "endpoint": "http://ph:6006/v1/traces/", /** 归一化 */
+      "endpoint": "http://ph:6006/v1/traces/", /** normalized */
       "contentGates": { "userPrompts": false, },
     },
   }`)

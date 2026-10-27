@@ -1,23 +1,30 @@
 /**
- * 事件驱动 span builder（实时通道）—— adapter.py 投影逻辑的流式版。
+ * Event-driven span builder (the real-time lane) — a streaming version of adapter.py's
+ * projection logic.
  *
- * 状态机（详见 obsystem/otel-span-exportor/MERGED-PLUGIN.md §2）：
- * - prompt hook 暂存 {messageID, text}；首个 step.started 时开 turn（此时
- *   session.created 必然已过 SSE 泵，能判定 root/subagent）
- * - step.ended/failed → 立刻发 chat span（消费一帧 pending wire body 填 input.value）
- * - tool.input.started → 记 tool 名；tool.called → 记 input；success/failed → 立刻发 tool span
- * - text.ended → 累计该消息文本（chat span output.value + 轮根最后一答候选）
- * - execution.succeeded/failed/interrupted → 收尾：发轮根 span（root 会话）
- *   或 invoke_agent 容器 span（subagent 会话）
- * - subagent 挂接：父会话 tool.success 的 metadata.sessionID 注册挂接点；
- *   子会话一切 span 的 traceId 继承父轮、parentSpanId 链到容器 span
+ * State machine (see obsystem/otel-span-exportor/MERGED-PLUGIN.md §2):
+ * - The prompt hook stashes {messageID, text}; the first step.started opens the turn
+ *   (session.created has necessarily passed the SSE pump by then, so root/sub-agent
+ *   classification is reliable)
+ * - step.ended/failed → emit the chat span immediately (consuming one pending wire
+ *   frame to fill input.value)
+ * - tool.input.started → record the tool name; tool.called → record input;
+ *   success/failed → emit the tool span immediately
+ * - text.ended → accumulate message text (chat-span output.value + the root turn's
+ *   final-answer candidate)
+ * - execution.succeeded/failed/interrupted → finish: emit the turn root span (root
+ *   session) or the invoke_agent container span (sub-agent session)
+ * - Sub-agent attachment: the parent's tool.success registers an attachment point from
+ *   metadata.sessionID; every child span inherits the parent turn's traceId and chains
+ *   its parentSpanId to the container span
  *
- * 确定性 id（与 adapter.py 逐字节一致，Phase 3 重放靠它幂等去重）：
- *   traceId      = sha256("opencode-turn:{sid}:{userMessageID}")      取前 16 字节
- *   turnSpanId   = sha256("opencode-turn-span:{sid}:{userMessageID}") 取前 8 字节
- *   chatSpanId   = sha256("opencode-chat:{assistantMessageID}")       取前 8 字节
- *   toolSpanId   = sha256("opencode-tool:{assistantMessageID}:{toolCallID}") 取前 8 字节
- *   sessionSpanId= sha256("opencode-session:{childSessionID}")        取前 8 字节
+ * Deterministic ids (byte-identical to adapter.py; the offline replay lane relies on
+ * them for idempotent dedup):
+ *   traceId      = sha256("opencode-turn:{sid}:{userMessageID}")      first 16 bytes
+ *   turnSpanId   = sha256("opencode-turn-span:{sid}:{userMessageID}") first 8 bytes
+ *   chatSpanId   = sha256("opencode-chat:{assistantMessageID}")       first 8 bytes
+ *   toolSpanId   = sha256("opencode-tool:{assistantMessageID}:{toolCallID}") first 8 bytes
+ *   sessionSpanId= sha256("opencode-session:{childSessionID}")        first 8 bytes
  */
 
 import { createHash } from "node:crypto"
@@ -35,15 +42,16 @@ function nano(ms: number): bigint {
 }
 
 /**
- * 内容截断（对齐 CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH 语义）：
- * 超限截断到 limit 并追加标记；返回截断后值 + 原长（供 *_original_length 属性）。
+ * Content truncation (mirrors CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH semantics):
+ * over-limit values are cut to the limit with a marker appended; returns the truncated
+ * value + original length (for the *_original_length attribute).
  */
 function truncate(value: string, limit: number): { value: string; originalLength?: number } {
   if (limit <= 0 || value.length <= limit) return { value }
   return { value: value.slice(0, limit) + `[TRUNCATED original_length=${value.length}]`, originalLength: value.length }
 }
 
-/** 跳过 null/undefined/空串，其余保留（对齐 adapter._attrs） */
+/** Skip null/undefined/empty-string values, keep the rest (mirrors adapter._attrs) */
 function attrs(...pairs: ReadonlyArray<readonly [string, AttrValue | null | undefined]>): Array<readonly [string, AttrValue]> {
   const out: Array<readonly [string, AttrValue]> = []
   for (const [key, value] of pairs) {
@@ -52,7 +60,7 @@ function attrs(...pairs: ReadonlyArray<readonly [string, AttrValue | null | unde
   return out
 }
 
-/** 40 字符预览；空输入返回 undefined（让调用方走 title/key 回退） */
+/** 40-char preview; undefined for empty input (callers fall back to title/key) */
 function preview(text: string | null | undefined): string | undefined {
   const flat = (text ?? "").split(/\s+/).join(" ")
   if (!flat) return undefined
@@ -71,7 +79,7 @@ function totalTokens(t: TokenUsage): number {
 }
 
 // ---------------------------------------------------------------------------
-// 事件数据的最小形状（只声明我们用到的字段，避免引 opencode 内部类型）
+// Minimal shapes of event data (only fields we consume — avoids importing opencode internal types)
 // ---------------------------------------------------------------------------
 
 interface EventBase {
@@ -118,7 +126,7 @@ interface ToolState {
 }
 
 export interface SpanBuilderOptions {
-  /** 细粒度内容门（默认值见 config.ts；对齐 Claude Code OTEL_LOG_* 三门语义） */
+  /** Fine-grained content gates (defaults in config.ts; mirrors Claude Code's OTEL_LOG_* three-gate semantics) */
   readonly gates: {
     readonly userPrompts: boolean
     readonly assistantResponses: boolean
@@ -126,20 +134,20 @@ export interface SpanBuilderOptions {
     readonly toolContent: boolean
     readonly wireBody: boolean
   }
-  /** 内容类属性最大长度（字符），0 = 不截断 */
+  /** Max length (chars) of content attributes, 0 = no truncation */
   readonly contentMaxLength: number
-  /** 取 pending wire body（kind=primary FIFO）；无则 undefined */
+  /** Take one pending wire frame (kind=primary FIFO); undefined when none is left */
   readonly consumeWire: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined
-  /** 异步取 session 最新 info（收尾轮根时补 title/directory）；失败返回 undefined */
+  /** Fetch the session's latest info asynchronously (fills title/directory at turn close); undefined on failure */
   readonly getSessionInfo?: (sessionID: string) => Promise<SessionInfoLite | undefined>
 }
 
 export interface SpanBuilder {
-  /** 处理一条 SSE 事件（session.* 命名空间） */
+  /** Handle one SSE event (session.* namespace) */
   readonly handleEvent: (event: EventBase) => void
-  /** 处理 prompt hook（用户消息提交；仅暂存，不开 turn） */
+  /** Handle a prompt hook (user message submitted; stashed only, opens no turn) */
   readonly handlePrompt: (sessionID: string, messageID: string, text: string) => void
-  /** 收尾：把所有进行中的 turn/容器 flush（插件卸载时调用） */
+  /** Finish: flush every in-flight turn/container (called on plugin unload) */
   readonly flushAll: () => Promise<void>
   readonly emit: (span: SpanRecord) => void
 }
@@ -149,24 +157,25 @@ export function createSpanBuilder(
   emit: (span: SpanRecord) => void,
   log: (msg: string, data?: unknown) => void,
 ): SpanBuilder {
-  /** 会话注册表：session.created 时填入（parentID → subagent） */
+  /** Session registry: filled on session.created (parentID → sub-agent) */
   const sessions = new Map<string, SessionInfoLite>()
-  /** root 会话当前打开的 turn */
+  /** Currently open turn per root session */
   const openTurns = new Map<string, TurnState>()
-  /** prompt hook 暂存：等 step.started 时判定开 turn 还是忽略（subagent） */
+  /** Prompt-hook stash: held until step.started decides open-a-turn vs ignore (sub-agents) */
   const pendingPrompts = new Map<string, { messageID: string; text: string }>()
-  /** step 暂态：assistantMessageID → StepState */
+  /** Transient step state: assistantMessageID → StepState */
   const steps = new Map<string, StepState>()
-  /** tool 暂态：toolCallId → ToolState */
+  /** Transient tool state: toolCallId → ToolState */
   const tools = new Map<string, ToolState>()
-  /** subagent 挂接点：子 sessionID → { toolSpanId, traceId, parentSid } */
+  /** Sub-agent attachment points: child sessionID → { toolSpanId, traceId, parentSid } */
   const links = new Map<string, { toolSpanId: string; traceId: string; parentSid: string }>()
-  /** subagent 会话已建容器 span 的开始时间（容器 span 收尾时才发） */
+  /** Container-span bookkeeping per sub-agent session (emitted only at close) */
   const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint }>()
-  /** root 会话 turn 序号 */
+  /** Turn counters per root session */
   const turnCounters = new Map<string, number>()
 
-  // 会话注册表上限：长驻进程里会话数无界，超了逐出最旧的（Map 迭代序 = 插入序）
+  // Session registry cap: sessions are unbounded in long-lived processes; evict the
+  // oldest past the cap (Map iteration order = insertion order)
   const MAX_SESSIONS = 2048
 
   const registerSession = (sid: string, info: SessionInfoLite): void => {
@@ -180,9 +189,9 @@ export function createSpanBuilder(
     }
   }
 
-  /** session.deleted：补发未收尾的轮根，然后清掉该会话全部注册表项（防无界增长） */
+  /** session.deleted: flush any unfinished turn root, then drop all registry entries for the session (prevents unbounded growth) */
   const dropSession = (sid: string, nowNano: bigint): void => {
-    void flushTurnRoot(sid, nowNano) // 内部无轮则 no-op
+    void flushTurnRoot(sid, nowNano) // no-op when no turn is open
     openTurns.delete(sid)
     sessions.delete(sid)
     links.delete(sid)
@@ -198,7 +207,7 @@ export function createSpanBuilder(
     return info?.parentID !== undefined
   }
 
-  /** 子会话的 trace 继承：link 已知用 link；否则找父会话当前 turn（兜底自己开独立 trace） */
+  /** Sub-agent trace inheritance: use the link when known; otherwise the parent's open turn (last resort: open an independent trace) */
   const childTrace = (sid: string): { traceId: string; containerId: string } => {
     const containerId = hash(`opencode-session:${sid}`, 8)
     const link = links.get(sid)
@@ -206,7 +215,8 @@ export function createSpanBuilder(
     const info = sessions.get(sid)
     const parentTurn = info?.parentID ? openTurns.get(info.parentID) : undefined
     if (parentTurn) return { traceId: parentTurn.traceId, containerId }
-    // 兜底：父轮已结束且 link 未注册（异常时序），自己开 trace，容器当根
+    // Fallback: parent turn already closed and no link registered (abnormal ordering) —
+    // open our own trace with the container as root
     return { traceId: hash(`opencode-turn:${sid}:orphan`, 16), containerId }
   }
 
@@ -226,7 +236,7 @@ export function createSpanBuilder(
     if (!turn) return
     openTurns.delete(sid)
 
-    // 收尾时补 title/directory（title 可能刚生成完）
+    // Refresh title/directory at close (the title may have just been generated)
     const info = options.getSessionInfo ? await options.getSessionInfo(sid) : undefined
     const merged: SessionInfoLite = { ...sessions.get(sid), ...info }
 
@@ -308,10 +318,12 @@ export function createSpanBuilder(
       }
 
       case "session.step.started": {
-        // 首个 step 时按 prompt 暂存开 turn（此刻 session.created 已知，分类可靠）
+        // Open the turn from the stashed prompt on the first step (session.created is
+        // known by now, so root/sub-agent classification is reliable)
         if (isChild(sid)) {
-          pendingPrompts.delete(sid) // subagent 的 prompt 暂存不消费则丢弃
-          // 子会话容器可能在上一轮 execution 收尾时已 flush，这里按需重建
+          pendingPrompts.delete(sid) // unconsumed sub-agent prompt stashes are dropped
+          // The child container may have been flushed at the previous execution close;
+          // rebuild on demand
           ensureContainer(sid, nano((data.started as number) ?? event.created))
         } else {
           const pending = pendingPrompts.get(sid)
@@ -319,17 +331,19 @@ export function createSpanBuilder(
             pendingPrompts.delete(sid)
             const existing = openTurns.get(sid)
             if (existing && existing.key !== pending.messageID) {
-              // 上一轮的执行流没等到 succeeded 就被新 prompt 顶掉：直接补发上轮轮根
+              // Previous execution stream never reached succeeded before the new prompt
+              // took over: flush that turn root now
               void flushTurnRoot(sid, nano(event.created))
             }
             openTurn(sid, pending.messageID, pending.text, event.created, data.agent as string | undefined)
           } else if (!openTurns.has(sid)) {
-            // 无 prompt 暂存（合成请求/命令等）：以 event 伪造 turn key，保证有轮可挂
+            // No stashed prompt (synthetic request/command): fabricate a turn key from
+            // the event so spans have somewhere to attach
             openTurn(sid, `auto:${event.created}`, "(auto)", event.created, data.agent as string | undefined)
           }
         }
         const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
-        if (!assistantMessageID) return // malformed 事件：不建 step（否则以 "undefined" 为 key 跨会话互相覆盖）
+        if (!assistantMessageID) return // malformed event: skip the step (an "undefined" key would cross-corrupt sessions)
         const model = (data.model ?? {}) as { id?: string; providerID?: string }
         steps.set(assistantMessageID, {
           assistantMessageID,
@@ -346,7 +360,7 @@ export function createSpanBuilder(
         const step = steps.get(data.assistantMessageID as string)
         if (step) {
           step.texts.push(data.text as string)
-          // 轮根的最后一答候选
+          // candidate for the turn's final answer
           const turn = openTurns.get(sid)
           if (turn) turn.lastAnswer = step.texts.join("\n\n")
         }
@@ -366,7 +380,8 @@ export function createSpanBuilder(
         if (assistantMessageID) steps.delete(assistantMessageID)
         const endNano = nano(event.created)
         const error = event.type === "session.step.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
-        // malformed 事件（无 assistantMessageID）不发 chat span：确定性 id 会退化为 "undefined" 哈希
+        // malformed event (no assistantMessageID): skip the chat span — the
+        // deterministic id would degrade to a hash of "undefined"
         if (assistantMessageID) emitChatSpan(sid, assistantMessageID, step, data, endNano, error)
         const turn = openTurns.get(sid)
         if (turn) {
@@ -459,11 +474,11 @@ export function createSpanBuilder(
     endNano: bigint,
     error?: { type?: string; message?: string },
   ) => {
-    if (!assistantMessageID) return // 防御：无 id 的确定性哈希会互相碰撞
+    if (!assistantMessageID) return // defensive: deterministic hashes would collide without ids
     const child = isChild(sid)
     const traceId = child ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
     const parentId = child ? childTrace(sid).containerId : openTurns.get(sid)?.spanId
-    if (!traceId || !parentId) return // 无轮可挂（理论上 step 必然先 started，保险）
+    if (!traceId || !parentId) return // no turn to attach to (steps should always start first; belt and braces)
 
     const tokens = data.tokens as TokenUsage | undefined
     const cost = data.cost as number | undefined
@@ -510,14 +525,14 @@ export function createSpanBuilder(
         ["opencode.cost.usd", cost],
         ["gen_ai.output.messages", outputMessages],
         ["opencode.reasoning", reasoningText],
-        // OpenInference mirrors（跨后端语义约定，非平台绑定）
+        // OpenInference mirrors (cross-backend semantic convention, not platform binding)
         ["openinference.span.kind", "LLM"],
         ["llm.model_name", model.id],
         ["llm.token_count.prompt", inputTokens],
         ["llm.token_count.completion", outputTokens],
         ["llm.token_count.total", tokens ? totalTokens(tokens) : undefined],
         ["llm.total_cost", cost],
-        // wire body → input.value（OpenInference 原生，弃 gen_ai.request.raw）
+        // wire body → input.value (native OpenInference; gen_ai.request.raw dropped)
         ["input.value", wireTrunc?.value],
         ["input.value_original_length", wireTrunc?.originalLength],
         ["input.mime_type", wireTrunc ? "application/json" : undefined],
@@ -544,9 +559,10 @@ export function createSpanBuilder(
     if (!traceId) return
     const assistantMessageID =
       tool?.assistantMessageID ?? (typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined)
-    // 无 assistantMessageID 则父 chat span 哈希退化为 "undefined"，宁可不发（含 subagent 挂接注册）
+    // Without assistantMessageID the parent chat-span hash degrades to "undefined" —
+    // skip entirely (including sub-agent attachment registration)
     if (!assistantMessageID) return
-    // tool span 父链 = 发起它的 chat span（确定性 id，chat span 先发后到无所谓）
+    // The tool span's parent is the chat span that issued it (deterministic id, so emit order does not matter)
     const parentId = hash(`opencode-chat:${assistantMessageID}`, 8)
     const name = tool?.name ?? "unknown"
     const input = tool?.input ?? {}
@@ -559,7 +575,7 @@ export function createSpanBuilder(
 
     const spanId = hash(`opencode-tool:${assistantMessageID}:${callId}`, 8)
 
-    // subagent 挂接：metadata.sessionID → 建立挂接点
+    // Sub-agent attachment: metadata.sessionID → register the attachment point
     if (isSubagent) {
       const metadata = data.metadata as Record<string, unknown> | undefined
       const childSid = metadata?.sessionID as string | undefined
@@ -602,10 +618,10 @@ export function createSpanBuilder(
     })
   }
 
-  /** subagent 会话收尾：发 invoke_agent 容器 span */
+  /** Sub-agent session close: emit the invoke_agent container span */
   const flushContainer = async (sid: string, endNano: bigint, error?: { type?: string; message?: string }) => {
     const container = containers.get(sid)
-    if (!container) return // 没有任何 step/tool 产生过（空会话），不发
+    if (!container) return // nothing ever produced a step/tool (empty session) — skip
     containers.delete(sid)
     const link = links.get(sid)
     const traceId = link?.traceId ?? childTrace(sid).traceId

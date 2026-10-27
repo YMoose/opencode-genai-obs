@@ -1,9 +1,10 @@
 /**
- * redact.ts 测试 —— 模式移植自 oh-my-opencode-slim src/utils/redact.test.ts。
- * 规则集以本项目 redact.ts 为准（无 Slack xox 规则；有 32+ 通用长串规则）。
- * token fixture 用数组 join 构造，避免 secret 扫描 / GitHub push protection
- * 把测试仓库误报为携带真凭证。AKIAIOSFODNN7EXAMPLE 是 AWS 文档官方示例 key，
- * 按惯例保留明文。
+ * redact.ts tests — pattern ported from oh-my-opencode-slim src/utils/redact.test.ts.
+ * The rule set follows this project's redact.ts (no Slack xox rule; a generic 32+
+ * long-string rule). Token fixtures are built via array joins so secret scanners /
+ * GitHub push protection don't flag the test repo as carrying real credentials.
+ * AKIAIOSFODNN7EXAMPLE is the official AWS doc example key, kept in plaintext by
+ * convention.
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -38,7 +39,7 @@ test("掩码 GitLab PAT（glpat-…）", () => {
 })
 
 test("掩码 AWS access key id / STS 临时 key（AKIA/ASIA…）", () => {
-  // AWS 文档官方示例 key id —— 按惯例明文
+  // official AWS doc example key id — plaintext by convention
   for (const token of ["AKIAIOSFODNN7EXAMPLE", "ASIAIOSFODNN7EXAMPLE"]) {
     const out = redactSecrets(`key=${token}`)
     assert.ok(out.includes(token.slice(0, 4)), "保留 AKIA/ASIA 前缀")
@@ -71,7 +72,7 @@ test("URL 内嵌凭证只掩密码，用户名/主机保留", () => {
   assert.ok(!out.includes(password), "密码不得残留")
 
   const plain = "postgres://deploy@db.internal.io:5432/app"
-  // 无密码 URL 不被 URL 规则改写（32+ 通用规则不触：总长不足 32 且含 : / 之外…host 段为 16 字符）
+  // a password-less URL is not rewritten by the URL rule (the 32+ generic rule does not fire either: total length under 32, host segment is 16 chars)
   assert.equal(redactSecrets(`dsn: ${plain}`), `dsn: ${plain}`)
 })
 

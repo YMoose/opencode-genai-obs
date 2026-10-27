@@ -1,5 +1,6 @@
 /**
- * 测试工具：本地假 OTLP 后端服务器、可控 SSE 事件流、mock 插件 ctx、env 快照。
+ * Test utilities: a local fake OTLP backend server, a controllable SSE event stream,
+ * a mock plugin ctx, and env snapshots.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
@@ -20,7 +21,7 @@ export interface TestServer {
   readonly close: () => Promise<void>
 }
 
-/** 起一个记录所有请求的本地 HTTP 服务器；handle 决定响应行为（可按第 n 次请求分支） */
+/** Start a local HTTP server recording every request; handle decides the response (may branch on the n-th request) */
 export async function startServer(
   handle: (req: CapturedRequest, res: ServerResponse, nth: number) => void,
 ): Promise<TestServer> {
@@ -49,7 +50,7 @@ export async function startServer(
   }
 }
 
-/** 轮询等待条件成立（默认 5s 超时） */
+/** Poll until the predicate holds (default 5s timeout) */
 export async function waitFor(predicate: () => boolean, timeoutMs = 5_000, stepMs = 10): Promise<void> {
   const start = Date.now()
   while (!predicate()) {
@@ -63,7 +64,7 @@ export interface Pushable {
   push(event: unknown): void
 }
 
-/** 可手动推送的异步事件流（mock ctx.event.subscribe 的返回值） */
+/** A manually pushable async event stream (what the mock ctx.event.subscribe returns) */
 export function pushable(): Pushable {
   const queue: Array<IteratorResult<unknown>> = []
   const waiters: Array<(result: IteratorResult<unknown>) => void> = []
@@ -90,13 +91,13 @@ export function pushable(): Pushable {
 
 export interface MockCtx {
   readonly ctx: unknown
-  /** 每个 subscribe() 调用产生一个 Pushable（按创建序） */
+  /** One Pushable per subscribe() call (in creation order) */
   readonly feeds: Pushable[]
   fire(hookName: string, event: unknown): void
   has(hookName: string): boolean
 }
 
-/** mock 插件 ctx：记录 hook 回调供测试手动触发，session.get 返回固定根会话信息 */
+/** Mock plugin ctx: records hook callbacks for manual firing; session.get returns fixed root-session info */
 export function makeCtx(overrides?: {
   sessionGet?: (input: { sessionID: string }) => Promise<Record<string, unknown>>
 }): MockCtx {
@@ -133,7 +134,6 @@ export function makeCtx(overrides?: {
   }
 }
 
-/** 会影响 loadConfig 的全部环境变量 */
 export const CONFIG_ENV_KEYS = [
   "OCG_OBS_CONFIG",
   "OPENCODE_CONFIG_DIR",

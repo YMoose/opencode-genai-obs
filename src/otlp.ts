@@ -1,8 +1,8 @@
 /**
- * OTLP/HTTP protobuf 编码器 + POST —— otlp.py 的 TS 移植，无外部依赖。
- * 编码 opentelemetry/proto/collector/trace/v1 ExportTraceServiceRequest 的
- * 稳定子集：Resource/Scope/Span/KeyValue/AnyValue/Status。
- * 标准接收器（OTel Collector 等）对 /v1/traces 要求 application/x-protobuf。
+ * OTLP/HTTP protobuf encoder + POST — a dependency-free TS port of otlp.py.
+ * Encodes a stable subset of opentelemetry/proto/collector/trace/v1
+ * ExportTraceServiceRequest: Resource/Scope/Span/KeyValue/AnyValue/Status.
+ * Standard receivers (OTel Collector etc.) require application/x-protobuf on /v1/traces.
  */
 
 export type AttrValue = string | number | boolean
@@ -23,7 +23,7 @@ function varint(n: number): Buffer {
   const bytes: number[] = []
   while (true) {
     const b = n & 0x7f
-    n = Math.floor(n / 128) // >>> 7 对 >2^32 失效，用除法
+    n = Math.floor(n / 128) // >>> 7 breaks above 2^32; use division
     bytes.push(n ? b | 0x80 : b)
     if (!n) return Buffer.from(bytes)
   }
@@ -95,13 +95,13 @@ function spanMessage(span: SpanRecord): Buffer {
 }
 
 export interface OtlpOptions {
-  /** project 名（openinference.project.name resource 属性，OpenInference 约定） */
+  /** Project name (openinference.project.name resource attribute, OpenInference convention) */
   readonly project?: string
-  /** 额外请求头（认证等）；不覆盖 content-type */
+  /** Extra request headers (auth etc.); never overrides content-type */
   readonly headers?: Record<string, string>
-  /** 并入 resource 块的自定义属性（对齐 OTEL_RESOURCE_ATTRIBUTES；与内置键冲突时保留内置值） */
+  /** Custom attributes merged into the resource block (mirrors OTEL_RESOURCE_ATTRIBUTES; builtin keys win on conflicts) */
   readonly resourceAttributes?: Record<string, string>
-  /** 单次请求超时毫秒数，默认 30s（防对端半开挂死 pump/卸载流程） */
+  /** Per-request timeout in ms, default 30s (a half-open peer must not hang the pump/unload path) */
   readonly timeoutMs?: number
 }
 
@@ -109,7 +109,7 @@ export function buildBody(spans: readonly SpanRecord[], options: OtlpOptions = {
   const builtin = new Map<string, AttrValue>([["service.name", "opencode-genai-obs"]])
   if (options.project) builtin.set("openinference.project.name", options.project)
   for (const [key, value] of Object.entries(options.resourceAttributes ?? {})) {
-    if (!builtin.has(key)) builtin.set(key, value) // 内置键不覆盖（对齐 Claude Code 语义）
+    if (!builtin.has(key)) builtin.set(key, value) // builtin keys win (Claude Code semantics)
   }
   const resource = Buffer.concat([...builtin].map(([k, v]) => ld(1, kv(k, v))))
   const scope = Buffer.concat([s(1, "opencode-genai-obs"), s(2, "0.1.0")])
@@ -118,15 +118,16 @@ export function buildBody(spans: readonly SpanRecord[], options: OtlpOptions = {
   return ld(1, resourceSpans) // ExportTraceServiceRequest.resource_spans = 1
 }
 
-/** POST 一批 span 到 OTLP/HTTP 后端。失败抛错（调用方负责重试队列）。 */
+/** POST a batch of spans to an OTLP/HTTP backend. Throws on failure (the caller owns the retry queue). */
 export async function postSpans(
   spans: readonly SpanRecord[],
   endpoint: string,
   options: OtlpOptions = {},
 ): Promise<void> {
   const body = buildBody(spans, options)
-  // 自定义头在前，内置头最后覆盖（防 content-type 被冲掉）；project 语义走
-  // resource 属性 openinference.project.name，不发任何后端专属请求头
+  // Custom headers first, built-ins last so content-type cannot be clobbered; the
+  // project semantic rides the openinference.project.name resource attribute — no
+  // backend-specific headers are ever sent
   const headers: Record<string, string> = {
     ...(options.headers ?? {}),
     "content-type": "application/x-protobuf",

@@ -1,20 +1,24 @@
 /**
- * opencode-genai-obs — 插件入口。
+ * opencode-genai-obs — plugin entry.
  *
- * Phase 1：wire body 采集（v2 session hook → JSONL 落盘 + pending 槽）
- * Phase 2：事件驱动 span builder（ctx.event.subscribe → OTLP span → 任意 OTLP/HTTP 后端）
+ * Phase 1: wire body capture (v2 session hook → JSONL + pending slots)
+ * Phase 2: event-driven span builder (ctx.event.subscribe → OTLP spans → any OTLP/HTTP backend)
  *
- * 安装：~/.config/opencode/opencode.json 的 plugin 数组加本目录绝对路径
- * 配置：~/.config/opencode/ocg-obs.json（可选，JSONC）
+ * Install: add this directory's absolute path to the plugin array in
+ * ~/.config/opencode/opencode.json
+ * Config: ~/.config/opencode/ocg-obs.json (optional, JSONC)
  *
- * 多实例架构（实测 3 个独立 module realm/进程）：
- * - session hook（ws.send / http.request / prompt）按 session 所在 location 的
- *   实例派发 —— 每个实例都注册 hook，回调统一委托 globalThis 上的共享 pipeline
- * - SSE 事件订阅每实例 1:1 活着 —— span pipeline 只允许 owner realm 建立
- *   （确定性 span id + Phoenix 类后端 DO_NOTHING 下重复发不出错，但浪费且竞态 wire 帧）
- * - globalThis 是同进程多 module realm 间唯一的共享点
- * - owner 掉线补选：若热重载先载新实例再卸旧 owner，存活实例的 hook 回调发现
- *   pipeline 缺失时用自身 ctx 触发补选（dispatch → elect），采集不静默失效
+ * Multi-instance architecture (3 isolated module realms/processes observed):
+ * - Session hooks (ws.send / http.request / prompt) dispatch to the instance owning the
+ *   session's location — every instance registers hooks, and all callbacks delegate to
+ *   a shared pipeline on globalThis
+ * - SSE event subscriptions stay 1:1 per instance — only the owner realm builds the
+ *   span pipeline (deterministic span ids + DO_NOTHING upserts on Phoenix-style backends
+ *   make duplicates harmless, but they waste work and race wire frames)
+ * - globalThis is the only shared point between module realms of one process
+ * - Owner re-election: if a hot reload unloads the old owner while other instances
+ *   live, their hook callbacks notice the missing pipeline and re-elect using their
+ *   own ctx (dispatch → elect), so capture never fails silently
  */
 import { Plugin } from "@opencode/plugin"
 import { loadConfig, type Config } from "./config.js"
@@ -27,7 +31,7 @@ import { createAnnotator } from "./annotations.js"
 const PIPELINE_KEY = "__ocgObsPipeline$"
 const GENERATION_KEY = "__ocgObsPipelineGen$"
 
-/** 共享 pipeline：owner 创建并发布到 globalThis；所有实例的 hook 回调委托到这里 */
+/** Shared pipeline: the owner creates and publishes it on globalThis; every instance's hook callbacks delegate here */
 interface Pipeline {
   readonly generation: number
   readonly dispose: () => Promise<void>
@@ -43,7 +47,7 @@ const pipelineGlobal = {
   set(pipeline: Pipeline | undefined): void {
     ;(globalThis as { [PIPELINE_KEY]?: Pipeline })[PIPELINE_KEY] = pipeline
   },
-  /** 进程级代数计数（独立于 pipeline 对象存活，owner 更替后仍递增） */
+  /** Process-wide generation counter (outlives the pipeline object; keeps incrementing across owner changes) */
   nextGeneration(): number {
     const holder = globalThis as { [GENERATION_KEY]?: number }
     const next = (holder[GENERATION_KEY] ?? 0) + 1
@@ -52,7 +56,7 @@ const pipelineGlobal = {
   },
 }
 
-/** 插件 ctx 的最小形状（buildPipeline 只需要这两个） */
+/** Minimal shape of the plugin ctx (buildPipeline needs only these two) */
 interface PipelineCtx {
   session: {
     get: (input: { sessionID: string }) => Promise<{
@@ -70,8 +74,8 @@ interface PipelineCtx {
 async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline> {
   const wire = createWireRecorder(config.wire, log)
 
-  // wire-only 模式（tracing.enabled=false）：只落 JSONL，不建 span/annotation/SSE 泵，
-  // 保证任何数据都不离开本进程
+  // Wire-only mode (tracing.enabled=false): JSONL only — no spans/annotations/SSE pump,
+  // guaranteeing nothing ever leaves this process
   if (!config.tracing.enabled) {
     log("wire-only mode; tracing disabled, nothing leaves the process")
     return {
@@ -122,11 +126,12 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   )
 
   /**
-   * session.created / session.renamed → 实时打 project/title annotation
-   * （可选增强，默认开：走 Phoenix 兼容后端的 /v1/session_annotations，
-   * 非 OTLP 标准，tracing.annotations.enabled 可关）。
-   * subagent 会话（有 parentID）跳过：Phoenix 类后端只给根会话建 ProjectSession，打了 404。
-   * directory 经 session.get 取（basename 即 project label，sync.py 同款）。
+   * session.created / session.renamed → real-time project/title annotation
+   * (optional enhancement, on by default: hits the Phoenix-compatible
+   * /v1/session_annotations, not an OTLP standard; disable via tracing.annotations.enabled).
+   * Sub-agent sessions (parentID set) are skipped: Phoenix-style backends create
+   * ProjectSessions for root sessions only, and annotating children 404s.
+   * directory comes from session.get (its basename is the project label, same as sync.py).
    */
   const annotateFromEvent = (sessionID: string, data: Record<string, unknown>) => {
     if (!annotator) return
@@ -146,7 +151,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     })()
   }
 
-  // SSE 事件泵（独立后台循环）
+  // SSE event pump (standalone background loop)
   const iter = ctx.event.subscribe()
   const eventIterator = iter[Symbol.asyncIterator]()
   let stopped = false
@@ -224,14 +229,15 @@ export default Plugin.define({
     const disposers: Array<() => void | Promise<void>> = []
 
     /**
-     * 选举/补选 owner。首次 setup 与 hook 回调发现 pipeline 缺失（旧 owner 已卸载）时都会走到；
-     * 并发补选时先发布者获胜，后来者丢弃自己的 pipeline。
+     * Elect/re-elect the owner. Reached from the first setup and from hook callbacks
+     * that find the pipeline missing (previous owner unloaded); under concurrent
+     * elections whoever publishes first wins and latecomers discard their own pipeline.
      */
     const elect = async (reason: string): Promise<void> => {
       if (unloading || owned || pipelineGlobal.get() || !pipelineCapable) return
       const candidate = await buildPipeline(ctx, config)
       if (unloading || pipelineGlobal.get()) {
-        await candidate.dispose() // 并发补选/已开始卸载：丢弃自己的，避免双 pipeline
+        await candidate.dispose() // concurrent election/unload started: discard ours to avoid dual pipelines
         return
       }
       pipelineGlobal.set(candidate)
@@ -239,7 +245,7 @@ export default Plugin.define({
       log("pipeline owner established", { generation: candidate.generation, reason })
     }
 
-    /** hook 回调统一入口：pipeline 在则投递；不在则触发补选并在完成后补投递本条事件 */
+    /** Unified hook-callback entry: deliver when the pipeline exists; otherwise re-elect and redeliver this event once done */
     const dispatch = (hook: string, deliver: (pipeline: Pipeline) => void): void => {
       const pipeline = pipelineGlobal.get()
       if (pipeline) {
@@ -256,7 +262,7 @@ export default Plugin.define({
         .catch((error) => log("pipeline re-elect failed", { error: String(error) }))
     }
 
-    // --- 每实例都注册 hook：按 location 派发，回调委托共享 pipeline ---
+    // --- Every instance registers hooks: dispatched per location, delegating to the shared pipeline ---
     if (pipelineCapable) {
       const wsReg = await ctx.session.hook("experimental.ws.send", (event) => {
         dispatch("ws.send", (pipeline) => pipeline.recordWsSend(event as unknown as Record<string, unknown>))
@@ -277,14 +283,15 @@ export default Plugin.define({
       disposers.push(() => promptReg.dispose())
     }
 
-    // --- 首次选举：第一个到达的实例建立并发布共享 pipeline ---
+    // --- First election: the first instance to arrive builds and publishes the shared pipeline ---
     if (pipelineGlobal.get() !== undefined) {
       log(`pipeline owned by another realm (gen ${pipelineGlobal.get()!.generation}); observer instance`)
     } else {
       await elect("setup")
     }
 
-    // 本实例若持有 pipeline，卸载时负责回收（最后注册 → 最先执行，先于 hook 注销）
+    // If this instance owns the pipeline it must reclaim it on unload
+    // (registered last → runs first, before hook deregistration)
     disposers.push(async () => {
       unloading = true
       if (!owned) return

@@ -1,8 +1,8 @@
 /**
- * wire.ts 测试：
- * - dispose 返回 Promise 且等待刷盘（Bug 8：此前 fire-and-forget 可能截断最后一行）
- * - pending 槽消费后清理（Bug 4 关联：防长驻进程 Map 泄漏）
- * - PENDING_CAP 丢最老行为
+ * wire.ts tests:
+ * - dispose returns a promise and waits for the flush (Bug 8: fire-and-forget used to truncate the last line)
+ * - Pending slots are cleaned up after consumption (Bug 4 follow-up: prevents map leaks in long-lived processes)
+ * - PENDING_CAP drops-oldest behavior
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -48,7 +48,7 @@ test("PENDING_CAP=8：超上限丢最老帧", () => {
   for (let i = 1; i <= 10; i++) {
     recorder.recordWsSend(hookEvent("s3", `f${i}`) as never)
   }
-  // 容量 8：f1/f2 被挤出，下一次消费应拿到 f3
+  // capacity 8: f1/f2 are evicted, the next consume gets f3
   assert.strictEqual(recorder.consumePending("s3")?.frame, "f3")
   recorder.dispose()
 })
@@ -57,5 +57,5 @@ test("禁用时全部空操作", () => {
   const recorder = createWireRecorder({ enabled: false, directory: "/nonexistent" }, () => {})
   recorder.recordWsSend(hookEvent("s1", "x") as never)
   assert.strictEqual(recorder.consumePending("s1"), undefined)
-  recorder.dispose() // 不应抛错
+  recorder.dispose() // must not throw
 })

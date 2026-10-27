@@ -1,19 +1,22 @@
 /**
- * 配置加载：~/.config/opencode/ocg-obs.json（JSONC，支持注释）。
+ * Config loading: ~/.config/opencode/ocg-obs.json (JSONC, comments allowed).
  *
- * 三级优先级（高 → 低），对齐 Claude Code monitoring-usage 文档的 OTEL env 惯例：
- * 1. 标准 OTEL 环境变量（组织级统一部署走这条，不用改每个人的配置文件）：
- *    - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT，回落 OTEL_EXPORTER_OTLP_ENDPOINT
- *      → tracing.endpoint（值可带 /v1/traces 尾路径，加载时剥掉）
- *    - OTEL_EXPORTER_OTLP_TRACES_HEADERS + OTEL_EXPORTER_OTLP_HEADERS（合并）
- *      → tracing.headers（"k1=v1,k2=v2" 格式）
- *    - OTEL_RESOURCE_ATTRIBUTES → tracing.resourceAttributes（同格式）
- * 2. JSONC 配置文件：OCG_OBS_CONFIG > OPENCODE_CONFIG_DIR/ocg-obs.json
+ * Three precedence levels (high → low), aligned with the OTEL env conventions of the
+ * Claude Code monitoring-usage docs:
+ * 1. Standard OTEL environment variables (org-wide rollout without touching per-user
+ *    config files):
+ *    - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, falling back to OTEL_EXPORTER_OTLP_ENDPOINT
+ *      → tracing.endpoint (a trailing /v1/traces path is stripped at load time)
+ *    - OTEL_EXPORTER_OTLP_TRACES_HEADERS + OTEL_EXPORTER_OTLP_HEADERS (merged)
+ *      → tracing.headers ("k1=v1,k2=v2" format)
+ *    - OTEL_RESOURCE_ATTRIBUTES → tracing.resourceAttributes (same format)
+ * 2. JSONC config file: OCG_OBS_CONFIG > OPENCODE_CONFIG_DIR/ocg-obs.json
  *    > XDG_CONFIG_HOME/opencode/ocg-obs.json > ~/.config/opencode/ocg-obs.json
- * 3. 内置默认
+ * 3. Built-in defaults
  *
- * 所有文件字段做类型校验：类型不匹配（如 "false"/"500" 这类 JSON 笔误）告警并回落默认，
- * 不再静默按 JS 真值性/隐式转换生效。根级与 wire/tracing/contentGates 层的未知 key 均告警。
+ * Every file field is type-checked: a mismatch (e.g. a "false"/"500" JSON typo) warns
+ * and falls back to the default instead of silently passing JS truthiness or implicit
+ * coercion. Unknown keys are reported at the root and wire/tracing/contentGates levels.
  */
 import { readFileSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
@@ -21,64 +24,67 @@ import { join, dirname } from "node:path"
 import { parse as parseJsonc, type ParseError } from "jsonc-parser"
 
 export interface WireConfig {
-  /** 默认 false：wire body 含完整 system prompt/历史/tools，隐私+磁盘双敏感 */
+  /** Default false: wire bodies contain the full system prompt/history/tools — sensitive for both privacy and disk */
   readonly enabled: boolean
-  /** 默认 <dataDir>/raw-requests/ */
+  /** Default: <dataDir>/raw-requests/ */
   readonly directory: string
 }
 
 /**
- * 细粒度内容门（对齐 Claude Code 的 OTEL_LOG_USER_PROMPTS / TOOL_DETAILS / TOOL_CONTENT）。
- * `content` 是粗开关：false 时 toolDetails/toolContent 默认关；其余域默认开，
- * 可各自单独覆盖。wireBody 独立 —— 只落盘不进 span 的隐私档靠它。
+ * Fine-grained content gates (mirroring Claude Code's OTEL_LOG_USER_PROMPTS /
+ * TOOL_DETAILS / TOOL_CONTENT). `content` is the coarse switch: when false,
+ * toolDetails/toolContent default off; the other domains default on and can be
+ * overridden individually. wireBody is separate — it is the privacy tier for
+ * "write to disk but keep out of spans".
  */
 export interface ContentGates {
-  /** 轮根 span input.value（该轮用户消息），默认 true */
+  /** Root-span input.value (the turn's user message), default true */
   readonly userPrompts: boolean
-  /** 轮根 output.value（最后一答）、chat span output.value、gen_ai.output.messages、opencode.reasoning，默认 true */
+  /** Root output.value (final answer), chat-span output.value, gen_ai.output.messages, opencode.reasoning; default true */
   readonly assistantResponses: boolean
-  /** gen_ai.tool.call.arguments + tool span input.value，默认跟随 content */
+  /** gen_ai.tool.call.arguments + tool-span input.value, defaults to follow content */
   readonly toolDetails: boolean
-  /** gen_ai.tool.call.result + tool span output.value，默认跟随 content */
+  /** gen_ai.tool.call.result + tool-span output.value, defaults to follow content */
   readonly toolContent: boolean
-  /** wire body 进 chat span input.value/input.mime_type，默认 true（不挂 span 时 JSONL 照落） */
+  /** Wire body into chat-span input.value/input.mime_type, default true (JSONL is still written when not attached to a span) */
   readonly wireBody: boolean
 }
 
 export interface AnnotationsConfig {
   /**
-   * 默认 true：session.created/renamed → 实时 project/title annotation。
-   * 走 Phoenix 兼容后端的 /v1/session_annotations REST API（非 OTLP 标准，
-   * 其他后端接不到会 404），非 Phoenix 后端建议显式关闭。
+   * Default true: session.created/renamed → real-time project/title annotation via the
+   * Phoenix-compatible /v1/session_annotations REST API (not an OTLP standard; other
+   * backends will 404). Non-Phoenix backends should disable it explicitly.
    */
   readonly enabled: boolean
 }
 
 export interface TracingConfig {
-  /** 默认 true：事件流 → OTLP span → OTLP/HTTP 后端 */
+  /** Default true: event stream → OTLP spans → OTLP/HTTP backend */
   readonly enabled: boolean
-  /** OTLP/HTTP endpoint（任意兼容后端：OTel Collector / Phoenix / SigNoz …），默认 http://localhost:4318 */
+  /** OTLP/HTTP endpoint (any compatible backend: OTel Collector / Phoenix / SigNoz …), default http://localhost:4318 */
   readonly endpoint: string
-  /** project 名（openinference.project.name resource 属性，OpenInference 约定），默认 "opencode" */
+  /** Project name (openinference.project.name resource attribute, OpenInference convention), default "opencode" */
   readonly project: string
-  /** 额外请求头（认证等），同时用于 /v1/traces 与 /v1/session_annotations */
+  /** Extra request headers (auth etc.); shared by /v1/traces and /v1/session_annotations */
   readonly headers: Record<string, string>
-  /** 粗内容开关，默认 true。false → toolDetails/toolContent 默认关（可被 contentGates 单独拉回） */
+  /** Coarse content switch, default true. false → toolDetails/toolContent default off (re-enable individually via contentGates) */
   readonly content: boolean
   readonly contentGates: ContentGates
   /**
-   * 内容类属性最大长度（字符），默认 0 = 不截断（对齐
-   * CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH 语义，那个默认 60KB）。
-   * 截断时追加 `[TRUNCATED]` 标记并给 OpenInference 键补 `<key>_truncated/_original_length` 属性。
+   * Max length (chars) of content attributes, default 0 = no truncation (mirrors the
+   * CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH semantics, which defaults to 60KB).
+   * Truncation appends a `[TRUNCATED]` marker and adds `<key>_truncated/_original_length`
+   * attributes for OpenInference keys.
    */
   readonly contentMaxLength: number
-  /** 并入 OTLP resource 块的自定义属性（host.name / team 等；与内置键冲突时保留内置值） */
+  /** Custom attributes merged into the OTLP resource block (host.name / team etc.; builtin keys win on conflicts) */
   readonly resourceAttributes: Record<string, string>
   readonly annotations: AnnotationsConfig
 }
 
 export interface Config {
-  /** 总开关，默认 true。false 时插件什么都不做 */
+  /** Master switch, default true. When false the plugin does nothing */
   readonly enabled: boolean
   readonly wire: WireConfig
   readonly tracing: TracingConfig
@@ -106,7 +112,7 @@ const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "
 const ANNOTATION_KEYS = new Set(["enabled"])
 
 // ---------------------------------------------------------------------------
-// 类型校验 + 默认值回落
+// Type validation + default fallback
 // ---------------------------------------------------------------------------
 
 function boolField(value: unknown, path: string, fallback: boolean, warnings: ConfigWarning[]): boolean {
@@ -136,7 +142,7 @@ function intField(value: unknown, path: string, fallback: number, warnings: Conf
   return value
 }
 
-/** 字符串字典：值非 string 的键跳过并告警 */
+/** String record: non-string values are skipped with a warning */
 function recordField(value: unknown, path: string, warnings: ConfigWarning[]): Record<string, string> {
   if (value === undefined || value === null) return {}
   if (typeof value !== "object" || Array.isArray(value)) {
@@ -154,7 +160,7 @@ function recordField(value: unknown, path: string, warnings: ConfigWarning[]): R
   return out
 }
 
-/** 取配置节：null/缺失 → {}；非对象 → 告警并按 {} 处理 */
+/** Read a config section: null/missing → {}; non-object → warn and treat as {} */
 function section(value: unknown, path: string, warnings: ConfigWarning[]): Record<string, unknown> {
   if (value === undefined || value === null) return {}
   if (typeof value !== "object" || Array.isArray(value)) {
@@ -183,7 +189,7 @@ function dataDir(): string {
   return join(homedir(), ".local", "share", "opencode")
 }
 
-/** 解析 OTEL 惯例的 "k1=v1,k2=v2" 头/资源属性格式；坏对跳过并 warn */
+/** Parse the OTEL-style "k1=v1,k2=v2" headers/resource-attributes format; malformed pairs are skipped with a warning */
 function parseKvList(raw: string | undefined, envName: string, warnings: ConfigWarning[]): Record<string, string> {
   const out: Record<string, string> = {}
   if (!raw) return out
@@ -198,7 +204,7 @@ function parseKvList(raw: string | undefined, envName: string, warnings: ConfigW
   return out
 }
 
-/** endpoint 归一化：剥尾斜杠，并剥掉用户照抄 OTEL 文档带上的 /v1/traces 尾路径（我们发送时自己拼） */
+/** Endpoint normalization: strip trailing slashes and the /v1/traces suffix users copy from OTEL docs (we append the path ourselves when sending) */
 function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/\/+$/, "").replace(/\/v1\/traces$/, "")
 }
@@ -236,16 +242,17 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
     },
   }
 
-  // --- 文件层 ---
+  // --- File layer ---
   let fileConfig: Config = defaults
   if (!existsSync(configPath)) {
     log("no config file, using defaults", { path: configPath })
   } else {
     let raw: string
     try {
-      raw = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "") // BOM
+      raw = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "") // strip BOM
       const parseErrors: ParseError[] = []
-      // jsonc-parser：注释/尾逗号都合法，字符串里的 // 不会被误伤（原手写 strip 的坑）
+      // jsonc-parser: comments/trailing commas are legal, and // inside strings is left
+      // alone (a pitfall of the old hand-rolled stripper)
       const parsed = parseJsonc(raw, parseErrors, { allowTrailingComma: true }) as Record<string, unknown>
       if (parseErrors.length > 0 || !parsed || typeof parsed !== "object") {
         warnings.push({ kind: "invalid-json", message: `invalid JSON in ${configPath}: ${parseErrors.length} parse error(s)` })
@@ -290,14 +297,14 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
     }
   }
 
-  // --- 环境变量层（覆盖文件层；对齐 OTEL_EXPORTER_OTLP_* 惯例） ---
+  // --- Env layer (overrides the file layer; aligned with OTEL_EXPORTER_OTLP_* conventions) ---
   const envEndpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-  // 头合并：文件 < 通用 env < traces 专用 env（对齐 Claude Code env 覆盖文件的惯例）
+  // Header merge: file < generic env < traces-specific env (Claude Code's env-over-file convention)
   const envHeaders = {
     ...parseKvList(process.env.OTEL_EXPORTER_OTLP_HEADERS, "OTEL_EXPORTER_OTLP_HEADERS", warnings),
     ...parseKvList(process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", warnings),
   }
-  // 资源属性：文件 < env（同惯例）
+  // Resource attributes: file < env (same convention)
   const envResource = parseKvList(process.env.OTEL_RESOURCE_ATTRIBUTES, "OTEL_RESOURCE_ATTRIBUTES", warnings)
 
   const config: Config = {

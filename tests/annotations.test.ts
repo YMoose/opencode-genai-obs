@@ -1,8 +1,9 @@
 /**
- * annotations.ts 测试：
- * - 404 后重试成功（Phoenix span 入库异步，session 未建出 404 的既定边界）
- * - 持续失败重试 3 次后放弃（离线 sync.py 兜底）
- * - Bug 2：对端挂死时单次请求按超时中止，总耗时上界可控
+ * annotations.ts tests:
+ * - Retry succeeds after 404s (Phoenix ingests spans asynchronously; 404 before the
+ *   session exists is a known boundary)
+ * - Persistent failure: gives up after 3 retries (offline sync.py is the backstop)
+ * - Bug 2: a hung peer aborts per-request by timeout; total time stays bounded
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -43,13 +44,13 @@ test("持续失败：重试 3 次后放弃（静默，不 throw）", async (t) =
 
   const logs: string[] = []
   const annotator = createAnnotator({ endpoint: server.url, retryDelayMs: 2, timeoutMs: 2_000 }, (msg) => logs.push(msg))
-  await annotator.annotate("s1", { title: "T" }) // 不应 reject
+  await annotator.annotate("s1", { title: "T" }) // must not reject
   await waitFor(() => server.requests.length >= 3, 5_000)
   assert.ok(logs.some((line) => line.includes("gave up")), "放弃应留痕")
 })
 
 test("Bug 2：对端挂死时按超时中止重试，总耗时有界", async (t) => {
-  const server = await startServer(() => {}) // 永不响应
+  const server = await startServer(() => {}) // never responds
   t.after(() => server.close())
 
   const logs: string[] = []

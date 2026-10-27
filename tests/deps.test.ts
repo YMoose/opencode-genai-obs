@@ -1,8 +1,9 @@
 /**
- * 依赖契约测试 —— 模式参考 oh-my-opencode-slim src/dependency-contract.test.ts。
- * 本项目的核心卖点之一是 OTLP protobuf 手写编码、零重量级 SDK 依赖，
- * 用测试锁住依赖闭包：运行时 dependencies 仅 jsonc-parser，src/ 的 import
- * 图不得越界（只允许 node:* 内置、相对路径、已声明依赖与 peer 依赖）。
+ * Dependency-contract tests — pattern adapted from oh-my-opencode-slim src/dependency-contract.test.ts.
+ * A core selling point of this project is the hand-rolled OTLP protobuf encoding with
+ * zero heavyweight SDK dependencies; these tests lock that down: runtime dependencies
+ * are jsonc-parser only, and the src/ import graph stays within bounds (node:* builtins,
+ * relative paths, declared dependencies, and peer dependencies only).
  */
 import test from "node:test"
 import assert from "node:assert/strict"

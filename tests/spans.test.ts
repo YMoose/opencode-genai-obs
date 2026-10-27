@@ -1,10 +1,10 @@
 /**
- * spans.ts 状态机回归测试：
- * - 确定性 id 契约（trace/span id 哈希公式）
- * - Bug 3：空 prompt 的轮根名回退到 title（此前恒为 "(empty)"，回退是死代码）
- * - Bug 6：缺 assistantMessageID / tool call id 的 malformed 事件不再产生 "undefined" 伪 id span
- * - Bug 4：session.deleted 清理会话状态
- * - 子会话多轮 execution 每轮都有容器 span
+ * spans.ts state-machine regression tests:
+ * - Deterministic id contract (the trace/span id hash formulas)
+ * - Bug 3: empty-prompt turn roots fall back to the title (used to be a constant "(empty)"; the fallback was dead code)
+ * - Bug 6: malformed events missing assistantMessageID / tool call id no longer produce fake "undefined"-id spans
+ * - Bug 4: session.deleted cleans up session state
+ * - Sub-agent sessions get a container span per execution round
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -38,7 +38,7 @@ function makeHarness(overrides?: Partial<SpanBuilderOptions>): Harness {
   return { spans, builder }
 }
 
-/** 等异步 flush（execution.* / session.deleted 的 void flushTurnRoot）落地 */
+/** Wait for async flushes (the void flushTurnRoot of execution.* / session.deleted) to land */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25))
 
 const event = (type: string, created: number, data: Record<string, unknown>) => ({ type, created, data })
@@ -90,11 +90,11 @@ test("Bug 6：缺 assistantMessageID / tool id 的 malformed 事件不产生伪 
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "q")
-  // step.started 无 assistantMessageID：不建 step
+  // step.started without assistantMessageID: no step created
   builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1" }))
-  // step.ended 无 assistantMessageID：不发 chat span
+  // step.ended without assistantMessageID: no chat span
   builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1" }))
-  // tool.success 无 id：不发 tool span
+  // tool.success without id: no tool span
   builder.handleEvent(event("session.tool.success", 1_250, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
   await settle()
@@ -127,7 +127,7 @@ test("子会话多轮 execution：每轮都发容器 span（同一确定性 id�
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "go")
   builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
-  // subagent 工具调用成功 → 注册 s2 挂接点 + 容器
+  // sub-agent tool success → registers the s2 attachment point + container
   builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "task" }))
   builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { agent: "child" } }))
   builder.handleEvent(
@@ -139,11 +139,11 @@ test("子会话多轮 execution：每轮都发容器 span（同一确定性 id�
       metadata: { sessionID: "s2" },
     }),
   )
-  // 第一轮 execution
+  // first execution round
   builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s2", assistantMessageID: "c1" }))
   builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "s2", assistantMessageID: "c1" }))
   builder.handleEvent(event("session.execution.succeeded", 1_500, { sessionID: "s2" }))
-  // 第二轮 execution（同会话复用）
+  // second execution round (same session reused)
   builder.handleEvent(event("session.step.started", 1_600, { sessionID: "s2", assistantMessageID: "c2" }))
   builder.handleEvent(event("session.step.ended", 1_700, { sessionID: "s2", assistantMessageID: "c2" }))
   builder.handleEvent(event("session.execution.succeeded", 1_800, { sessionID: "s2" }))

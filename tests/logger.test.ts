@@ -1,7 +1,7 @@
 /**
- * logger.ts 测试 —— 模式移植自 oh-my-opencode-slim src/utils/logger.test.ts。
- * 我们的 logger 是进程级单例且无自动 reset，这里用 resetLoggerForTesting()
- * 在每个用例前归位；所有用例的 OPENCODE_LOG_DIR 指向临时目录。
+ * logger.ts tests — pattern ported from oh-my-opencode-slim src/utils/logger.test.ts.
+ * Our logger is a process-wide singleton with no auto reset; resetLoggerForTesting()
+ * restores it before each case. OPENCODE_LOG_DIR points at temp dirs throughout.
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -94,7 +94,7 @@ test("日志目录不可写时降级 stderr，不抛错", (t) => {
     rmSync(dir, { recursive: true, force: true })
   })
   return (async () => {
-    initLogger() // mkdirSync 失败 → 降级
+    initLogger() // mkdirSync fails → fall back to stderr
     log("still works")
     await flushForTesting()
     console.error = original

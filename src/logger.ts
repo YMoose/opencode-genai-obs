@@ -1,11 +1,11 @@
 /**
- * 进程级单例 logger：文件 + stderr 兜底 + 7 天留存 + 敏感信息脱敏。
- * 参考 oh-my-opencode-slim src/utils/logger.ts。
+ * Process-wide singleton logger: file + stderr fallback + 7-day retention + secret
+ * redaction. Adapted from oh-my-opencode-slim src/utils/logger.ts.
  *
- * - 文件名含 ISO 时间戳 + pid（多进程/多实例不冲突）
- * - 文件写失败自动降级 stderr
- * - 所有写操作走 promise 链串行化（不阻塞事件循环）
- * - 每条日志过 redactSecrets（sk-/ghp_/Bearer 等），调用方无法绕过
+ * - File names carry an ISO timestamp + pid (no clashes across processes/instances)
+ * - Falls back to stderr automatically when file writes fail
+ * - All writes are serialized through a promise chain (never blocks the event loop)
+ * - Every entry goes through redactSecrets (sk-/ghp_/Bearer etc.); callers cannot bypass it
  */
 
 import * as fs from "node:fs"
@@ -18,7 +18,7 @@ const PREFIX = "ocg-obs."
 const SUFFIX = ".log"
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
-/** 进程启动时刻（ISO，去横杠冒号），保证同进程内文件名稳定 */
+/** Process start time (ISO, dashes/colons stripped) so the file name stays stable within a process */
 const STAMP = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)
 
 type Sink = { kind: "uninitialized" } | { kind: "file"; filePath: string } | { kind: "stderr" }
@@ -30,7 +30,6 @@ function logDir(): string {
   return process.env.OPENCODE_LOG_DIR ?? path.join(os.homedir(), ".local", "share", "opencode", "log")
 }
 
-/** 清理超过 7 天的旧日志 */
 function cleanup(dir: string): void {
   try {
     const now = Date.now()
@@ -46,7 +45,8 @@ function cleanup(dir: string): void {
 
 export function initLogger(tag?: string): void {
   const dir = logDir()
-  // 同目录已初始化则复用（多实例/重载场景），只跑留存清理
+  // Already initialized in this dir (multi-instance/reload): reuse it and only run
+  // retention cleanup
   if (sink.kind === "file" && path.dirname(sink.filePath) === dir) {
     cleanup(dir)
     return
@@ -75,7 +75,8 @@ export function log(message: string, data?: unknown): void {
     if (data !== undefined) {
       try { dataStr = ` ${JSON.stringify(data)}` } catch { dataStr = " [unserializable]" }
     }
-    // 所有出口（文件、stderr、写失败降级 stderr）都过这一个脱敏函数
+    // Every sink (file, stderr, write-failure stderr fallback) funnels through this
+    // one redaction call
     const entry = redactSecrets(`[${timestamp}] ${message}${dataStr}\n`)
 
     if (sink.kind === "stderr") {
@@ -99,12 +100,12 @@ export function log(message: string, data?: unknown): void {
   } catch { /* logging must remain best-effort */ }
 }
 
-/** 测试用：等所有排队的写入完成 */
+/** Test helper: wait for all queued writes to complete */
 export async function flushForTesting(): Promise<void> {
   await writeChain
 }
 
-/** 测试用：重置进程级单例 sink 与写链（生产代码不得调用） */
+/** Test helper: reset the process-wide singleton sink and write chain (never call from production code) */
 export function resetLoggerForTesting(): void {
   sink = { kind: "uninitialized" }
   writeChain = Promise.resolve()

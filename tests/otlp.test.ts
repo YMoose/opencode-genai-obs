@@ -1,7 +1,7 @@
 /**
- * otlp.ts 编码器与 POST 测试：
- * - buildBody：resource 内置键不可被 resourceAttributes 覆盖
- * - postSpans：成功/非 200/超时（Bug 2：无超时会挂死 pump 与卸载流程）
+ * otlp.ts encoder and POST tests:
+ * - buildBody: builtin resource keys cannot be overridden by resourceAttributes
+ * - postSpans: success / non-200 / timeout (Bug 2: no timeout would hang the pump and unload)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -40,7 +40,7 @@ test("postSpans：成功路径带 protobuf 头，且不发送任何后端专属�
   assert.strictEqual(server.requests.length, 1)
   assert.strictEqual(server.requests[0]!.path, "/v1/traces")
   assert.strictEqual(server.requests[0]!.headers["content-type"], "application/x-protobuf")
-  // 去平台化契约：project 语义只走 resource 属性，不得有 x-project-name 之类后端专属头
+  // De-platforming contract: the project semantic rides resource attributes only — no backend-specific headers like x-project-name
   assert.strictEqual(server.requests[0]!.headers["x-project-name"], undefined)
   assert.ok(server.requests[0]!.body.length > 0, "应发送 protobuf body")
 })
@@ -55,7 +55,7 @@ test("postSpans：非 200 抛错（调用方负责重试）", async (t) => {
 })
 
 test("Bug 2：对端挂死时 postSpans 按超时中止，不再永久 pending", async (t) => {
-  // 收到请求但永不响应（模拟 Phoenix 半开/被 SIGSTOP）
+  // accepts the request but never responds (simulates a half-open / SIGSTOPped backend)
   const server = await startServer(() => {})
   t.after(() => server.close())
   const start = Date.now()

@@ -1,6 +1,7 @@
 /**
- * OTLP 发送队列：内存 FIFO + 指数退避重试。
- * 后端重启期间 span 攒着；超过上限后丢弃并 warn-log（tracing 是观测面，永不阻塞主路径）。
+ * OTLP send queue: in-memory FIFO with exponential-backoff retry.
+ * Spans buffer while the backend restarts; past the cap they are dropped with a
+ * warn-log (tracing is the observability plane and never blocks the main path).
  */
 
 import { postSpans, type SpanRecord } from "./otlp.js"
@@ -8,17 +9,17 @@ import { postSpans, type SpanRecord } from "./otlp.js"
 export interface SenderOptions {
   readonly endpoint: string
   readonly project?: string
-  /** 额外请求头（认证等） */
+  /** Extra request headers (auth etc.) */
   readonly headers?: Record<string, string>
-  /** 并入 OTLP resource 块的自定义属性 */
+  /** Custom attributes merged into the OTLP resource block */
   readonly resourceAttributes?: Record<string, string>
-  /** 单批最大 span 数（OTLP HTTP 无 gRPC 4MB 限制，但批太大重试代价高） */
+  /** Max spans per batch (OTLP HTTP has no gRPC 4MB limit, but huge batches are expensive to retry) */
   readonly batchSize?: number
-  /** 队列满时丢弃最老的 span（防后端长期宕机撑爆内存） */
+  /** Drop the oldest spans when the queue is full (memory guard against long backend outages) */
   readonly maxQueue?: number
-  /** 重试基础退避毫秒数，默认 1s */
+  /** Base retry backoff in ms, default 1s */
   readonly retryDelayMs?: number
-  /** 单次 POST 超时毫秒数（透传给 postSpans），默认 30s */
+  /** Per-POST timeout in ms (passed through to postSpans), default 30s */
   readonly timeoutMs?: number
 }
 
@@ -32,7 +33,7 @@ const BASE_DELAY_MS = 1_000
 
 export interface Sender {
   readonly push: (span: SpanRecord) => void
-  /** 等队列清空并停泵（插件卸载时调用） */
+  /** Wait for the queue to empty and stop the pump (called on plugin unload) */
   readonly drain: () => Promise<void>
 }
 
@@ -99,7 +100,7 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
         clearTimeout(timer)
         timer = undefined
       }
-      // 等在途 pump 完成，避免并发冲同一队列
+      // Wait for the in-flight pump to finish before touching the queue concurrently
       while (pumping) await new Promise((resolve) => setTimeout(resolve, 25))
       while (queue.length > 0) {
         const batch = queue.splice(0, batchSize)
