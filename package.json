@@ -1,0 +1,40 @@
+{
+  "name": "opencode-genai-tracing",
+  "version": "0.1.0",
+  "description": "OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, for Phoenix",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opentelemetry",
+    "genai",
+    "phoenix",
+    "tracing",
+    "llm"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "*",
+    "effect": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
+  }
+}
