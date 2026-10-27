@@ -1,4 +1,4 @@
-# opencode-genai-tracing
+# opencode-genai-obs
 
 OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出到 Phoenix。
 
@@ -10,7 +10,7 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 
 ```json
 {
-  "plugin": ["/home/cambricon/yzh/ocg-tracing"]
+  "plugin": ["/home/cambricon/yzh/ocg-obs"]
 }
 ```
 
@@ -54,13 +54,13 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（同格式） |
 
 优先级：**env > 配置文件 > 默认**（同 Claude Code monitoring-usage 文档惯例）。
-配置文件查找：`OCG_TRACING_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-tracing.json` > `~/.config/opencode/ocg-tracing.json`。
+配置文件查找：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`。
 
 ## 功能：wire body 采集
 
 每次发往 LLM 的原始请求体（完整 system prompt + 裁剪后 messages + tools schema + 采样参数 + provider 专属 options）落盘成 JSONL。
 
-**默认关闭**。开启：创建 `~/.config/opencode/ocg-tracing.json`：
+**默认关闭**。开启：创建 `~/.config/opencode/ocg-obs.json`：
 
 ```json
 {

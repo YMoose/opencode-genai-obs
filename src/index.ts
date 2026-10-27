@@ -1,11 +1,11 @@
 /**
- * opencode-genai-tracing — 插件入口。
+ * opencode-genai-obs — 插件入口。
  *
  * Phase 1：wire body 采集（v2 session hook → JSONL 落盘 + pending 槽）
  * Phase 2：事件驱动 span builder（ctx.event.subscribe → OTLP span → Phoenix）
  *
  * 安装：~/.config/opencode/opencode.json 的 plugin 数组加本目录绝对路径
- * 配置：~/.config/opencode/ocg-tracing.json（可选，JSONC）
+ * 配置：~/.config/opencode/ocg-obs.json（可选，JSONC）
  *
  * 多实例架构（实测 3 个独立 module realm/进程）：
  * - session hook（ws.send / http.request / prompt）按 session 所在 location 的
@@ -22,7 +22,7 @@ import { createSender } from "./sender.js"
 import { createSpanBuilder } from "./spans.js"
 import { createAnnotator } from "./annotations.js"
 
-const PIPELINE_KEY = "__ocgTracingPipeline$"
+const PIPELINE_KEY = "__ocgObsPipeline$"
 
 /** 共享 pipeline：owner 创建并发布到 globalThis；所有实例的 hook 回调委托到这里 */
 interface Pipeline {
@@ -168,7 +168,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
 }
 
 export default Plugin.define({
-  id: "opencode-genai-tracing",
+  id: "opencode-genai-obs",
   setup: async (ctx) => {
     initLogger()
 

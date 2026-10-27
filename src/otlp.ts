@@ -104,13 +104,13 @@ export interface OtlpOptions {
 }
 
 export function buildBody(spans: readonly SpanRecord[], options: OtlpOptions = {}): Buffer {
-  const builtin = new Map<string, AttrValue>([["service.name", "opencode-genai-tracing"]])
+  const builtin = new Map<string, AttrValue>([["service.name", "opencode-genai-obs"]])
   if (options.project) builtin.set("openinference.project.name", options.project)
   for (const [key, value] of Object.entries(options.resourceAttributes ?? {})) {
     if (!builtin.has(key)) builtin.set(key, value) // 内置键不覆盖（对齐 Claude Code 语义）
   }
   const resource = Buffer.concat([...builtin].map(([k, v]) => ld(1, kv(k, v))))
-  const scope = Buffer.concat([s(1, "opencode-genai-tracing"), s(2, "0.1.0")])
+  const scope = Buffer.concat([s(1, "opencode-genai-obs"), s(2, "0.1.0")])
   const scopeSpans = Buffer.concat([ld(1, scope), ...spans.map((span) => ld(2, spanMessage(span)))])
   const resourceSpans = Buffer.concat([ld(1, resource), ld(2, scopeSpans)])
   return ld(1, resourceSpans) // ExportTraceServiceRequest.resource_spans = 1

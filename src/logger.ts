@@ -14,7 +14,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { redactSecrets } from "./redact.js"
 
-const PREFIX = "ocg-tracing."
+const PREFIX = "ocg-obs."
 const SUFFIX = ".log"
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -59,7 +59,7 @@ export function initLogger(tag?: string): void {
     cleanup(dir)
   } catch {
     sink = { kind: "stderr" }
-    safeStderr("[ocg-tracing] file logging unavailable, falling back to stderr")
+    safeStderr("[ocg-obs] file logging unavailable, falling back to stderr")
   }
 }
 
@@ -91,7 +91,7 @@ export function log(message: string, data?: unknown): void {
           await appendFile(filePath, entry)
         } catch {
           sink = { kind: "stderr" }
-          safeStderr("[ocg-tracing] file append failed, falling back to stderr")
+          safeStderr("[ocg-obs] file append failed, falling back to stderr")
           safeStderr(entry.trimEnd())
         }
       })

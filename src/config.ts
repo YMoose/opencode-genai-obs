@@ -1,5 +1,5 @@
 /**
- * 配置加载：~/.config/opencode/ocg-tracing.json（JSONC，支持注释）。
+ * 配置加载：~/.config/opencode/ocg-obs.json（JSONC，支持注释）。
  *
  * 三级优先级（高 → 低），对齐 Claude Code monitoring-usage 文档的 OTEL env 惯例：
  * 1. 标准 OTEL 环境变量（组织级统一部署走这条，不用改每个人的配置文件）：
@@ -8,8 +8,8 @@
  *    - OTEL_EXPORTER_OTLP_TRACES_HEADERS + OTEL_EXPORTER_OTLP_HEADERS（合并）
  *      → tracing.headers（"k1=v1,k2=v2" 格式）
  *    - OTEL_RESOURCE_ATTRIBUTES → tracing.resourceAttributes（同格式）
- * 2. JSONC 配置文件：OCG_TRACING_CONFIG > OPENCODE_CONFIG_DIR/ocg-tracing.json
- *    > XDG_CONFIG_HOME/opencode/ocg-tracing.json > ~/.config/opencode/ocg-tracing.json
+ * 2. JSONC 配置文件：OCG_OBS_CONFIG > OPENCODE_CONFIG_DIR/ocg-obs.json
+ *    > XDG_CONFIG_HOME/opencode/ocg-obs.json > ~/.config/opencode/ocg-obs.json
  * 3. 内置默认
  */
 import { readFileSync, existsSync } from "node:fs"
@@ -77,7 +77,7 @@ export interface ConfigWarning {
 }
 
 function configSearchDir(): string {
-  if (process.env.OCG_TRACING_CONFIG) return dirname(process.env.OCG_TRACING_CONFIG)
+  if (process.env.OCG_OBS_CONFIG) return dirname(process.env.OCG_OBS_CONFIG)
   if (process.env.OPENCODE_CONFIG_DIR) return process.env.OPENCODE_CONFIG_DIR
   if (process.env.XDG_CONFIG_HOME) return join(process.env.XDG_CONFIG_HOME, "opencode")
   return join(homedir(), ".config", "opencode")
@@ -119,7 +119,7 @@ function resolveGates(content: boolean, raw: Record<string, unknown>): ContentGa
 
 export function loadConfig(log: (msg: string, data?: unknown) => void): { config: Config; warnings: ConfigWarning[] } {
   const warnings: ConfigWarning[] = []
-  const configPath = process.env.OCG_TRACING_CONFIG ?? join(configSearchDir(), "ocg-tracing.json")
+  const configPath = process.env.OCG_OBS_CONFIG ?? join(configSearchDir(), "ocg-obs.json")
 
   const defaults: Config = {
     enabled: true,

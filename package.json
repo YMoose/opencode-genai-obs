@@ -1,5 +1,5 @@
 {
-  "name": "opencode-genai-tracing",
+  "name": "opencode-genai-obs",
   "version": "0.1.0",
   "description": "OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, for Phoenix",
   "license": "MIT",
