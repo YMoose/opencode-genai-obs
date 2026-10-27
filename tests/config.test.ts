@@ -128,3 +128,18 @@ test("OTEL env 覆盖文件层：endpoint 归一化、headers 合并、坏对告
   assert.ok(bad.warnings.some((warning) => warning.kind === "bad-env"))
   assert.deepStrictEqual(bad.config.tracing.headers, { a: "1" })
 })
+
+test("Bug 9（opencode #55002 同款）：OTEL env 值按 W3C Baggage percent-decode，坏序列原样保留", () => {
+  const { config } = loadFrom(`{}`, {
+    OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Bearer%20test-token,x-api-key=abc%zz",
+    OTEL_RESOURCE_ATTRIBUTES: "team=platform%20team,rate=100%",
+  })
+  assert.strictEqual(
+    config.tracing.headers.Authorization,
+    "Bearer test-token",
+    "percent-encoded 空格必须解码，否则 collector 收到 Bearer%20test-token 会直接拒收",
+  )
+  assert.strictEqual(config.tracing.headers["x-api-key"], "abc%zz", "非法 escape 序列不得抛异常，原样保留")
+  assert.strictEqual(config.tracing.resourceAttributes.team, "platform team", "resource attributes 同格式同样解码")
+  assert.strictEqual(config.tracing.resourceAttributes.rate, "100%", "裸 % 不解码也不得抛")
+})

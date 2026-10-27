@@ -55,7 +55,7 @@ For organization-wide rollout, drive everything via shell env — no per-user co
 | Variable | Effect |
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint`; a trailing `/v1/traces` path is stripped automatically |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`; traces-specific wins) |
+| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`; traces-specific wins; values percent-decoded per W3C Baggage) |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (same format) |
 
 Precedence: **env > config file > defaults** (same convention as the Claude Code monitoring-usage docs).

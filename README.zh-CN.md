@@ -55,7 +55,7 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 | 环境变量 | 作用 |
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回落 `OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`；`/v1/traces` 尾路径自动剥掉 |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`；traces 专用优先） |
+| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`；traces 专用优先；值按 W3C Baggage 规范 percent-decode） |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（同格式） |
 
 优先级：**env > 配置文件 > 默认**（同 Claude Code monitoring-usage 文档惯例）。

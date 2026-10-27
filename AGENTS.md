@@ -1,0 +1,67 @@
+# AGENTS.md
+
+Guidelines for agents working in this repository.
+
+## Project
+
+opencode-genai-obs (`ocg-obs`): an OpenCode v2 plugin providing GenAI-semconv OTLP tracing
+(real-time lane) plus raw LLM wire-body capture, aligned with OTel GenAI semconv + OpenInference
+only — never bound to a specific observability platform. Runtime dependency closure is minimal
+(`jsonc-parser` only); zero new test dependencies (`node:test` + `node:assert`).
+
+## Layout
+
+- `src/index.ts` — plugin entry: hook registration, owner election/re-election (globalThis
+  pipeline singleton shared across opencode's per-location module realms)
+- `src/config.ts` — env/config loading and validation (env > config file > defaults)
+- `src/spans.ts` — event → span state machine, deterministic trace/span ids
+- `src/otlp.ts` — dependency-free OTLP/HTTP protobuf encoder
+- `src/sender.ts` — send queue with retry/backoff and drain-on-dispose
+- `src/wire.ts` — wire-body JSONL capture (`experimental.ws.send` + `http.request` hooks)
+- `src/annotations.ts` — Phoenix-compatible session annotations (toggleable extension)
+- `src/redact.ts`, `src/logger.ts`, `src/types.ts` — redaction, file logger, shared types
+- `tests/` — `node:test` suite; `tests/helpers.ts` has the mock infrastructure
+
+## Commands
+
+```bash
+npm run typecheck   # tsc -p tsconfig.json --noEmit
+npm test            # tsc -p tsconfig.test.json && node --test dist-test/tests/*.test.js
+npm run build       # compile src/ → dist/
+```
+
+Node 25 does not support directory arguments for `node --test`; the glob is required.
+
+## Bug-fix rule (mandatory)
+
+Every bug fix lands with an accompanying test:
+
+- Write the test first and confirm it fails against the unfixed code (red), then fix and
+  confirm green. The commit that fixes a bug must contain its test.
+- Continue the `Bug N` numbering in test titles (currently Bug 1–9); cite the upstream origin
+  in the title when one exists (e.g. `Bug 9（opencode #55002 同款）`).
+- The test must assert the observable behavior that was wrong, not just that code ran.
+
+## Testing conventions
+
+- Test titles and assertion messages are Chinese string literals; code comments are English.
+- globalThis keys `__ocgObsPipeline$` / `__ocgObsPipelineGen$` are shared process state: tests
+  that install them must clean up via `t.after(...)`, or they contaminate the whole file.
+- Config tests: use `snapshotEnv`/`restoreEnv`/`tempDir` from `tests/helpers.ts` (see
+  `loadFrom` in `config.test.ts`); never leak env or touch the user's real config path.
+
+## Style
+
+- Google TypeScript Style Guide is the reference; semantic rules are enforced. Adopted
+  deviations (do not "fix" these): no semicolons, double quotes, brace-less single-statement
+  `if`s, ~100-120 col lines, arrow-function consts inside factory closures.
+- Comments in English, "why" only — delete comments that restate the code.
+- CONSTANT_CASE is only valid at module level; function-scoped constants use lowerCamelCase.
+- `export default` in `src/index.ts` is required by the opencode plugin host — keep it.
+- Non-null assertions need either a restructure that removes them or a `// Safe:` comment.
+
+## Commits
+
+Author: `YZH <yzh@localhost>` (no global git identity on this machine — pass
+`-c user.name=YZH -c user.email=yzh@localhost`). Short imperative subjects with a conventional
+prefix (`fix:` / `feat:` / `test:` / `docs:` / `style:` / `refactor:`), Chinese description.

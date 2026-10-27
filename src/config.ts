@@ -189,6 +189,16 @@ function dataDir(): string {
   return join(homedir(), ".local", "share", "opencode")
 }
 
+/** Percent-decode with a raw fallback: the OTLP exporter spec uses the W3C Baggage format, so
+ * "Bearer%20token" must arrive decoded at the collector; malformed sequences ("100%", "abc%zz") stay as-is */
+function decodePair(component: string): string {
+  try {
+    return decodeURIComponent(component)
+  } catch {
+    return component
+  }
+}
+
 /** Parse the OTEL-style "k1=v1,k2=v2" headers/resource-attributes format; malformed pairs are skipped with a warning */
 function parseKvList(raw: string | undefined, envName: string, warnings: ConfigWarning[]): Record<string, string> {
   const out: Record<string, string> = {}
@@ -199,7 +209,7 @@ function parseKvList(raw: string | undefined, envName: string, warnings: ConfigW
       warnings.push({ kind: "bad-env", message: `${envName}: skipping malformed pair "${pair.trim()}"` })
       continue
     }
-    out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim()
+    out[decodePair(pair.slice(0, eq).trim())] = decodePair(pair.slice(eq + 1).trim())
   }
   return out
 }
