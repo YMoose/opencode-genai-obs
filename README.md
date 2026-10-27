@@ -177,6 +177,14 @@ Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record p
       - Constraints: extension callbacks are always fire-and-forget with timeout protection
         (as annotations are today), must never block the span hot path; extension failures
         only warn and never affect tracing
+- [ ] **TODO (deferred, low priority)**: trace **head sampling** — a `tracing.sampleRatio`
+      config (+ env override, semantics of opencode #44134's `OPENCODE_TRACE_RATIO` /
+      OTel `OTEL_TRACES_SAMPLER_ARG`). Deliberately not implemented: current deployments are
+      audit-oriented and want full export; sampling only pays off at org-wide volume.
+      Design sketch if ever picked up: decide at trace open from the deterministic traceId
+      itself (stateless, identical verdict across instances/reloads and the offline replay
+      lane; all spans of an unselected trace are dropped at emit time — head sampling keeps
+      traces whole). Default stays `1.0` (full export)
 
 Design doc: `../obsystem/otel-span-exportor/MERGED-PLUGIN.md`  
 Research: `../obsystem/otel-span-exportor/RESEARCH.md`
