@@ -148,4 +148,6 @@ npm test           # 编译并跑 node:test 测试套件（tests/ → dist-test/
 
 测试覆盖：span 状态机（确定性 id、内容门、malformed 事件守卫、session 清理）、
 OTLP 编码/POST（超时、非 200）、发送队列（重试、丢弃）、annotation 重试、
-wire 落盘/刷盘、配置校验，以及插件级集成（wire-only 不外发、owner 掉线补选）。
+wire 落盘/刷盘、配置校验、脱敏与日志（参考 oh-my-opencode-slim 的测试模式），
+插件公共合同（禁用不触 ctx、幂等 unload、reload 重建、hook 注销对称），
+以及依赖契约（运行时依赖闭包最小化 + src import 图不越界）。

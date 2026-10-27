@@ -103,3 +103,9 @@ export function log(message: string, data?: unknown): void {
 export async function flushForTesting(): Promise<void> {
   await writeChain
 }
+
+/** 测试用：重置进程级单例 sink 与写链（生产代码不得调用） */
+export function resetLoggerForTesting(): void {
+  sink = { kind: "uninitialized" }
+  writeChain = Promise.resolve()
+}
