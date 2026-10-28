@@ -171,7 +171,7 @@ export interface SpanBuilderOptions {
     readonly toolContent: boolean
     readonly wireBody: boolean
   }
-  /** Max length (chars) of content attributes, 0 = no truncation */
+  /** Byte budget for content attributes: -1 = no truncation, 0 = metadata-only (see tracing.contentMaxLength) */
   readonly contentMaxLength: number
   /** Take one pending wire frame (kind=primary FIFO); undefined when none is left */
   readonly consumeWire: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined

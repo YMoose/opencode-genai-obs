@@ -10,8 +10,9 @@ only — never bound to a specific observability platform. Signals are GenAI-sem
 traces under `gen_ai.*`; metrics limited to `gen_ai.client.*`; events limited to the five
 `gen_ai.*` message events. No infra/runtime metrics, no app-ops dashboard metrics, no
 general log piping. The OTLP protobuf encoding is delegated to the official @opentelemetry
-SDK (pinned closure: api / core / resources / sdk-trace-base / exporter-trace-otlp-proto +
-jsonc-parser); zero new test dependencies (`node:test` + `node:assert`).
+SDK (pinned closure: api / api-logs / core / resources / sdk-metrics / sdk-logs /
+sdk-trace-base / the three OTLP proto exporters + jsonc-parser); zero new test
+dependencies (`node:test` + `node:assert`).
 
 ## Layout
 
@@ -54,7 +55,7 @@ Every bug fix lands with an accompanying test:
 
 - Write the test first and confirm it fails against the unfixed code (red), then fix and
   confirm green. The commit that fixes a bug must contain its test.
-- Continue the `Bug N` numbering in test titles (currently Bug 1–9); cite the upstream origin
+- Continue the `Bug N` numbering in test titles (currently Bug 1–14); cite the upstream origin
   in the title when one exists (e.g. `Bug 9 (same as opencode #55002)`).
 - The test must assert the observable behavior that was wrong, not just that code ran.
 

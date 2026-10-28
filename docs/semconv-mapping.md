@@ -2,7 +2,9 @@
 
 Authoritative one-page reference for what we capture from OpenCode and where each piece
 lands in the emitted spans. Reflects `src/spans.ts` + `src/otlp.ts` (Real-time lane);
-the on-disk wire JSONL is documented in `src/types.ts` and `README.md`.
+the on-disk wire JSONL is documented in `src/types.ts` and `README.md`. Traces lane
+only — metrics-lane attributes and logs-lane event bodies are documented in the README's
+Metrics and Log events tables.
 
 Citations are `path:line` pointers.
 
@@ -172,9 +174,9 @@ The container's parent is the `execute_tool {subagent,task}` span that registere
 
 | Resource attribute | Source |
 |---|---|
-| `service.name` | const `"opencode-genai-obs"` |
+| `service.name` | `OTEL_SERVICE_NAME` env, else a `service.name` key in the merged resource attributes, else const `"opencode-genai-obs"` |
 | `openinference.project.name` | `tracing.project` config (default `"opencode"`) |
-| `<custom>` | `tracing.resourceAttributes` ∪ `OTEL_RESOURCE_ATTRIBUTES` (builtin keys win on conflicts) |
+| `<custom>` | `tracing.resourceAttributes` merged under `OTEL_RESOURCE_ATTRIBUTES` (env wins per key); builtin keys win on conflicts, except `service.name` |
 
 Instrumentation scope: `{ name: "opencode-genai-obs", version: "<package version>" }`.
 
@@ -202,13 +204,17 @@ and make duplicate SSE deliveries harmless (Phoenix-style backends upsert on
   frame (and gated by `contentGates.wireBody`).
 - OTel span events (`gen_ai.client.inference.operation.details`, exception events) —
   statuses are encoded via OTLP `Status`, not events, to keep the encoder minimal.
-- Logs (`log_body` on OpenInference) — plugin logs live in
-  `~/.local/share/opencode/log/ocg-obs.*.log`, not OTLP.
+- Logs (`log_body` on OpenInference) — the `log_body` convention is not used; message
+  content ships via the opt-in OTLP logs lane (`src/logs.ts`). Plugin diagnostics go
+  only to the local file sink (`~/.local/share/opencode/log/ocg-obs.*.log`), never to
+  OTLP.
 
 ## 7. Cross-references
 
 - State machine + per-span attribute construction: `src/spans.ts`
 - Resource/Scope/Span protobuf encoding: `src/otlp.ts`
+- Metrics lane (`gen_ai.client.*` histograms): `src/metrics.ts`
+- Logs lane (`gen_ai.*` message events): `src/logs.ts`
 - Config knobs feeding each gate: `src/config.ts` (`TracingConfig`)
 - On-disk JSONL record schema: `src/types.ts` (`WireRecord`)
 - Phoenix annotations (non-OTLP REST extension, orthogonal): `src/annotations.ts`

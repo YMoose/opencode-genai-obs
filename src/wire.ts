@@ -96,7 +96,6 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   }
 
   /**
-  /**
    * Disk-only frame cap (wire.maxFrameBytes): -1 keeps the full frame (default); 0 drops the
    * frame content entirely (metadata-only record); N>0 keeps the first N bytes (cut at a
    * UTF-8 character boundary via cutUtf8Bytes) with a "[TRUNCATED]" suffix so partial frames

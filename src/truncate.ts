@@ -13,6 +13,7 @@ export function cutUtf8Bytes(value: string, byteLimit: number): string {
   const buf = Buffer.from(value, "utf-8")
   let end = byteLimit
   // Back up over UTF-8 continuation bytes so the cut lands on a character boundary
+  // Safe: end starts at byteLimit < buf.length (the early return guarantees byteLength > byteLimit)
   while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1
   return buf.subarray(0, end).toString("utf-8")
 }

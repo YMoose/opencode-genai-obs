@@ -75,7 +75,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 ## 特性一览
 
-- **确定性 Trace / Span ID** —— 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID）：多模块实例（realm）间幂等去重，离线补灌链路产出字节一致的 ID（崩溃修复、历史回填）。
+- **确定性 Trace / Span ID** —— 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID）：多模块实例（realm）间幂等去重。离线补灌链路（崩溃修复、历史回填）为规划中的后续工作，将复用同一套字节一致的 ID——见 [TODO.md](TODO.md)。
 - **LLM 原始请求体采集** —— 发往厂商的序列化 JSON（完整 system prompt、消息历史、tools schema、采样参数）落盘为按会话切分的 JSONL，并可按需注入 chat span 的 `input.value`。详见 [Wire 原始请求采集](#wire-原始请求采集)。
 - **W3C trace-context 传播** —— 可选地向白名单厂商的请求注入 `traceparent`,OTel 插桩网关（LiteLLM、vLLM 等）可将自身 span 挂到我们的 trace 下：端到端一棵树，而非两条孤链。
 - **会话标注** —— 实时向 Phoenix 兼容的 `/v1/session_annotations` REST API 推送项目名/标题（可开关；非 Phoenix 后端关闭即可，无副作用）。
@@ -153,7 +153,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 
 ## 配置
 
-配置文件查找顺序：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`（支持 JSONC 注释与尾逗号）。所有字段均可选且经过严格类型校验（类型错误或未知字段会写日志告警并回退至默认值）：
+配置文件查找顺序：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$XDG_CONFIG_HOME/opencode/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`（支持 JSONC 注释与尾逗号）。所有字段均可选且经过严格类型校验（类型错误或未知字段会写日志告警并回退至默认值）：
 
 ```jsonc
 {
@@ -186,21 +186,18 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration，
                                           // OTLP/HTTP protobuf 导出。Phoenix 不收 metrics——请用
                                           // OTEL_EXPORTER_OTLP_METRICS_ENDPOINT 指向指标后端（或关闭此项）
-    "intervalMs": 60_000,                 // 导出间隔
-    "endpoint": null                      // metrics 端点覆盖（默认：OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
-                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint）
+    "intervalMs": 60_000                  // 导出间隔
   },
   "wire": {
     "enabled": false,                     // 将发往模型侧的原始请求体追加写入本地 JSONL
+    "directory": "~/.local/share/opencode/raw-requests",  // 按会话切分的 JSONL 输出目录
     "maxFrameBytes": -1                   // 磁盘单帧字节上限：-1 = 全量，0 = 仅元数据，N > 0 = 前 N 字节
   },
   "logs": {
     "enabled": false,                     // 可选开启：gen_ai.* 消息事件（system/user/tool/choice），OTLP/HTTP protobuf。
                                           // 内容与 span 属性有重叠——后端对日志事件的索引优于 span 时再开启。
                                           // 被门控的内容仍会上报事件，但仅含元数据
-    "intervalMs": 2_000,                  // 批量导出延迟（BatchLogRecordProcessor scheduledDelayMillis）
-    "endpoint": null                      // logs 端点覆盖（默认：OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint）
+    "intervalMs": 2_000                   // 批量导出延迟（BatchLogRecordProcessor scheduledDelayMillis）
   }
 }
 ```

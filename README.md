@@ -75,7 +75,7 @@ Retry events stamp `opencode.retry.attempt` / `opencode.retry.error` onto the fo
 
 ## Feature highlights
 
-- **Deterministic trace & span IDs** — SHA-256 digests of stable session/message/call identifiers rather than random UUIDs: idempotent deduplication across plugin realms, and byte-identical IDs in the offline replay lane (crash repair, historical backfill).
+- **Deterministic trace & span IDs** — SHA-256 digests of stable session/message/call identifiers rather than random UUIDs: idempotent deduplication across plugin realms. The offline replay lane (crash repair, historical backfill) is planned future work and will reuse the same byte-identical IDs — see [TODO.md](TODO.md).
 - **Raw wire-body capture** — the exact JSON sent to the provider (full system prompt, message history, tool schemas, sampling parameters) lands on disk and/or in the chat span's `input.value`. See [Wire body capture](#wire-body-capture).
 - **W3C trace-context propagation** — optionally injects `traceparent` into whitelisted providers' requests, so an OTel-instrumented gateway (LiteLLM, vLLM, …) parents its spans under ours: one end-to-end trace instead of two disconnected ones.
 - **Session annotations** — project/title pushed to the Phoenix-compatible `/v1/session_annotations` REST API in real time (toggleable; off-standard but harmless elsewhere when disabled).
@@ -153,7 +153,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 
 ## Configuration
 
-Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json` (JSONC supported). All fields are optional and strictly type-checked (invalid types or unknown keys log a warning and fall back to defaults):
+Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$XDG_CONFIG_HOME/opencode/ocg-obs.json` > `~/.config/opencode/ocg-obs.json` (JSONC supported). All fields are optional and strictly type-checked (invalid types or unknown keys log a warning and fall back to defaults):
 
 ```jsonc
 {
@@ -186,21 +186,18 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration via OTLP/HTTP
                                           // protobuf. Phoenix does not ingest metrics — point
                                           // OTEL_EXPORTER_OTLP_METRICS_ENDPOINT at a metrics backend (or disable).
-    "intervalMs": 60_000,                 // export interval
-    "endpoint": null                      // metrics endpoint override (default: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
-                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint)
+    "intervalMs": 60_000                  // export interval
   },
   "wire": {
     "enabled": false,                     // append raw provider request payloads to per-session JSONL
+    "directory": "~/.local/share/opencode/raw-requests",  // per-session JSONL output directory
     "maxFrameBytes": -1                   // on-disk frame cap: -1 = full, 0 = metadata only, N > 0 = first N bytes
   },
   "logs": {
     "enabled": false,                     // opt-in gen_ai.* message events (system/user/tool/choice), OTLP/HTTP protobuf.
                                           // Content overlaps span attributes — enable when the backend indexes
                                           // log events better than spans. Gated content still emits, metadata-only.
-    "intervalMs": 2_000,                  // batch export delay (BatchLogRecordProcessor scheduledDelayMillis)
-    "endpoint": null                      // logs endpoint override (default: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint)
+    "intervalMs": 2_000                   // batch export delay (BatchLogRecordProcessor scheduledDelayMillis)
   }
 }
 ```
