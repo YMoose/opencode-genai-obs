@@ -132,6 +132,7 @@ cd opencode-genai-obs && npm install && npm run build
 ## 诊断与开发
 
 - **插件日志**：`~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log`（保留 7 天，敏感凭据自动脱敏）。
+- **属性映射**：[docs/semconv-mapping.md](docs/semconv-mapping.md) —— 从 OpenCode 采集到的数据如何一一对应到 GenAI semconv / OpenInference。
 - **路线图**：[TODO.md](TODO.md)
 
 ```bash
