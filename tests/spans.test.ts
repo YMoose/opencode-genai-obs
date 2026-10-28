@@ -154,6 +154,21 @@ test("子会话多轮 execution：每轮都发容器 span（同一确定性 id�
   assert.strictEqual(containers.length, 2, "两轮 execution 各发一个容器 span")
 })
 
+test("user_prompt.length：不受 userPrompts gate 影响，始终进轮根", async () => {
+  const { spans, builder } = makeHarness({ gates: { ...GATES, userPrompts: false } })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello world") // 11 chars
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root)
+  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 11, "未 gate，长度仍进 attr")
+  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "gate 关闭时 input.value 不出现")
+})
+
 test("content 门：content=false 时 toolDetails/toolContent 默认关", async () => {
   const { spans, builder } = makeHarness({
     gates: { ...GATES, toolDetails: false, toolContent: false },

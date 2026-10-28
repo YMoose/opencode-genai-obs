@@ -67,6 +67,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `opencode.session.directory` | `session.get.location.directory` | |
 | `opencode.turn.index` | monotonically increasing counter per root session | 0-based |
 | `opencode.turn.messages` | steps + tools emitted under this turn | diagnostic |
+| `opencode.user_prompt.length` | `turn.inputText.length` | ungated size signal, useful when `userPrompts` gate is off |
 | `openinference.span.kind` | `"AGENT"` | |
 | `input.value` | turn's `prompt.text`, truncated | **Gate: `userPrompts`** |
 | `input.value_original_length` | truncation marker | only when truncated |

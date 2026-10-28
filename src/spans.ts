@@ -287,6 +287,9 @@ export function createSpanBuilder(
         ["opencode.session.directory", merged.directory],
         ["opencode.turn.index", turn.index],
         ["opencode.turn.messages", turn.spanCount],
+        // Ungated size signal: lets us reason about prompt growth even when the
+        // userPrompts content gate is off (mirrors Claude's interaction.user_prompt_length)
+        ["opencode.user_prompt.length", turn.inputText.length],
         ["openinference.span.kind", "AGENT"],
         ["input.value", inputTrunc?.value],
         ["input.value_original_length", inputTrunc?.originalLength],
