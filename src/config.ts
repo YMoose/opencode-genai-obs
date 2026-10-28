@@ -80,10 +80,13 @@ export interface TracingConfig {
   readonly content: boolean
   readonly contentGates: ContentGates
   /**
-   * Max length (chars) of content attributes, default 0 = no truncation (mirrors the
-   * CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH semantics, which defaults to 60KB).
-   * Truncation appends a `[TRUNCATED]` marker and adds `<key>_truncated/_original_length`
-   * attributes for OpenInference keys.
+   * Max length (chars) of content attributes; three-state semantics aligned with wire.maxFrameBytes:
+   * - -1 (default): no truncation
+   * -  0: metadata-only — the attribute value is omitted, only `<key>_original_length`
+   *       is emitted when the span provides one (mirrors OTEL_LOG_*=0 semantics)
+   * -  N > 0: cut at N UTF-16 code units with a `[TRUNCATED original_length=N]` marker
+   *          and record `<key>_original_length`
+   * (The CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH default of 60 KB is a good N if you want a cap.)
    */
   readonly contentMaxLength: number
   /** Custom attributes merged into the OTLP resource block (host.name / team etc.; builtin keys win on conflicts) */
@@ -255,7 +258,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       headers: {},
       content: true,
       contentGates: resolveGates(true, {}, warnings),
-      contentMaxLength: 0,
+      contentMaxLength: -1,
       resourceAttributes: {},
       annotations: { enabled: true },
     },
@@ -303,7 +306,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
             headers: recordField(tracingRaw.headers, "tracing.headers", warnings),
             content,
             contentGates: resolveGates(content, gatesRaw, warnings),
-            contentMaxLength: intField(tracingRaw.contentMaxLength, "tracing.contentMaxLength", defaults.tracing.contentMaxLength, warnings),
+            contentMaxLength: intField(tracingRaw.contentMaxLength, "tracing.contentMaxLength", defaults.tracing.contentMaxLength, warnings, -1),
             resourceAttributes: recordField(tracingRaw.resourceAttributes, "tracing.resourceAttributes", warnings),
             annotations: {
               enabled: boolField(annotationsRaw.enabled, "tracing.annotations.enabled", defaults.tracing.annotations.enabled, warnings),

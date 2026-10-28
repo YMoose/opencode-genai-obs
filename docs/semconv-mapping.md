@@ -47,7 +47,10 @@ Citations are `path:line` pointers.
 ## 3. Attribute inventory (by span kind)
 
 Keys with a leading `→ gate` row are toggled off by the corresponding `tracing.contentGates.*` flag; see `src/config.ts:48`.
-`*_original_length` attributes appear only when `tracing.contentMaxLength` truncated the value.
+`tracing.contentMaxLength` is three-state (mirrors `wire.maxFrameBytes`): `-1` (default) = no truncation,
+`0` = metadata-only (the value attribute is omitted, `*_original_length` still emitted for spans that
+provide one), `N > 0` = first N chars with a `[TRUNCATED original_length=N]` marker plus
+`*_original_length`.
 All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.ts:66`).
 
 ### 3.1 Turn root (`invoke_agent` on a root session) — `spans.ts:268`

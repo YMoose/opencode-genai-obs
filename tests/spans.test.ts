@@ -27,7 +27,7 @@ function makeHarness(overrides?: Partial<SpanBuilderOptions>): Harness {
   const builder = createSpanBuilder(
     {
       gates: GATES,
-      contentMaxLength: 0,
+      contentMaxLength: -1,
       consumeWire: () => undefined,
       getSessionInfo: async () => ({ agent: "build", title: "T", directory: "/w/p" }),
       ...overrides,
@@ -305,4 +305,58 @@ test("retry：attempt 非法（字符串/缺失/≤0）静默忽略", async () =
   const chat = spans.find((span) => span.name === "chat unknown")
   assert.ok(chat)
   assert.ok(!chat.attributes.some(([key]) => key === "opencode.retry.attempt"), "非法 attempt 不得盖章")
+})
+
+// ------------------------------------------------------------------ contentMaxLength 三态
+
+test("contentMaxLength=-1（默认）：长 prompt 不截断，无 original_length 标记", async () => {
+  const { spans, builder } = makeHarness()
+  const longPrompt = "x".repeat(5000)
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", longPrompt)
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root)
+  assert.equal(root.attributes.find(([key]) => key === "input.value")?.[1], longPrompt, "全量进 attr")
+  assert.ok(!root.attributes.some(([key]) => key === "input.value_original_length"), "无截断则无 original_length")
+})
+
+test("contentMaxLength=0：值字段省略，仅留 *_original_length", async () => {
+  const { spans, builder } = makeHarness({ contentMaxLength: 0 })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello world") // 11 chars
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.text.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", text: "answer" }))
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root)
+  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "值字段不得出现")
+  assert.ok(!root.attributes.some(([key]) => key === "output.value"), "output.value 同样省略")
+  assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 11, "长度保留")
+  assert.equal(root.attributes.find(([key]) => key === "output.value_original_length")?.[1], 6)
+})
+
+test("contentMaxLength=N>0：截到 N 字符，附 [TRUNCATED] 标记与 *_original_length", async () => {
+  const { spans, builder } = makeHarness({ contentMaxLength: 10 })
+  const longPrompt = "a".repeat(100)
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", longPrompt)
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root)
+  const inputValue = root.attributes.find(([key]) => key === "input.value")?.[1]
+  assert.ok(typeof inputValue === "string" && inputValue.startsWith("a".repeat(10)), "截到 10 字符")
+  assert.ok(String(inputValue).includes("[TRUNCATED original_length=100]"), "含 truncated 标记")
+  assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 100)
 })

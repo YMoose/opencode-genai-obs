@@ -53,12 +53,16 @@ function nano(ms: number): bigint {
 }
 
 /**
- * Content truncation (mirrors CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH semantics):
- * over-limit values are cut to the limit with a marker appended; returns the truncated
- * value + original length (for the *_original_length attribute).
+ * Content truncation, three-state (aligned with wire.maxFrameBytes):
+ * - limit < 0 (default -1): no truncation
+ * - limit === 0: drop the value entirely; only the originalLength is surfaced so callers
+ *   still emit `*_original_length` (the attr itself is skipped by attrs() via its
+ *   empty-string filter, matching "metadata-only" on the wire JSONL side)
+ * - limit > 0: cut at limit chars with a [TRUNCATED] marker; originalLength recorded
  */
 function truncate(value: string, limit: number): { value: string; originalLength?: number } {
-  if (limit <= 0 || value.length <= limit) return { value }
+  if (limit < 0 || value.length <= limit) return { value }
+  if (limit === 0) return { value: "", originalLength: value.length }
   return { value: value.slice(0, limit) + `[TRUNCATED original_length=${value.length}]`, originalLength: value.length }
 }
 
