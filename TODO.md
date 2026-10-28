@@ -3,6 +3,40 @@
 Future directions, not commitments. Traces are the current focus — nothing here affects
 the tracing path.
 
+## Per-project / per-session config overrides
+
+Config is global today: one file drives every location and session in the process.
+Targeted configuration would scope behavior to specific projects or sessions:
+
+- Use cases: route a work project's spans to the company collector while personal
+  projects stay local (or off); exclude noisy sessions (subagent fan-outs,
+  title/compaction traffic); tighten content gates for sensitive projects only.
+- Rough shape: layered overrides — global defaults < per-project entry (matched by
+  the session's directory, known at session registration) < per-session rules.
+  Overrides should probably be limited to a safe subset (endpoint / headers /
+  content gates / wire settings): the id scheme and turn semantics must stay global
+  to keep deterministic-id dedup intact.
+- Per-session by ID is awkward (IDs are dynamic); filters by agent / kind / parent
+  (sub-agent) likely cover the real need. Per-agent overrides may subsume most of it.
+- Open questions: resolution timing (session start vs hot reload), and how the
+  override layers stack against env-driven org-wide settings (env should stay top).
+
+## TUI sidebar status indicator
+
+A small sidebar presence like omo-slim's — an activity indicator while a turn is being
+traced/sent, backend connectivity, queue depth, spans sent/dropped counters.
+
+- Mechanism (per omo-slim recon): v2 sidebar surfaces are companion panes rendered with
+  OpenTUI (`@opentui/core` + `@opentui/solid`); omo-slim ships a companion client
+  (manifest + manager + updater) with golden-frame tests pinning pixel output. That is
+  the established pattern — and a separate deliverable much heavier than this
+  in-process, zero-UI plugin.
+- The plugin already holds everything worth showing in memory (pipeline owner/realms,
+  spans emitted/queued/dropped, OTLP send latency, wire frame counts); a companion
+  would need an IPC surface to read it (status file vs localhost socket — to be sized).
+- Lighter alternative to watch: upstream [#46156](https://github.com/anomalyco/opencode/issues/46156)
+  (reserved plugin dataflow panel in core) would remove the need for our own pane.
+
 ## OTLP metrics + logs/events export
 
 Data source is the existing session event stream (zero new capture):
