@@ -3,6 +3,32 @@
 Future directions, not commitments. Traces are the current focus — nothing here affects
 the tracing path.
 
+## Offline session replay lane (promised, not yet implemented)
+
+`src/ids.ts` declares a FROZEN deterministic-id contract whose counterpart is "an
+internal offline replay lane" that replays exported opencode session dumps
+(`~/exports/*.json` + `.manifest.json` signatures) into the same OTLP pipeline, with
+byte-identical span/trace ids so backend dedup collapses real-time and replayed copies
+of the same turn. **The lane does not exist in this workspace yet** — when it gets
+built, it must re-derive the current semantics, not the ones at first writing:
+
+- **Bug 13 idempotency**: replay must dedup terminal step events per assistantMessageID
+  (the `endedSteps` semantics in `src/spans.ts`) — exported transcripts can contain
+  duplicate `step.ended` fan-out artifacts.
+- **Ordinal-ordered text reassembly**: `output.value` is `text.ended` segments sorted
+  by protocol `ordinal`, joined with `\n\n` — not arrival order.
+- **Billable-input token math**: `gen_ai.usage.input_tokens` and the
+  `gen_ai.client.token.usage` input type both include cache read + cache write
+  (separate `gen_ai.usage.cache_read/write.input_tokens` attributes carry the split).
+- **Truncation semantics**: `contentMaxLength` sentinel chain (-1 = full, 0 = metadata
+  only, N>0 = N-byte cap with `[TRUNCATED original_length=N]` marker) applies equally
+  to replayed content.
+- **Signal surface**: traces are the point; metrics/logs lanes stay optional (the
+  replay host may have no metrics backend). Wire frames are absent in replay — the
+  `gen_ai.system.message` event simply doesn't fire.
+- The id formulas themselves (`opencode-turn/chat/tool` prefixes, byte lengths) are
+  frozen by `tests/ids.test.ts`; the replay lane reads them from `src/ids.ts` verbatim.
+
 ## Event coverage: skills / permissions / usage / non-session namespaces
 
 The SSE pump currently filters to `session.*` events only, but `ctx.event.subscribe()`
