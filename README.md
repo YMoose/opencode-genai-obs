@@ -84,10 +84,13 @@ Every raw request body sent to the LLM (full system prompt + trimmed messages + 
 ```json
 {
   "wire": {
-    "enabled": true
+    "enabled": true,
+    "maxFrameBytes": -1
   }
 }
 ```
+
+`maxFrameBytes` caps the **on-disk** frame only (spans always receive the full frame, governed by `contentGates.wireBody` + `contentMaxLength`): `-1` = full frame (default), `0` = metadata-only records (frame content dropped), `N > 0` = first N bytes cut at a UTF-8 character boundary, suffixed with `[TRUNCATED]`.
 
 Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record per line:
 
@@ -107,8 +110,9 @@ Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record p
 
 - `hook`: which hook captured it (`ws.send` is the main path, `http.request` is the fallback)
 - `kind`: `primary` | `compaction` | `title` | `generate` (opencode's own request classification)
-- `frame`: the full wire body (frame string for ws, request-body text for http)
+- `frame`: the full wire body (frame string for ws, request-body text for http; first `maxFrameBytes` bytes when capped)
 - `seq`: process-wide monotonically increasing sequence number
+- `truncated` / `frameBytes`: present when `maxFrameBytes` capped the frame; `frameBytes` records the original size
 
 **Privacy**: bodies contain the full system prompt + history + tools. Files are mode 0600, never committed to git, never sent anywhere. Delete the files when you no longer need them.
 

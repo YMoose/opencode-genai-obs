@@ -94,10 +94,31 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     return stream
   }
 
+  /**
+   * Disk-only frame cap (wire.maxFrameBytes): -1 keeps the full frame (default); 0 drops the
+   * frame content entirely (metadata-only record); N>0 keeps the first N bytes (cut at a
+   * UTF-8 character boundary) with a "[TRUNCATED]" suffix so partial frames are obvious when
+   * reading/grepping raw JSONL. The pending/span path always keeps the full frame (spans
+   * have their own contentGates.wireBody + contentMaxLength controls).
+   */
+  const applyFrameCap = (record: WireRecord): WireRecord => {
+    const cap = config.maxFrameBytes
+    if (cap < 0) return record
+    const bytes = Buffer.byteLength(record.frame, "utf-8")
+    if (cap === 0) return { ...record, frame: "", truncated: true, frameBytes: bytes }
+    if (bytes <= cap) return record
+    const buf = Buffer.from(record.frame, "utf-8")
+    let end = cap
+    // Back up over UTF-8 continuation bytes so the cut lands on a character boundary
+    while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1
+    const frame = buf.subarray(0, end).toString("utf-8") + "[TRUNCATED]"
+    return { ...record, frame, truncated: true, frameBytes: bytes }
+  }
+
   const write = (record: WireRecord): void => {
     try {
       const stream = streamFor(record.sessionID)
-      const line = JSON.stringify(record) + "\n"
+      const line = JSON.stringify(applyFrameCap(record)) + "\n"
       // write() returning false means the kernel buffer is full; we are
       // fire-and-forget and do not apply backpressure
       stream.write(line, (error) => {

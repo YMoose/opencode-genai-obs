@@ -28,6 +28,14 @@ export interface WireConfig {
   readonly enabled: boolean
   /** Default: <dataDir>/raw-requests/ */
   readonly directory: string
+  /**
+   * Disk-only frame cap, default -1 = full frame. 0 = metadata-only records (frame content
+   * dropped); N>0 = first N bytes on disk plus a "[TRUNCATED]" suffix, marked
+   * truncated=true + frameBytes=original size, cut at a UTF-8 character boundary. The
+   * pending/span path always receives the full frame (spans have their own
+   * contentGates.wireBody + contentMaxLength controls).
+   */
+  readonly maxFrameBytes: number
 }
 
 /**
@@ -96,7 +104,7 @@ export interface ConfigWarning {
 }
 
 const ROOT_KEYS = new Set(["enabled", "wire", "tracing"])
-const WIRE_KEYS = new Set(["enabled", "directory"])
+const WIRE_KEYS = new Set(["enabled", "directory", "maxFrameBytes"])
 const TRACING_KEYS = new Set([
   "enabled",
   "endpoint",
@@ -133,10 +141,10 @@ function stringField(value: unknown, path: string, fallback: string, warnings: C
   return value
 }
 
-function intField(value: unknown, path: string, fallback: number, warnings: ConfigWarning[]): number {
+function intField(value: unknown, path: string, fallback: number, warnings: ConfigWarning[], min = 0): number {
   if (value === undefined) return fallback
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    warnings.push({ kind: "bad-type", message: `${path}: expected non-negative integer, got ${JSON.stringify(value)}; using ${fallback}` })
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min) {
+    warnings.push({ kind: "bad-type", message: `${path}: expected integer >= ${min}, got ${JSON.stringify(value)}; using ${fallback}` })
     return fallback
   }
   return value
@@ -238,6 +246,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
     wire: {
       enabled: false,
       directory: join(dataDir(), "raw-requests"),
+      maxFrameBytes: -1,
     },
     tracing: {
       enabled: true,
@@ -285,6 +294,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
           wire: {
             enabled: boolField(wireRaw.enabled, "wire.enabled", defaults.wire.enabled, warnings),
             directory: stringField(wireRaw.directory, "wire.directory", defaults.wire.directory, warnings),
+            maxFrameBytes: intField(wireRaw.maxFrameBytes, "wire.maxFrameBytes", defaults.wire.maxFrameBytes, warnings, -1),
           },
           tracing: {
             enabled: boolField(tracingRaw.enabled, "tracing.enabled", defaults.tracing.enabled, warnings),

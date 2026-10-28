@@ -15,8 +15,12 @@ export interface WireRecord {
   readonly model: { readonly providerID: string; readonly id: string }
   /** Request classification: primary | compaction | title | generate */
   readonly kind: string
-  /** Full wire body: the ws.send frame string, or the http.request body text */
+  /** Full wire body: the ws.send frame string, or the http.request body text (first maxFrameBytes bytes when capped) */
   readonly frame: string
+  /** Present when wire.maxFrameBytes capped the on-disk frame (the pending/span path keeps the full frame) */
+  readonly truncated?: true
+  /** Original frame size in bytes (present when truncated) */
+  readonly frameBytes?: number
 }
 
 /** Minimal common shape of hook events (args of ws.send / http.request in v2 SessionHooks) */

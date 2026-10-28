@@ -143,3 +143,21 @@ test("Bug 9（opencode #55002 同款）：OTEL env 值按 W3C Baggage percent-de
   assert.strictEqual(config.tracing.resourceAttributes.team, "platform team", "resource attributes 同格式同样解码")
   assert.strictEqual(config.tracing.resourceAttributes.rate, "100%", "裸 % 不解码也不得抛")
 })
+
+test("wire.maxFrameBytes：默认 -1，三态语义与坏值回落", () => {
+  const def = loadFrom(null)
+  assert.strictEqual(def.config.wire.maxFrameBytes, -1, "默认全量不截断")
+
+  const bad = loadFrom(`{ "wire": { "maxFrameBytes": "4096" } }`)
+  assert.strictEqual(bad.config.wire.maxFrameBytes, -1, "字符串不得生效")
+  assert.ok(bad.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("wire.maxFrameBytes")))
+
+  const tooLow = loadFrom(`{ "wire": { "maxFrameBytes": -2 } }`)
+  assert.strictEqual(tooLow.config.wire.maxFrameBytes, -1, "小于 -1 告警回落")
+  assert.ok(tooLow.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("wire.maxFrameBytes")))
+
+  const meta = loadFrom(`{ "wire": { "maxFrameBytes": 0 } }`)
+  assert.strictEqual(meta.config.wire.maxFrameBytes, 0, "0 = 只记元数据")
+  const capped = loadFrom(`{ "wire": { "maxFrameBytes": 65536 } }`)
+  assert.strictEqual(capped.config.wire.maxFrameBytes, 65536, "N = 前 N 字节")
+})

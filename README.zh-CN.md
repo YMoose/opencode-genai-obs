@@ -84,10 +84,13 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 ```json
 {
   "wire": {
-    "enabled": true
+    "enabled": true,
+    "maxFrameBytes": -1
   }
 }
 ```
+
+`maxFrameBytes` 只限制**磁盘**上的 frame（span 路径始终拿全量帧，由 `contentGates.wireBody` + `contentMaxLength` 控制）：`-1` = 全量（默认），`0` = 只记元数据（不输出 frame 内容），`N > 0` = 前 N 字节（按 UTF-8 字符边界切割，尾部追加 `[TRUNCATED]` 标识）。
 
 落盘位置：`~/.local/share/opencode/raw-requests/<sessionID>.jsonl`，每行一条记录：
 
@@ -107,8 +110,9 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 
 - `hook`：从哪个 hook 拿到的（`ws.send` 是主路径，`http.request` 是兜底）
 - `kind`：`primary` | `compaction` | `title` | `generate`（opencode 自带的请求分类）
-- `frame`：完整 wire body（ws 是 frame 字符串，http 是 request body 文本）
+- `frame`：完整 wire body（ws 是 frame 字符串，http 是 request body 文本；被 `maxFrameBytes` 截断时只留前 N 字节）
 - `seq`：进程级单调递增序号
+- `truncated` / `frameBytes`：被 `maxFrameBytes` 截断时出现；`frameBytes` 记录原始大小
 
 **隐私**：body 里有完整 system prompt + 历史 + tools。文件权限 0600，不入 git，不外传。不用了删文件即可。
 
