@@ -46,6 +46,29 @@ v2 schema in `packages/schema/src/session-event.ts`):
   structured MCP server attribution on tool events, plugin/skill load lifecycle,
   session-level end events
 
+## Rejected tool-call attribution (attempted vs executed audit)
+
+A guardrail plugin can veto a tool call before it runs by throwing from the
+`execute.before` hook (v2 semantics, per opencode #51230 / #52837): the command never
+executes and the error text becomes the tool result handed back to the model. In our
+data that lands as an ordinary failed tool span — indistinguishable from a real
+execution error unless you pattern-match the error text. #51230's "attempted vs
+executed" audit trail is exactly this gap, covered by neither built-in OTel (internal
+Effect spans only) nor us.
+
+- Structural signal, verified in v2 source: `execute.before` runs inside the tool's
+  execute (core `tool.ts`), and `execute.after` fires only on the real execution path
+  — so "terminal `session.tool.failed` with no matching `execute.after` firing"
+  identifies a pre-execution rejection without guessing at error text.
+- Implementation shape: a read-only `ctx.tool.hook("execute.after")` observer
+  (correlate by tool call id — a Set of seen ids, kept off the hot path), then stamp
+  the failed tool span (e.g. `opencode.tool.rejected: true`; the rejection reason is
+  already in `error.type`/message). Permission denies likely surface via the
+  `permission.*` namespace instead — overlaps the Event coverage section above.
+- This would be our third input channel (SSE pump, ws.send/http.request wire hooks,
+  tool hooks): keep it strictly observe-only — never throw from our hooks, or we
+  become a guardrail ourselves.
+
 ## Per-project / per-session config overrides
 
 Config is global today: one file drives every location and session in the process.
