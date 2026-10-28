@@ -3,6 +3,23 @@
 Future directions, not commitments. Traces are the current focus — nothing here affects
 the tracing path.
 
+## Event coverage: skills / permissions / usage / non-session namespaces
+
+The SSE pump currently filters to `session.*` events only, but `ctx.event.subscribe()`
+exposes the full event namespace. Known gaps, all actionable today (verified against the
+v2 schema in `packages/schema/src/session-event.ts`):
+
+- `session.skill.activated` (skill id/name/text) — exists in the stream, not handled
+- `session.permissions` (ruleset changes) — exists, not handled
+- `session.usage.updated` (rolling cost totals) — exists, not handled
+- Non-session namespaces: `permission.*` (request/decision pairing — wait-duration
+  metric if the decision event is actually pushed), `mcp.*` (connection lifecycle)
+- Out of reach without core support (for reference): outbound traceparent injection,
+  raw provider response bodies, transport-level detail (status codes, SDK retries),
+  model-request terminal-state distinctions (refused / cancelled / retries-exhausted),
+  structured MCP server attribution on tool events, plugin/skill load lifecycle,
+  session-level end events
+
 ## Per-project / per-session config overrides
 
 Config is global today: one file drives every location and session in the process.
