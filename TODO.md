@@ -71,17 +71,12 @@ traced/sent, backend connectivity, queue depth, spans sent/dropped counters.
 - Lighter alternative to watch: upstream [#46156](https://github.com/anomalyco/opencode/issues/46156)
   (reserved plugin dataflow panel in core) would remove the need for our own pane.
 
-## OTLP logs/events export
+## OTLP logs/events export — DONE
 
-Metrics shipped (gen_ai.client.token.usage + gen_ai.client.operation.duration). Remaining
-scope: **GenAI-semconv events only** (see README Scope). Data source is the existing
-session event stream (zero new capture):
-
-- The five `gen_ai.*` message events (`system` / `user` / `assistant` / `tool` /
-  `choice`), reusing contentGates as the content gate.
-- Export via `@opentelemetry/sdk-logs` + `@opentelemetry/exporter-logs-otlp-proto`.
-- Configuration follows the existing OTEL env conventions (separate
-  `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` route); stays on HTTP, no gRPC.
+Shipped: metrics (gen_ai.client.token.usage + gen_ai.client.operation.duration) and the
+opt-in logs lane (gen_ai.user.message / system.message / tool.message / choice;
+assistant.message folds into choice). Every event carries the deterministic span context
+of its origin span for log ↔ trace joins. Gated content emits metadata-only events.
 
 ## Backend-specific capability extension points
 

@@ -16,7 +16,7 @@ Signals are **GenAI-semconv-scoped only**:
 
 - **Traces** — spans under `gen_ai.*` (+ OpenInference mirrors), the main signal
 - **Metrics** — `gen_ai.client.token.usage` and `gen_ai.client.operation.duration`; no infra/runtime or app-ops dashboard metrics (session counts, commit counters — that is the ops-monitoring plugin's job)
-- **Events/logs** — the five `gen_ai.*` message events (`system` / `user` / `assistant` / `tool` / `choice`), if a logs lane is added
+- **Events/logs** — opt-in: the `gen_ai.*` message events (`system` / `user` / `tool` / `choice`; `assistant.message` is covered by `choice`). Content follows the content gates — a gated event still fires, metadata-only
 
 Custom `opencode.*` span attributes are unaffected — the scope limits which signal *domains* we emit, not per-span attributes.
 
@@ -55,6 +55,17 @@ Retry events stamp `opencode.retry.attempt` / `opencode.retry.error` onto the fo
 |---|---|---|
 | `gen_ai.client.token.usage` | Histogram (`{token}`) | `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` = `input` / `output` (input includes billable cache read/write) |
 | `gen_ai.client.operation.duration` | Histogram (`s`) | `gen_ai.operation.name` (`chat` / `execute_tool`), provider & model for chat, `gen_ai.tool.name` for tools, `error.type` on failure |
+
+### Log events (opt-in)
+
+| Event | When | Content gate |
+|---|---|---|
+| `gen_ai.user.message` | each turn opens | `userPrompts` |
+| `gen_ai.system.message` | a chat span consumes a wire frame with a parseable system prompt (OpenAI `messages[0]` or Anthropic top-level `system`) | `wireBody` |
+| `gen_ai.tool.message` | each tool call finishes | `toolContent` |
+| `gen_ai.choice` | each LLM step ends (finish reason + completion) | `assistantResponses` |
+
+`gen_ai.assistant.message` is deliberately folded into `gen_ai.choice` (the step's text IS the completion). Every event carries the deterministic trace/span context of its origin span, so backends can join log ↔ trace. A gated event still fires, metadata-only.
 
 ### Wire capture (local disk)
 
@@ -182,6 +193,13 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
   "wire": {
     "enabled": false,                     // append raw provider request payloads to per-session JSONL
     "maxFrameBytes": -1                   // on-disk frame cap: -1 = full, 0 = metadata only, N > 0 = first N bytes
+  },
+  "logs": {
+    "enabled": false,                     // opt-in gen_ai.* message events (system/user/tool/choice), OTLP/HTTP protobuf.
+                                          // Content overlaps span attributes — enable when the backend indexes
+                                          // log events better than spans. Gated content still emits, metadata-only.
+    "endpoint": null                      // logs endpoint override (default: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint)
   }
 }
 ```
@@ -193,6 +211,7 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
 | Everything | `"enabled": false` (plugin becomes a no-op) |
 | All network egress | `"tracing.enabled": false` + `"wire.enabled": true` → wire-only mode (disk JSONL only) |
 | Metrics only | `"metrics.enabled": false` |
+| Log events only | default off; `"logs.enabled": true` to enable |
 | Session annotations only | `"tracing.annotations.enabled": false` |
 | Trace-context propagation | default off; configure `tracing.propagation.providers` to enable |
 
@@ -204,6 +223,7 @@ Standard OpenTelemetry environment variables override the config file (**env > c
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint` (trailing `/v1/traces` is stripped automatically) |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `metrics.endpoint` (trailing `/v1/metrics` is stripped automatically) |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `logs.endpoint` (trailing `/v1/logs` is stripped automatically) |
 | `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`, W3C Baggage percent-decoded; traces-specific wins) |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (`k1=v1,k2=v2`, percent-decoded) |
 

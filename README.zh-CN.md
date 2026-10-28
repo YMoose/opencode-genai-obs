@@ -16,7 +16,7 @@
 
 - **Traces** —— `gen_ai.*` 属性 + OpenInference 镜像，主信号
 - **Metrics** —— `gen_ai.client.token.usage` 与 `gen_ai.client.operation.duration`；不做 infra/运行时指标，也不做应用运营指标（会话计数、commit 计数等——那是运营监控类插件的定位）
-- **Events/Logs** —— 如将来增加 logs 通道，仅发 `gen_ai.*` 的五种消息事件（system/user/assistant/tool/choice）
+- **Events/Logs** —— 可选开启：`gen_ai.*` 消息事件（`system` / `user` / `tool` / `choice`；assistant 消息由 `choice` 覆盖）。内容遵循 contentGates——被门控的事件仍会上报，但仅含元数据
 
 `opencode.*` 自定义 span 属性不受此限——范围约束的是"做哪些信号域"，不是 span 上的自有属性。
 
@@ -55,6 +55,17 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 |---|---|---|
 | `gen_ai.client.token.usage` | Histogram（`{token}`） | `gen_ai.provider.name`、`gen_ai.request.model`、`gen_ai.token.type` = `input` / `output`（input 含可计费缓存读写） |
 | `gen_ai.client.operation.duration` | Histogram（`s`） | `gen_ai.operation.name`（`chat` / `execute_tool`）、chat 带厂商与模型、工具带 `gen_ai.tool.name`、失败带 `error.type` |
+
+### 日志事件（可选开启）
+
+| 事件 | 时机 | 内容门 |
+|---|---|---|
+| `gen_ai.user.message` | 每个 turn 开启 | `userPrompts` |
+| `gen_ai.system.message` | chat span 消费到含可解析 system prompt 的 wire 帧（OpenAI `messages[0]` 或 Anthropic 顶层 `system`） | `wireBody` |
+| `gen_ai.tool.message` | 每次工具调用结束 | `toolContent` |
+| `gen_ai.choice` | 每个 LLM 步结束（finish reason + 补全内容） | `assistantResponses` |
+
+`gen_ai.assistant.message` 有意并入 `gen_ai.choice`（步骤文本即补全内容）。每个事件都携带其来源 span 的确定性 trace/span 上下文，后端可将日志与 trace 关联。被门控的事件仍会上报，但仅含元数据。
 
 ### Wire 采集（本地磁盘）
 
@@ -182,6 +193,13 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
   "wire": {
     "enabled": false,                     // 将发往模型侧的原始请求体追加写入本地 JSONL
     "maxFrameBytes": -1                   // 磁盘单帧字节上限：-1 = 全量，0 = 仅元数据，N > 0 = 前 N 字节
+  },
+  "logs": {
+    "enabled": false,                     // 可选开启：gen_ai.* 消息事件（system/user/tool/choice），OTLP/HTTP protobuf。
+                                          // 内容与 span 属性有重叠——后端对日志事件的索引优于 span 时再开启。
+                                          // 被门控的内容仍会上报事件，但仅含元数据
+    "endpoint": null                      // logs 端点覆盖（默认：OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint）
   }
 }
 ```
@@ -193,6 +211,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 | 全部 | `"enabled": false`(setup 空操作） |
 | 一切网络外发 | `"tracing.enabled": false` + `"wire.enabled": true` → wire-only 模式（仅磁盘 JSONL) |
 | 仅 metrics | `"metrics.enabled": false` |
+| 仅日志事件 | 默认关闭；`"logs.enabled": true` 开启 |
 | 仅会话标注 | `"tracing.annotations.enabled": false` |
 | trace-context 传播 | 默认关闭；配置 `tracing.propagation.providers` 启用 |
 
@@ -204,6 +223,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`（末尾的 `/v1/traces` 自动剥除） |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `metrics.endpoint`（末尾的 `/v1/metrics` 自动剥除） |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `logs.endpoint`（末尾的 `/v1/logs` 自动剥除） |
 | `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`，按 W3C Baggage 规范做 percent-decode；traces 专用优先） |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（`k1=v1,k2=v2`，支持 percent-decode） |
 

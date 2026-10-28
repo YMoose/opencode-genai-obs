@@ -42,6 +42,7 @@ import {
 } from "./ids.js"
 import type { SpanRecord, AttrValue } from "./otlp.js"
 import type { MetricObservation } from "./metrics.js"
+import type { LogObservation } from "./logs.js"
 
 const KIND_INTERNAL = 1
 const KIND_CLIENT = 3
@@ -172,6 +173,8 @@ export interface SpanBuilderOptions {
   readonly getSessionInfo?: (sessionID: string) => Promise<SessionInfoLite | undefined>
   /** GenAI-semconv metric observations (token usage + operation duration); undefined disables metrics */
   readonly observe?: (obs: MetricObservation) => void
+  /** GenAI-semconv message events (user/system/tool/choice); undefined disables the logs lane */
+  readonly emitLogEvent?: (obs: LogObservation) => void
 }
 
 export interface SpanBuilder {
@@ -322,10 +325,12 @@ export function createSpanBuilder(
   const openTurn = (sid: string, messageID: string, text: string, nowMs: number, agent?: string) => {
     const index = (turnCounters.get(sid) ?? 0)
     turnCounters.set(sid, index + 1)
+    const traceId = turnTraceId(sid, messageID)
+    const spanId = turnSpanId(sid, messageID)
     openTurns.set(sid, {
       key: messageID,
-      traceId: turnTraceId(sid, messageID),
-      spanId: turnSpanId(sid, messageID),
+      traceId,
+      spanId,
       startedNano: nano(nowMs),
       inputText: text,
       index,
@@ -333,6 +338,8 @@ export function createSpanBuilder(
       lastEndNano: nano(nowMs),
       spanCount: 0,
     })
+    // gen_ai.user.message — gated by userPrompts (undefined content = metadata-only event)
+    options.emitLogEvent?.({ event: "user", sessionID: sid, timeMs: nowMs, traceId, spanId, content: options.gates.userPrompts ? text : undefined })
   }
 
   // ------------------------------------------------------------------ events
@@ -647,6 +654,34 @@ export function createSpanBuilder(
         errorType: error ? (error.type ?? "error") : undefined,
       })
     }
+
+    // gen_ai.choice (the step's completion) + gen_ai.system.message (best-effort from
+    // the wire frame). Both anchor at this chat span's deterministic context.
+    if (options.emitLogEvent) {
+      const timeMs = Number(endNano / 1_000_000n)
+      options.emitLogEvent({
+        event: "choice",
+        sessionID: sid,
+        timeMs,
+        traceId,
+        spanId: chatSpanId(assistantMessageID),
+        provider: model.providerID,
+        model: model.id,
+        finishReason: finish,
+        content: options.gates.assistantResponses && outputText ? outputText : undefined,
+      })
+      if (wire) {
+        options.emitLogEvent({
+          event: "system",
+          sessionID: sid,
+          timeMs,
+          traceId,
+          spanId: chatSpanId(assistantMessageID),
+          frame: wire.frame,
+          gated: !options.gates.wireBody,
+        })
+      }
+    }
   }
 
   const emitToolSpan = (
@@ -729,6 +764,19 @@ export function createSpanBuilder(
         errorType: failed ? (error?.type ?? "tool_error") : undefined,
       })
     }
+
+    // gen_ai.tool.message — one per tool result, anchored at the tool span
+    options.emitLogEvent?.({
+      event: "tool",
+      sessionID: sid,
+      timeMs: Number(endNano / 1_000_000n),
+      traceId,
+      spanId,
+      callId,
+      tool: name,
+      content: options.gates.toolContent ? result : undefined,
+      failed,
+    })
   }
 
   /**

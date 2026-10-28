@@ -1,8 +1,8 @@
 /**
  * Dependency-contract tests — pattern adapted from oh-my-opencode-slim src/dependency-contract.test.ts.
  * The OTLP protobuf encoding is delegated to the official @opentelemetry SDK; the runtime
- * closure is pinned to the seven @opentelemetry packages below (api/core/resources/
- * sdk-trace-base/sdk-metrics/exporter-trace-otlp-proto/exporter-metrics-otlp-proto) plus
+ * closure is pinned to the ten @opentelemetry packages below (api / api-logs / core /
+ * resources / sdk-trace-base / sdk-metrics / sdk-logs / the three OTLP exporters) plus
  * jsonc-parser, and the src/ import graph stays within bounds (node:* builtins, relative
  * paths, declared dependencies, and peer dependencies only).
  */
@@ -23,10 +23,13 @@ test("pinned runtime dependency closure", () => {
     Object.keys(manifest.dependencies).sort(),
     [
       "@opentelemetry/api",
+      "@opentelemetry/api-logs",
       "@opentelemetry/core",
+      "@opentelemetry/exporter-logs-otlp-proto",
       "@opentelemetry/exporter-metrics-otlp-proto",
       "@opentelemetry/exporter-trace-otlp-proto",
       "@opentelemetry/resources",
+      "@opentelemetry/sdk-logs",
       "@opentelemetry/sdk-metrics",
       "@opentelemetry/sdk-trace-base",
       "jsonc-parser",

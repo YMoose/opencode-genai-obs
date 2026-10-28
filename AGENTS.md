@@ -26,6 +26,10 @@ jsonc-parser); zero new test dependencies (`node:test` + `node:assert`).
   SpanRecord (deterministic ids) to ReadableSpan. The pipeline deliberately uses the
   exporter alone (no BasicTracerProvider): the SDK IdGenerator takes no arguments and
   cannot express the deterministic-id contract
+- `src/metrics.ts` — gen_ai.client.* metrics (token usage + operation duration), private
+  MeterProvider
+- `src/logs.ts` — opt-in gen_ai.* message events (user/system/tool/choice) via sdk-logs;
+  assistant.message folds into choice; span context joins log ↔ trace
 - `src/sender.ts` — send queue with retry/backoff and drain-on-dispose
 - `src/wire.ts` — wire-body JSONL capture (`experimental.ws.send` + `http.request` hooks)
 - `src/annotations.ts` — Phoenix-compatible session annotations (toggleable extension)

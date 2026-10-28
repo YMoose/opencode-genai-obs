@@ -522,3 +522,58 @@ test("metrics: a failed step observes duration with error.type", async () => {
   const dur = observations.find((o) => o.metric === "duration" && o.operation === "chat")
   assert.strictEqual(dur!.errorType, "rate_limit")
 })
+
+test("log events: user at turn open, choice at step end, tool at tool success; gated content is undefined", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const { builder } = makeHarness({
+    emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>),
+    gates: { userPrompts: true, assistantResponses: false, toolDetails: true, toolContent: false, wireBody: true },
+  })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello world")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "kimi-k3", providerID: "aliyun" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", name: "grep" }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", content: [{ type: "text", text: "hit" }] }))
+  builder.handleEvent(
+    event("session.step.ended", 1_300, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+      finish: "stop",
+    }),
+  )
+
+  const user = logEvents.find((e) => e.event === "user")
+  assert.ok(user, "user event at turn open")
+  assert.strictEqual(user!.content, "hello world", "userPrompts gate on → content present")
+
+  const choice = logEvents.find((e) => e.event === "choice")
+  assert.ok(choice, "choice event at step end")
+  assert.strictEqual(choice!.finishReason, "stop")
+  assert.strictEqual(choice!.content, undefined, "assistantResponses gate off → metadata-only")
+  assert.strictEqual(choice!.provider, "aliyun")
+
+  const tool = logEvents.find((e) => e.event === "tool")
+  assert.ok(tool, "tool event at tool success")
+  assert.strictEqual(tool!.tool, "grep")
+  assert.strictEqual(tool!.content, undefined, "toolContent gate off → metadata-only")
+
+  // Every observation carries the deterministic span coordinates of its origin span
+  assert.strictEqual(user!.traceId, hash("opencode-turn:s1:m1", 16))
+  assert.strictEqual(choice!.spanId, hash("opencode-chat:a1", 8))
+})
+
+test("log events: system event fires only when a wire frame is consumed", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const { builder } = makeHarness({
+    emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>),
+    consumeWire: () => ({ frame: JSON.stringify({ messages: [{ role: "system", content: "sys" }] }), seq: 1 }),
+  })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hi")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }))
+  const system = logEvents.find((e) => e.event === "system")
+  assert.ok(system, "wire frame present → system event")
+  assert.strictEqual(system!.gated, false)
+})

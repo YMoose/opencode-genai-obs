@@ -28,6 +28,7 @@ import { createSender } from "./sender.js"
 import { createSpanBuilder } from "./spans.js"
 import { createAnnotator } from "./annotations.js"
 import { createMetrics } from "./metrics.js"
+import { createLogs } from "./logs.js"
 
 const PIPELINE_KEY = "__ocgObsPipeline$"
 const GENERATION_KEY = "__ocgObsPipelineGen$"
@@ -146,6 +147,15 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       })
     : undefined
 
+  const logs = config.logs.enabled
+    ? createLogs({
+        endpoint: config.logs.endpoint ?? config.tracing.endpoint,
+        headers: config.tracing.headers,
+        resourceAttributes: config.tracing.resourceAttributes,
+        contentMaxLength: config.tracing.contentMaxLength,
+      })
+    : undefined
+
   const spanBuilder = createSpanBuilder(
     {
       gates: config.tracing.contentGates,
@@ -166,6 +176,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
         }
       },
       observe: metrics?.observe,
+      emitLogEvent: logs?.emit,
     },
     (span) => sender.push(span),
     log,
@@ -260,6 +271,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     content: config.tracing.content,
     annotations: config.tracing.annotations.enabled,
     metrics: config.metrics.enabled ? { endpoint: config.metrics.endpoint ?? config.tracing.endpoint, intervalMs: config.metrics.intervalMs } : false,
+    logs: config.logs.enabled ? { endpoint: config.logs.endpoint ?? config.tracing.endpoint } : false,
   })
 
   // Sessions created before this process loaded (e.g. opencode restarted mid-session) never
@@ -301,6 +313,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       await sender.drain()
       await sender.close()
       await metrics?.shutdown()
+      await logs?.shutdown()
       await wire.dispose()
     },
     recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),

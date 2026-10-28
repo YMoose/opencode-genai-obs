@@ -209,3 +209,19 @@ test("metrics endpoint: metrics env > generic env > file metrics.endpoint > trac
   const { config: fromEnv } = loadFrom(null, { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://env:4318/" })
   assert.strictEqual(fromEnv.metrics.endpoint, "http://env:4318", "metrics env wins over everything")
 })
+
+test("logs: off by default; endpoint resolves logs env > generic env > file > tracing.endpoint", () => {
+  const { config: def } = loadFrom(null)
+  assert.strictEqual(def.logs.enabled, false, "logs lane is opt-in")
+  assert.strictEqual(def.logs.endpoint, "http://localhost:4318", "endpoint still resolves for when it is enabled")
+
+  const { config: on } = loadFrom(`{ "logs": { "enabled": true, "endpoint": "http://l:4318/v1/logs" } }`)
+  assert.strictEqual(on.logs.enabled, true)
+  assert.strictEqual(on.logs.endpoint, "http://l:4318", "/v1/logs suffix stripped")
+
+  const { config: envWins } = loadFrom(`{ "logs": { "enabled": true } }`, { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://env:4318/" })
+  assert.strictEqual(envWins.logs.endpoint, "http://env:4318")
+
+  const { config: wireOnly } = loadFrom(`{ "tracing": { "enabled": false }, "logs": { "enabled": true } }`)
+  assert.strictEqual(wireOnly.logs.enabled, false, "wire-only mode forces logs off")
+})
