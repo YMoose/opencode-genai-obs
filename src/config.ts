@@ -80,15 +80,16 @@ export interface TracingConfig {
   readonly content: boolean
   readonly contentGates: ContentGates
   /**
-   * Max length (chars) of content attributes; three-state semantics aligned with wire.maxFrameBytes:
+   * Max size of content attributes in UTF-8 bytes; three-state semantics aligned with wire.maxFrameBytes:
    * - -1: no truncation
    * -  0: metadata-only — the attribute value is omitted, only `<key>_original_length`
    *       is emitted when the span provides one (mirrors OTEL_LOG_*=0 semantics)
-   * -  N > 0: cut at N UTF-16 code units with a `[TRUNCATED original_length=N]` marker
-   *          and record `<key>_original_length`
+   * -  N > 0: cut at the N-byte budget (UTF-8 character-boundary safe) with a
+   *          `[TRUNCATED original_length=N]` marker and record `<key>_original_length`
    * Default 61440 (60 KB), aligned with CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH — sized just
    * under the 64 KB single-attribute limit enforced by Phoenix / Jaeger / ClickHouse, so
    * a single oversized tool result or wire frame cannot reject the whole span at intake.
+   * The budget is in bytes (not chars), so the cap holds for CJK-heavy content too.
    */
   readonly contentMaxLength: number
   /** Custom attributes merged into the OTLP resource block (host.name / team etc.; builtin keys win on conflicts) */

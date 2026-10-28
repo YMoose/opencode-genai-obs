@@ -29,6 +29,7 @@
  * start timestamp. Exact outputs are pinned by tests/ids.test.ts.
  */
 
+import { cutUtf8Bytes } from "./truncate.js"
 import {
   turnTraceId,
   turnSpanId,
@@ -53,17 +54,21 @@ function nano(ms: number): bigint {
 }
 
 /**
- * Content truncation, three-state (aligned with wire.maxFrameBytes):
+ * Content truncation, three-state (aligned with wire.maxFrameBytes), measured in UTF-8 bytes
+ * so the cap matches backend per-attribute byte limits:
  * - limit < 0 (default -1): no truncation
- * - limit === 0: drop the value entirely; only the originalLength is surfaced so callers
- *   still emit `*_original_length` (the attr itself is skipped by attrs() via its
+ * - limit === 0: drop the value entirely; only the originalLength (bytes) is surfaced so
+ *   callers still emit `*_original_length` (the attr itself is skipped by attrs() via its
  *   empty-string filter, matching "metadata-only" on the wire JSONL side)
- * - limit > 0: cut at limit chars with a [TRUNCATED] marker; originalLength recorded
+ * - limit > 0: cut at the limit's byte budget (character-boundary safe via cutUtf8Bytes)
+ *   with a [TRUNCATED original_length=<bytes>] marker; originalLength recorded in bytes
  */
 function truncate(value: string, limit: number): { value: string; originalLength?: number } {
-  if (limit < 0 || value.length <= limit) return { value }
-  if (limit === 0) return { value: "", originalLength: value.length }
-  return { value: value.slice(0, limit) + `[TRUNCATED original_length=${value.length}]`, originalLength: value.length }
+  if (limit < 0) return { value }
+  const bytes = Buffer.byteLength(value, "utf-8")
+  if (bytes <= limit) return { value }
+  if (limit === 0) return { value: "", originalLength: bytes }
+  return { value: cutUtf8Bytes(value, limit) + `[TRUNCATED original_length=${bytes}]`, originalLength: bytes }
 }
 
 /** Skip null/undefined/empty-string values, keep the rest (mirrors adapter._attrs) */
@@ -287,9 +292,10 @@ export function createSpanBuilder(
         ["opencode.session.directory", merged.directory],
         ["opencode.turn.index", turn.index],
         ["opencode.turn.messages", turn.spanCount],
-        // Ungated size signal: lets us reason about prompt growth even when the
-        // userPrompts content gate is off (mirrors Claude's interaction.user_prompt_length)
-        ["opencode.user_prompt.length", turn.inputText.length],
+        // Ungated size signal (UTF-8 bytes, same unit as the truncation budget): lets us
+        // reason about prompt growth even when the userPrompts content gate is off
+        // (mirrors Claude's interaction.user_prompt_length)
+        ["opencode.user_prompt.length", Buffer.byteLength(turn.inputText, "utf-8")],
         ["openinference.span.kind", "AGENT"],
         ["input.value", inputTrunc?.value],
         ["input.value_original_length", inputTrunc?.originalLength],
@@ -597,16 +603,16 @@ export function createSpanBuilder(
         // wire body → input.value (native OpenInference; gen_ai.request.raw dropped)
         ["input.value", wireTrunc?.value],
         ["input.value_original_length", wireTrunc?.originalLength],
-        ["input.mime_type", wireTrunc ? "application/json" : undefined],
+        ["input.mime_type", wireTrunc?.value ? "application/json" : undefined],
         ["output.value", outputTrunc?.value],
         ["output.value_original_length", outputTrunc?.originalLength],
         ["opencode.message.id", assistantMessageID],
         ["opencode.agent", step?.agent],
-        // Sub-agent lineage: which session spawned this one. Links registered by the
-        // subagent/task tool carry the authoritative parentSid; fall back to the
-        // session registry's parentID (covers sessions whose tool link raced ahead
-        // of session.created). Absent on root sessions.
-        ["opencode.agent.parent_session_id", child ? (links.get(sid)?.parentSid ?? sessions.get(sid)?.parentID) : undefined],
+        // Sub-agent lineage: which session spawned this one — same key as the invoke_agent
+        // container span. Links registered by the subagent/task tool carry the authoritative
+        // parentSid; fall back to the session registry's parentID (covers sessions whose
+        // tool link raced ahead of session.created). Absent on root sessions.
+        ["opencode.session.parent_id", child ? (links.get(sid)?.parentSid ?? sessions.get(sid)?.parentID) : undefined],
         ["opencode.retry.attempt", retry?.attempt],
         ["opencode.retry.error", retryError],
         ["opencode.wire.seq", wireTrunc ? wire?.seq : undefined],

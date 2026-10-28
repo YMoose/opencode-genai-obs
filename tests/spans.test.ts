@@ -157,7 +157,7 @@ test("sub-session multi-round execution: each round emits a container span (same
 test("user_prompt.length: not affected by the userPrompts gate; always lands on the turn root", async () => {
   const { spans, builder } = makeHarness({ gates: { ...GATES, userPrompts: false } })
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
-  builder.handlePrompt("s1", "m1", "hello world") // 11 chars
+  builder.handlePrompt("s1", "m1", "你好，世界") // 6 chars = 18 UTF-8 bytes
   builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
@@ -165,11 +165,11 @@ test("user_prompt.length: not affected by the userPrompts gate; always lands on 
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
   assert.ok(root)
-  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 11, "not gated, length still lands in the attribute")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 18, "not gated, byte size (not char count) still lands in the attribute")
   assert.ok(!root.attributes.some(([key]) => key === "input.value"), "input.value must not appear when the gate is off")
 })
 
-test("opencode.agent.parent_session_id: child-agent chat span carries the parent session id; root session does not", async () => {
+test("opencode.session.parent_id: child-agent chat span carries the parent session id; root session does not", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "go")
@@ -195,11 +195,11 @@ test("opencode.agent.parent_session_id: child-agent chat span carries the parent
 
   const childChat = spans.find((span) => span.spanId === hash("opencode-chat:c1", 8))
   assert.ok(childChat, "must emit the child-agent chat span")
-  assert.equal(childChat.attributes.find(([key]) => key === "opencode.agent.parent_session_id")?.[1], "s1", "child-agent chat must carry the parent session id")
+  assert.equal(childChat.attributes.find(([key]) => key === "opencode.session.parent_id")?.[1], "s1", "child-agent chat must carry the parent session id")
 
   const rootChat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
   assert.ok(rootChat, "must emit the root-session chat span")
-  assert.ok(!rootChat.attributes.some(([key]) => key === "opencode.agent.parent_session_id"), "root session must not carry parent_session_id")
+  assert.ok(!rootChat.attributes.some(([key]) => key === "opencode.session.parent_id"), "root session must not carry parent_session_id")
 })
 
 test("content gate: content=false turns toolDetails/toolContent off by default", async () => {
@@ -373,10 +373,10 @@ test("contentMaxLength=-1: long prompt is not truncated, no original_length mark
   assert.ok(!root.attributes.some(([key]) => key === "input.value_original_length"), "no truncation means no original_length")
 })
 
-test("contentMaxLength=0: value fields omitted, only *_original_length remains", async () => {
+test("contentMaxLength=0: value fields omitted, only *_original_length (bytes) remains", async () => {
   const { spans, builder } = makeHarness({ contentMaxLength: 0 })
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
-  builder.handlePrompt("s1", "m1", "hello world") // 11 chars
+  builder.handlePrompt("s1", "m1", "hello world") // 11 bytes (ASCII)
   builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.text.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", text: "answer" }))
   builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1" }))
@@ -391,7 +391,7 @@ test("contentMaxLength=0: value fields omitted, only *_original_length remains",
   assert.equal(root.attributes.find(([key]) => key === "output.value_original_length")?.[1], 6)
 })
 
-test("contentMaxLength=N>0: truncates to N chars with a [TRUNCATED] marker and *_original_length", async () => {
+test("contentMaxLength=N>0: truncates to the N-byte budget with a [TRUNCATED] marker and *_original_length", async () => {
   const { spans, builder } = makeHarness({ contentMaxLength: 10 })
   const longPrompt = "a".repeat(100)
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
@@ -407,4 +407,24 @@ test("contentMaxLength=N>0: truncates to N chars with a [TRUNCATED] marker and *
   assert.ok(typeof inputValue === "string" && inputValue.startsWith("a".repeat(10)), "truncated to 10 chars")
   assert.ok(String(inputValue).includes("[TRUNCATED original_length=100]"), "carries the truncated marker")
   assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 100)
+})
+
+test("contentMaxLength is a byte budget: CJK content cuts at the character boundary inside the limit", async () => {
+  // 10 CJK chars = 30 UTF-8 bytes; a 10-byte cap cuts inside the 4th char and backs up to 3 chars (9 bytes)
+  const { spans, builder } = makeHarness({ contentMaxLength: 10 })
+  const prompt = "一二三四五六七八九十"
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", prompt)
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root)
+  const inputValue = root.attributes.find(([key]) => key === "input.value")?.[1]
+  assert.ok(typeof inputValue === "string" && inputValue.startsWith("一二三"), "cut backs up to a character boundary")
+  assert.ok(!String(inputValue).includes("￿"), "no U+FFFD replacement character")
+  assert.ok(String(inputValue).includes("[TRUNCATED original_length=30]"), "marker reports the original size in bytes")
+  assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 30, "original_length is in bytes, not chars")
 })
