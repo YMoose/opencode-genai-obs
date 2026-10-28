@@ -63,6 +63,24 @@ Every bug fix lands with an accompanying test:
 - `export default` in `src/index.ts` is required by the opencode plugin host — keep it.
 - Non-null assertions need either a restructure that removes them or a `// Safe:` comment.
 
+## Borrowing from other projects
+
+We are grateful to adjacent open-source projects (DEVtheOPS/opencode-plugin-otel,
+Claude Code's monitoring docs, Phoenix, …) for openly sharing their designs and hard-won
+lessons — their work is a genuine source of learning for this project. When we adopt an
+idea, the rules are:
+
+- Open ideas deserve respect and credit. Understand why the other project does something
+  before adopting it — if you can't explain the why in your own words, don't port it.
+  Re-derive the design against our context (audit-oriented, deterministic IDs,
+  platform-neutral, minimal dependencies) instead of importing their solution wholesale.
+- Respect the license boundary. Never copy code verbatim or near-verbatim:
+  opencode-plugin-otel is MPL-2.0 while this repo is MIT, and a copied file would carry
+  MPL-2.0 into the project. Re-implement from understanding, in our own style —
+  everything in the Style and Testing conventions sections applies in full.
+- Credit the source in the commit message body (`Inspired by …`, `Adapted from …`) so
+  the lineage stays traceable and their contribution is acknowledged.
+
 ## Commits
 
 Short imperative English subjects with a conventional prefix (`fix:` / `feat:` / `test:` /
