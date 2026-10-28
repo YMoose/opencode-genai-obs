@@ -8,13 +8,16 @@
  * non-Phoenix backends should disable it).
  * DO_UPDATE upsert semantics — rewriting after a rename refreshes the column.
  *
- * Root sessions only: Phoenix-style backends build one ProjectSession per trace keyed by
- * the root span's session.id; sub-agent sessions have no matching record and would 404
- * the whole batch (same boundary as sync.py).
+ * Every session is annotated, sub-agent sessions included: current Phoenix lists one
+ * ProjectSession per session id, so children have a record too (the old "root sessions
+ * only" boundary no longer holds).
  *
  * Failures warn but never interrupt: span ingestion is an async queue, so an annotation
  * may 404 while its session is still being created — retry 3 times (2s / 4s backoff),
- * then give up silently; the offline sync.py is the backstop.
+ * then give up silently; the offline sync.py is the backstop. Because a session's first
+ * span only lands after its first turn, the plugin additionally re-annotates once shortly
+ * after the first terminal execution event (index.ts), and backfills sessions that existed
+ * before it loaded.
  */
 
 export interface SessionAnnotationFields {

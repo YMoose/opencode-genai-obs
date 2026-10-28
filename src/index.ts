@@ -56,7 +56,7 @@ const pipelineGlobal = {
   },
 }
 
-/** Minimal shape of the plugin ctx (buildPipeline needs only these two) */
+/** Minimal shape of the plugin ctx (buildPipeline needs only these) */
 interface PipelineCtx {
   session: {
     get: (input: { sessionID: string }) => Promise<{
@@ -65,11 +65,32 @@ interface PipelineCtx {
       title?: string
       location?: { directory?: string }
     }>
+    /** Cursor-paginated list (SDK SessionsResponse: { data, cursor: { next?: string | null } }) */
+    list: (input?: { cursor?: string; limit?: number }) => Promise<{
+      data: ReadonlyArray<{
+        id: string
+        title?: string
+        location?: { directory?: string }
+      }>
+      cursor: { next?: string | null }
+    }>
   }
   event: {
     subscribe: () => AsyncIterable<unknown>
   }
 }
+
+/** Basename of the session directory = the project label (same convention as sync.py) */
+function projectLabel(directory: string | undefined): string | undefined {
+  return directory ? directory.replace(/\/+$/, "").split("/").pop() : undefined
+}
+
+/**
+ * Delay between the first terminal execution event and the post-span annotation: the
+ * annotation must land after the sender flushed the first spans (which create the
+ * Phoenix ProjectSession row), otherwise the POST 404s.
+ */
+const POST_SPAN_ANNOTATE_DELAY_MS = 3_000
 
 async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline> {
   const wire = createWireRecorder(config.wire, log)
@@ -129,13 +150,12 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
    * session.created / session.renamed → real-time project/title annotation
    * (optional enhancement, on by default: hits the Phoenix-compatible
    * /v1/session_annotations, not an OTLP standard; disable via tracing.annotations.enabled).
-   * Sub-agent sessions (parentID set) are skipped: Phoenix-style backends create
-   * ProjectSessions for root sessions only, and annotating children 404s.
+   * Sub-agent sessions are annotated as well: current Phoenix lists every session,
+   * including sub-agents, so there is no record to miss.
    * directory comes from session.get (its basename is the project label, same as sync.py).
    */
   const annotateFromEvent = (sessionID: string, data: Record<string, unknown>) => {
     if (!annotator) return
-    if (data.parentID) return
     void (async () => {
       let title = typeof data.title === "string" ? data.title : undefined
       let directory: string | undefined
@@ -146,15 +166,30 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       } catch (error) {
         log("session.get failed (annotate)", { sessionID, error: String(error) })
       }
-      const base = directory ? directory.replace(/\/+$/, "").split("/").pop() : undefined
-      await annotator.annotate(sessionID, { title, projectLabel: base })
+      await annotator.annotate(sessionID, { title, projectLabel: projectLabel(directory) })
     })()
+  }
+
+  // The first terminal execution event of a session is the earliest moment its spans exist:
+  // schedule one delayed annotation so the Phoenix ProjectSession row is created first
+  let stopped = false
+  const postSpanAnnotated = new Set<string>()
+  const postSpanTimers = new Set<ReturnType<typeof setTimeout>>()
+  const schedulePostSpanAnnotate = (sessionID: string): void => {
+    if (!annotator || postSpanAnnotated.has(sessionID)) return
+    postSpanAnnotated.add(sessionID)
+    const timer = setTimeout(() => {
+      postSpanTimers.delete(timer)
+      if (stopped) return
+      annotateFromEvent(sessionID, {})
+    }, POST_SPAN_ANNOTATE_DELAY_MS)
+    timer.unref()
+    postSpanTimers.add(timer)
   }
 
   // SSE event pump (standalone background loop)
   const iter = ctx.event.subscribe()
   const eventIterator = iter[Symbol.asyncIterator]()
-  let stopped = false
   void (async () => {
     try {
       while (!stopped) {
@@ -175,6 +210,14 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
             ) {
               annotateFromEvent(data.sessionID, data)
             }
+            if (
+              (event.type === "session.execution.succeeded" ||
+                event.type === "session.execution.failed" ||
+                event.type === "session.execution.interrupted") &&
+              typeof data.sessionID === "string"
+            ) {
+              schedulePostSpanAnnotate(data.sessionID)
+            }
           }
         } catch (error) {
           log("span builder event error", { type: event.type, error: String(error) })
@@ -193,10 +236,40 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     annotations: config.tracing.annotations.enabled,
   })
 
+  // Sessions created before this process loaded (e.g. opencode restarted mid-session) never
+  // emit session.created here; the upsert semantics make rewriting them harmless
+  if (annotator) {
+    void (async () => {
+      let cursor: string | undefined
+      let attempted = 0
+      try {
+        while (!stopped) {
+          const page = await ctx.session.list(cursor ? { cursor } : undefined)
+          for (const session of page.data) {
+            if (stopped) break
+            await annotator.annotate(session.id, {
+              title: session.title,
+              projectLabel: projectLabel(session.location?.directory),
+            })
+            attempted += 1
+          }
+          const nextCursor = page.cursor?.next ?? undefined
+          if (!nextCursor || nextCursor === cursor) break
+          cursor = nextCursor
+        }
+        log("annotation backfill done", { attempted })
+      } catch (error) {
+        log("annotation backfill failed", { attempted, error: String(error) })
+      }
+    })()
+  }
+
   return {
     generation: pipelineGlobal.nextGeneration(),
     async dispose() {
       stopped = true
+      for (const timer of postSpanTimers) clearTimeout(timer)
+      postSpanTimers.clear()
       await eventIterator.return?.()
       await spanBuilder.flushAll()
       await sender.drain()

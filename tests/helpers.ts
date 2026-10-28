@@ -97,9 +97,21 @@ export interface MockCtx {
   has(hookName: string): boolean
 }
 
-/** Mock plugin ctx: records hook callbacks for manual firing; session.get returns fixed root-session info */
+export interface MockListInput {
+  readonly cursor?: string
+  readonly limit?: number
+}
+
+/**
+ * Mock plugin ctx: records hook callbacks for manual firing; session.get returns fixed
+ * root-session info and session.list returns an empty page unless overridden
+ */
 export function makeCtx(overrides?: {
   sessionGet?: (input: { sessionID: string }) => Promise<Record<string, unknown>>
+  sessionList?: (input?: MockListInput) => Promise<{
+    data: Array<Record<string, unknown>>
+    cursor: { next?: string | null }
+  }>
 }): MockCtx {
   const hooks = new Map<string, (event: unknown) => void>()
   const feeds: Pushable[] = []
@@ -117,6 +129,7 @@ export function makeCtx(overrides?: {
           title: "test-title",
           location: { directory: "/home/u/proj" },
         })),
+      list: overrides?.sessionList ?? (async () => ({ data: [], cursor: {} })),
     },
     event: {
       subscribe: () => {
