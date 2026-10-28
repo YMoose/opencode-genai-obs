@@ -111,6 +111,17 @@ test("annotations toggle: on by default, can be disabled, bad types fall back an
   assert.ok(unknown.warnings.some((warning) => warning.kind === "unknown-key" && warning.message.includes("tracing.annotations.auto")))
 })
 
+test("Bug 14: tracing.propagation is a known tracing key — documented config must not warn", () => {
+  const { config, warnings } = loadFrom(`{
+    "tracing": { "propagation": { "providers": ["anthropic", "openai"] } }
+  }`)
+  assert.deepStrictEqual(config.tracing.propagation.providers, ["anthropic", "openai"], "providers list is parsed and applied")
+  assert.ok(
+    !warnings.some((warning) => warning.kind === "unknown-key" && warning.message.includes("propagation")),
+    "no unknown-key warning for the documented tracing.propagation key",
+  )
+})
+
 test("OTEL env overrides the file layer: endpoint normalized, headers merged, bad pairs warn", () => {
   const { config, warnings } = loadFrom(
     `{ "tracing": { "endpoint": "http://file:6006", "headers": { "file-key": "fv" } } }`,

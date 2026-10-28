@@ -168,6 +168,7 @@ const TRACING_KEYS = new Set([
   "contentMaxLength",
   "resourceAttributes",
   "annotations",
+  "propagation",
 ])
 const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "toolContent", "wireBody"])
 const ANNOTATION_KEYS = new Set(["enabled"])
