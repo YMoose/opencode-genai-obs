@@ -157,7 +157,7 @@ test("sub-session multi-round execution: each round emits a container span (same
 test("user_prompt.length: not affected by the userPrompts gate; always lands on the turn root", async () => {
   const { spans, builder } = makeHarness({ gates: { ...GATES, userPrompts: false } })
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
-  builder.handlePrompt("s1", "m1", "你好，世界") // 6 chars = 18 UTF-8 bytes
+  builder.handlePrompt("s1", "m1", "你好，世界") // 5 chars = 15 UTF-8 bytes
   builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
@@ -165,7 +165,7 @@ test("user_prompt.length: not affected by the userPrompts gate; always lands on 
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
   assert.ok(root)
-  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 18, "not gated, byte size (not char count) still lands in the attribute")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 15, "not gated, byte size (not char count) still lands in the attribute")
   assert.ok(!root.attributes.some(([key]) => key === "input.value"), "input.value must not appear when the gate is off")
 })
 
