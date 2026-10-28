@@ -27,13 +27,13 @@ function fresh(t: { after: (fn: () => Promise<void> | void) => void }): string {
   return dir
 }
 
-test("initLogger 之前 log() 静默 no-op", (t) => {
+test("log() before initLogger is a silent no-op", (t) => {
   const dir = fresh(t)
   log("should not crash")
   assert.deepStrictEqual(logFiles(dir), [])
 })
 
-test("initLogger 建进程级日志文件（前缀.时间戳-pid.log）", (t) => {
+test("initLogger creates a process-wide log file (prefix.timestamp-pid.log)", (t) => {
   const dir = fresh(t)
   initLogger()
   log("hello")
@@ -46,7 +46,7 @@ test("initLogger 建进程级日志文件（前缀.时间戳-pid.log）", (t) =>
   })()
 })
 
-test("同目录重复 init 复用同一文件（多实例/重载场景）", (t) => {
+test("repeated init in the same directory reuses one file (multi-instance/reload)", (t) => {
   const dir = fresh(t)
   return (async () => {
     initLogger()
@@ -55,14 +55,14 @@ test("同目录重复 init 复用同一文件（多实例/重载场景）", (t) 
     log("from second instance")
     await flushForTesting()
     const files = logFiles(dir)
-    assert.strictEqual(files.length, 1, "同目录不新建文件")
+    assert.strictEqual(files.length, 1, "no new file in the same directory")
     const content = readFileSync(join(dir, files[0]!), "utf-8")
     assert.ok(content.includes("from first instance"))
     assert.ok(content.includes("from second instance"))
   })()
 })
 
-test("落盘内容经过脱敏：sk- token 不进日志文件", (t) => {
+test("on-disk content is redacted: sk- tokens never reach the log file", (t) => {
   const dir = fresh(t)
   const token = ["sk-", "proj-abcdef123456", "abcdef"].join("")
   return (async () => {
@@ -71,13 +71,13 @@ test("落盘内容经过脱敏：sk- token 不进日志文件", (t) => {
     await flushForTesting()
     const [file] = logFiles(dir)
     const content = readFileSync(join(dir, file!), "utf-8")
-    assert.ok(!content.includes(token), "sk- token 必须被掩码")
-    assert.ok(!content.includes("eyJabc.payload.sig"), "Bearer 凭证必须被掩码")
-    assert.ok(content.includes("sk-p"), "掩码保留前缀，便于对账")
+    assert.ok(!content.includes(token), "the sk- token must be masked")
+    assert.ok(!content.includes("eyJabc.payload.sig"), "the Bearer credential must be masked")
+    assert.ok(content.includes("sk-p"), "the mask keeps the prefix for reconciliation")
   })()
 })
 
-test("日志目录不可写时降级 stderr，不抛错", (t) => {
+test("falls back to stderr when the log directory is unwritable, without throwing", (t) => {
   const snapshot = snapshotEnv()
   const dir = mkdtempSync(join(tmpdir(), "ocg-logger-blocked-"))
   const blocked = join(dir, "not-a-directory")
@@ -98,7 +98,7 @@ test("日志目录不可写时降级 stderr，不抛错", (t) => {
     log("still works")
     await flushForTesting()
     console.error = original
-    assert.ok(errors.some((line) => line.includes("[ocg-obs] file logging unavailable")), "应输出降级提示")
-    assert.ok(errors.some((line) => line.includes("still works")), "降级后日志走 stderr")
+    assert.ok(errors.some((line) => line.includes("[ocg-obs] file logging unavailable")), "must emit the fallback notice")
+    assert.ok(errors.some((line) => line.includes("still works")), "logs go to stderr after the fallback")
   })()
 })

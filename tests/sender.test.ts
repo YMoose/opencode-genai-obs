@@ -25,7 +25,7 @@ const makeSpan = (): SpanRecord => {
   }
 }
 
-test("失败两次后重试成功，span 最终送达", async (t) => {
+test("succeeds after two failures; the span is eventually delivered", async (t) => {
   const server = await startServer((_req, res, nth) => {
     if (nth < 2) {
       res.statusCode = 500
@@ -41,10 +41,10 @@ test("失败两次后重试成功，span 最终送达", async (t) => {
   sender.push(makeSpan())
   await waitFor(() => server.requests.length >= 3, 5_000)
   await sender.drain()
-  assert.ok(server.requests[2]!.body.includes("span-1"), "第三次请求应携带该 span")
+  assert.ok(server.requests[2]!.body.includes("span-1"), "the third request must carry that span")
 })
 
-test("对端持续失败：drain() 有界完成并丢弃剩余", async (t) => {
+test("persistent peer failure: drain() finishes in bounded time and drops the rest", async (t) => {
   const server = await startServer((_req, res) => {
     res.statusCode = 500
     res.end()
@@ -59,11 +59,11 @@ test("对端持续失败：drain() 有界完成并丢弃剩余", async (t) => {
   // drain makes a single flush attempt and drops the rest on failure — it must never hang
   const start = Date.now()
   await sender.drain()
-  assert.ok(Date.now() - start < 10_000, "drain 不应挂死")
-  assert.ok(logs.some((line) => line.includes("dropping remaining")), "应记录丢弃")
+  assert.ok(Date.now() - start < 10_000, "drain must not hang")
+  assert.ok(logs.some((line) => line.includes("dropping remaining")), "the drop must be logged")
 })
 
-test("队列满时丢弃最老 span 并留痕", async (t) => {
+test("queue full drops the oldest span and logs it", async (t) => {
   // always 500 + long backoff: let the first batch fail and the queue back up
   const server = await startServer((_req, res) => {
     res.statusCode = 500
@@ -80,6 +80,6 @@ test("队列满时丢弃最老 span 并留痕", async (t) => {
   sender.push(makeSpan())
   sender.push(makeSpan()) // queue hits the cap → oldest dropped
   await waitFor(() => server.requests.length >= 1, 5_000)
-  assert.ok(logs.some((line) => line.includes("queue full") && line.includes("dropped oldest")), "应记录队列满丢弃")
+  assert.ok(logs.some((line) => line.includes("queue full") && line.includes("dropped oldest")), "the queue-full drop must be logged")
   await sender.drain()
 })

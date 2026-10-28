@@ -19,7 +19,7 @@ const hookEvent = (sessionID: string, frame: string) => ({
   frame,
 })
 
-test("Bug 8：dispose 等待刷盘，JSONL 完整落盘", async () => {
+test("Bug 8: dispose waits for the flush; JSONL lands complete on disk", async () => {
   const dir = tempDir("ocg-wire-flush-")
   const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: -1 }, () => {})
   recorder.recordWsSend(hookEvent("s1", JSON.stringify({ n: 1 })) as never)
@@ -32,7 +32,7 @@ test("Bug 8：dispose 等待刷盘，JSONL 完整落盘", async () => {
   assert.ok(JSON.parse(record.frame).n === 1)
 })
 
-test("pending 帧 FIFO 消费，耗尽后再取为 undefined", () => {
+test("pending frames are consumed FIFO; further reads return undefined", () => {
   const recorder = createWireRecorder({ enabled: true, directory: tempDir("ocg-wire-pending-"), maxFrameBytes: -1 }, () => {})
   recorder.recordWsSend(hookEvent("s2", "f1") as never)
   recorder.recordWsSend(hookEvent("s2", "f2") as never)
@@ -43,7 +43,7 @@ test("pending 帧 FIFO 消费，耗尽后再取为 undefined", () => {
   recorder.dispose()
 })
 
-test("PENDING_CAP=8：超上限丢最老帧", () => {
+test("PENDING_CAP=8: over the cap drops the oldest frame", () => {
   const recorder = createWireRecorder({ enabled: true, directory: tempDir("ocg-wire-cap-"), maxFrameBytes: -1 }, () => {})
   for (let i = 1; i <= 10; i++) {
     recorder.recordWsSend(hookEvent("s3", `f${i}`) as never)
@@ -53,16 +53,16 @@ test("PENDING_CAP=8：超上限丢最老帧", () => {
   recorder.dispose()
 })
 
-test("禁用时全部空操作", () => {
+test("disabled means every operation is a no-op", () => {
   const recorder = createWireRecorder({ enabled: false, directory: "/nonexistent", maxFrameBytes: -1 }, () => {})
   recorder.recordWsSend(hookEvent("s1", "x") as never)
   assert.strictEqual(recorder.consumePending("s1"), undefined)
   recorder.dispose() // must not throw
 })
 
-// ------------------------------------------------------- wire.maxFrameBytes（磁盘截断）
+// ------------------------------------------------------- wire.maxFrameBytes (on-disk truncation)
 
-test("maxFrameBytes：磁盘只留前 N 字节并标记，pending/spans 路径保留全量帧", async () => {
+test("maxFrameBytes: disk keeps the first N bytes plus a marker, while pending/spans keep the full frame", async () => {
   const dir = tempDir("ocg-wire-cap-bytes-")
   const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: 100 }, () => {})
   const frame = "x".repeat(500)
@@ -70,19 +70,19 @@ test("maxFrameBytes：磁盘只留前 N 字节并标记，pending/spans 路径�
   await recorder.dispose()
 
   const record = JSON.parse(readFileSync(join(dir, "s1.jsonl"), "utf-8").trim().split("\n")[0]!)
-  assert.equal(record.truncated, true, "应标记 truncated")
-  assert.equal(record.frameBytes, 500, "frameBytes 记录原始字节数")
-  assert.ok(record.frame.length <= 100 + "[TRUNCATED]".length, "磁盘 frame = 内容前缀 + 截断标识")
-  assert.ok(record.frame.length > 0 && record.frame.endsWith("[TRUNCATED]"), "截断帧以 [TRUNCATED] 标识结尾")
+  assert.equal(record.truncated, true, "must be marked truncated")
+  assert.equal(record.frameBytes, 500, "frameBytes records the original byte count")
+  assert.ok(record.frame.length <= 100 + "[TRUNCATED]".length, "on-disk frame = content prefix + truncation marker")
+  assert.ok(record.frame.length > 0 && record.frame.endsWith("[TRUNCATED]"), "a truncated frame ends with the [TRUNCATED] marker")
 
-  // 关键设计断言：span 路径拿到的仍是全量帧
+  // Key design assertion: the span path still gets the full frame
   const recorder2 = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: 100 }, () => {})
   recorder2.recordWsSend(hookEvent("s2", frame) as never)
-  assert.equal(recorder2.consumePending("s2")?.frame, frame, "consumePending 必须返回全量帧")
+  assert.equal(recorder2.consumePending("s2")?.frame, frame, "consumePending must return the full frame")
   recorder2.dispose()
 })
 
-test("maxFrameBytes=-1（默认）：全量落盘，无 truncated 标记", async () => {
+test("maxFrameBytes=-1 (default): full frame on disk, no truncated marker", async () => {
   const dir = tempDir("ocg-wire-full-")
   const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: -1 }, () => {})
   recorder.recordWsSend(hookEvent("s1", "y".repeat(300)) as never)
@@ -92,31 +92,31 @@ test("maxFrameBytes=-1（默认）：全量落盘，无 truncated 标记", async
   assert.equal(record.truncated, undefined)
 })
 
-test("maxFrameBytes=0：只记元数据，frame 为空但保留原始大小", async () => {
+test("maxFrameBytes=0: metadata only; frame is empty but the original size is kept", async () => {
   const dir = tempDir("ocg-wire-meta-only-")
   const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: 0 }, () => {})
   recorder.recordWsSend(hookEvent("s1", "z".repeat(500)) as never)
   await recorder.dispose()
   const record = JSON.parse(readFileSync(join(dir, "s1.jsonl"), "utf-8").trim().split("\n")[0]!)
-  assert.equal(record.frame, "", "0 = 不输出 frame 内容")
+  assert.equal(record.frame, "", "0 = no frame content emitted")
   assert.equal(record.truncated, true)
-  assert.equal(record.frameBytes, 500, "原始大小仍记录")
-  assert.equal(record.sessionID, "s1", "元数据完整")
+  assert.equal(record.frameBytes, 500, "original size still recorded")
+  assert.equal(record.sessionID, "s1", "metadata is complete")
 })
 
-test("maxFrameBytes：多字节 UTF-8 边界回退到字符边界，不产生替换符", async () => {
+test("maxFrameBytes: multi-byte UTF-8 truncation falls back to a character boundary, no replacement char", async () => {
   const dir = tempDir("ocg-wire-utf8-")
   const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: 10 }, () => {})
-  // 每个中文字符 3 字节：30 字节帧在 10 字节处切在第 4 个字符中间，回退到 9 字节边界
+  // each CJK char is 3 bytes: a 30-byte frame cut at 10 bytes lands mid-4th-char, so back off to the 9-byte boundary
   recorder.recordWsSend(hookEvent("s1", "一二三四五六七八九十") as never)
   await recorder.dispose()
   const record = JSON.parse(readFileSync(join(dir, "s1.jsonl"), "utf-8").trim().split("\n")[0]!)
   assert.equal(record.frameBytes, 30)
-  assert.equal(record.frame, "一二三[TRUNCATED]", "切在字符边界（9 字节）并追加截断标识")
-  assert.ok(!record.frame.includes("\u{FFFD}"), "不得出现 U+FFFD 替换符")
+  assert.equal(record.frame, "一二三[TRUNCATED]", "cuts at a character boundary (9 bytes) and appends the truncation marker")
+  assert.ok(!record.frame.includes("\u{FFFD}"), "must not contain the U+FFFD replacement char")
 })
 
-test("maxFrameBytes：帧小于上限时原样落盘", async () => {
+test("maxFrameBytes: frames under the cap land on disk unchanged", async () => {
   const dir = tempDir("ocg-wire-under-")
   const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: 4096 }, () => {})
   recorder.recordWsSend(hookEvent("s1", "small") as never)

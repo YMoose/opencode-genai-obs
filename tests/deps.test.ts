@@ -17,20 +17,20 @@ const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf-8")) a
   peerDependencies: Record<string, string>
 }
 
-test("运行时依赖闭包最小：dependencies 仅 jsonc-parser", () => {
+test("minimal runtime dependency closure: dependencies are jsonc-parser only", () => {
   assert.deepStrictEqual(
     Object.keys(manifest.dependencies).sort(),
     ["jsonc-parser"],
-    "新增运行时依赖必须在 README 说明理由并在此更新契约",
+    "a new runtime dependency needs a README rationale and an update to this contract",
   )
 })
 
-test("OpenCode 插件 API 只以 peerDependency 声明（宿主提供，不打进产物）", () => {
-  assert.ok(manifest.peerDependencies["@opencode/plugin"], "@opencode/plugin 应为 peer 依赖")
-  assert.ok(!manifest.dependencies["@opencode/plugin"], "@opencode/plugin 不得进 dependencies")
+test("the OpenCode plugin API is declared only as a peerDependency (host-provided, not bundled)", () => {
+  assert.ok(manifest.peerDependencies["@opencode/plugin"], "@opencode/plugin must be a peer dependency")
+  assert.ok(!manifest.dependencies["@opencode/plugin"], "@opencode/plugin must not enter dependencies")
 })
 
-test("src/ import 图不越界", () => {
+test("the src/ import graph stays within bounds", () => {
   const declared = new Set([...Object.keys(manifest.dependencies), ...Object.keys(manifest.peerDependencies)])
   const allowed = (specifier: string): boolean =>
     specifier.startsWith("node:") || specifier.startsWith("./") || specifier.startsWith("../") || declared.has(specifier)
@@ -49,5 +49,5 @@ test("src/ import 图不越界", () => {
     }
   }
   scan(join(root, "src"))
-  assert.deepStrictEqual(offenders, [], "src/ 出现未声明依赖的 import")
+  assert.deepStrictEqual(offenders, [], "src/ has an import of an undeclared dependency")
 })

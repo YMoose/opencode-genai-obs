@@ -17,7 +17,7 @@ type Setup = (ctx: unknown) => Promise<() => Promise<void>>
 
 const setup = (plugin as unknown as { setup: Setup }).setup
 
-test("Bug 1：wire-only（tracing.enabled=false）不外发任何请求，wire JSONL 照常落盘", async (t) => {
+test("Bug 1: wire-only (tracing.enabled=false) sends no outbound request while wire JSONL still lands on disk", async (t) => {
   const snapshot = snapshotEnv()
   t.after(() => restoreEnv(snapshot))
   const dir = tempDir("ocg-idx-wireonly-")
@@ -42,10 +42,10 @@ test("Bug 1：wire-only（tracing.enabled=false）不外发任何请求，wire J
 
   const mock = makeCtx()
   const unload = await setup(mock.ctx)
-  assert.ok(typeof unload === "function", "setup 应返回 unload")
+  assert.ok(typeof unload === "function", "setup must return unload")
 
-  assert.ok(!mock.has("prompt"), "tracing 关闭时不应注册 prompt hook")
-  assert.strictEqual(mock.feeds.length, 0, "wire-only 不应订阅 SSE 事件流")
+  assert.ok(!mock.has("prompt"), "no prompt hook registered when tracing is off")
+  assert.strictEqual(mock.feeds.length, 0, "wire-only must not subscribe to the SSE event stream")
 
   mock.fire("experimental.ws.send", {
     sessionID: "s1",
@@ -59,13 +59,13 @@ test("Bug 1：wire-only（tracing.enabled=false）不外发任何请求，wire J
 
   const record = JSON.parse(readFileSync(join(dir, "raw", "s1.jsonl"), "utf-8").trim())
   assert.strictEqual(record.sessionID, "s1")
-  assert.ok(record.frame.includes("world"), "wire body 应落盘")
+  assert.ok(record.frame.includes("world"), "wire body must land on disk")
 
-  assert.strictEqual(server.requests.length, 0, "tracing 关闭时不得有任何外发 HTTP 请求")
+  assert.strictEqual(server.requests.length, 0, "no outbound HTTP request when tracing is off")
   await unload()
 })
 
-test("去平台化：annotations.enabled=false 时只走标准 /v1/traces，不发 session_annotations", async (t) => {
+test("de-platforming: annotations.enabled=false uses only standard /v1/traces and sends no session_annotations", async (t) => {
   const snapshot = snapshotEnv()
   t.after(() => restoreEnv(snapshot))
   const dir = tempDir("ocg-idx-noannot-")
@@ -101,11 +101,11 @@ test("去平台化：annotations.enabled=false 时只走标准 /v1/traces，不�
   await waitFor(() => server.requests.some((request) => request.path === "/v1/traces" && request.body.length > 0), 5_000)
   assert.ok(
     server.requests.every((request) => !request.path.includes("session_annotations")),
-    "annotation 关闭时不得发后端专属 /v1/session_annotations 请求",
+    "no backend-specific /v1/session_annotations request when annotations are off",
   )
 })
 
-test("Bug 5：owner 卸载后，存活实例 hook 触发补选，span 恢复外发", async (t) => {
+test("Bug 5: after the owner unloads, a surviving instance's hook triggers re-election and spans resume", async (t) => {
   const snapshot = snapshotEnv()
   t.after(() => restoreEnv(snapshot))
   const dir = tempDir("ocg-idx-reelect-")
@@ -134,8 +134,8 @@ test("Bug 5：owner 卸载后，存活实例 hook 触发补选，span 恢复外�
     await unloadB()
   })
 
-  assert.strictEqual(a.feeds.length, 1, "首个实例成为 owner 并订阅事件流")
-  assert.strictEqual(b.feeds.length, 0, "第二实例为 observer，不订阅")
+  assert.strictEqual(a.feeds.length, 1, "the first instance becomes owner and subscribes to the event stream")
+  assert.strictEqual(b.feeds.length, 0, "the second instance is an observer and does not subscribe")
 
   // unload the old owner (hot-reload scenario: old unloads first) → the globalThis pipeline is cleared
   await unloadA()

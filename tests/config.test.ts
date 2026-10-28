@@ -36,18 +36,18 @@ function loadFrom(content: string | null, env: Record<string, string> = {}): Loa
 
 const kinds = (warnings: ConfigWarning[]) => warnings.map((warning) => warning.kind)
 
-test("无配置文件：全默认且无告警", () => {
+test("no config file: all defaults, no warnings", () => {
   const { config, warnings } = loadFrom(null)
   assert.strictEqual(config.enabled, true)
   assert.strictEqual(config.wire.enabled, false)
   assert.strictEqual(config.tracing.enabled, true)
-  assert.strictEqual(config.tracing.endpoint, "http://localhost:4318", "默认走 OTLP 标准端口")
-  assert.strictEqual(config.tracing.contentMaxLength, 61440, "默认 60 KB（对齐 CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH，低于后端 64 KB 单 attr 上限）")
-  assert.strictEqual(config.tracing.annotations.enabled, true, "annotations 默认开（兼容既有部署）")
+  assert.strictEqual(config.tracing.endpoint, "http://localhost:4318", "default must be the OTLP standard port")
+  assert.strictEqual(config.tracing.contentMaxLength, 61440, "default 60 KB (matches CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH, under the backend 64 KB per-attr limit)")
+  assert.strictEqual(config.tracing.annotations.enabled, true, "annotations default to on (compatible with existing deployments)")
   assert.deepStrictEqual(warnings, [])
 })
 
-test("JSONC：注释/尾逗号合法，endpoint 剥 /v1/traces 尾路径与尾斜杠", () => {
+test("JSONC: comments/trailing commas are valid; endpoint strips the /v1/traces path and trailing slash", () => {
   const { config, warnings } = loadFrom(`{
     // phoenix backend
     "tracing": {
@@ -60,7 +60,7 @@ test("JSONC：注释/尾逗号合法，endpoint 剥 /v1/traces 尾路径与尾�
   assert.deepStrictEqual(warnings, [])
 })
 
-test("Bug 7：类型不匹配告警并回落默认", () => {
+test("Bug 7: type mismatches warn and fall back to defaults", () => {
   const { config, warnings } = loadFrom(`{
     "enabled": "false",
     "wire": { "enabled": 1, "directory": 42 },
@@ -69,28 +69,28 @@ test("Bug 7：类型不匹配告警并回落默认", () => {
       "headers": { "ok": "v", "bad": 7 }
     }
   }`)
-  assert.strictEqual(config.enabled, true, "字符串 'false' 不得生效为关闭")
-  assert.strictEqual(config.wire.enabled, false, "数字 1 不得生效为开启")
-  assert.strictEqual(config.tracing.contentMaxLength, 61440, "字符串长度不得混入")
-  assert.deepStrictEqual(config.tracing.headers, { ok: "v" }, "非字符串 header 值跳过")
+  assert.strictEqual(config.enabled, true, "the string 'false' must not take effect as disabled")
+  assert.strictEqual(config.wire.enabled, false, "the number 1 must not take effect as enabled")
+  assert.strictEqual(config.tracing.contentMaxLength, 61440, "a string length must not slip in")
+  assert.deepStrictEqual(config.tracing.headers, { ok: "v" }, "non-string header values are skipped")
   const badTypes = warnings.filter((warning) => warning.kind === "bad-type")
-  assert.ok(badTypes.length >= 5, `每个类型错误都应告警（实际 ${badTypes.length} 条）`)
+  assert.ok(badTypes.length >= 5, `every type error must warn (actual: ${badTypes.length})`)
 })
 
-test("未知 key：根级与 wire/tracing/contentGates 嵌套层都告警", () => {
+test("unknown keys: warn at the root and in the nested wire/tracing/contentGates levels", () => {
   const { warnings } = loadFrom(`{
     "bogus": 1,
     "wire": { "dir": "/x" },
     "tracing": { "endpointt": "http://y", "contentGates": { "userprompt": true } }
   }`)
   const unknown = warnings.filter((warning) => warning.kind === "unknown-key").map((warning) => warning.message)
-  assert.ok(unknown.some((message) => message.includes('"bogus"')), "根级未知 key")
-  assert.ok(unknown.some((message) => message.includes('"wire.dir"')), "wire 层未知 key")
-  assert.ok(unknown.some((message) => message.includes('"tracing.endpointt"')), "tracing 层未知 key（拼写错误）")
-  assert.ok(unknown.some((message) => message.includes('"tracing.contentGates.userprompt"')), "contentGates 层未知 key")
+  assert.ok(unknown.some((message) => message.includes('"bogus"')), "unknown key at the root")
+  assert.ok(unknown.some((message) => message.includes('"wire.dir"')), "unknown key in the wire level")
+  assert.ok(unknown.some((message) => message.includes('"tracing.endpointt"')), "unknown key in the tracing level (typo)")
+  assert.ok(unknown.some((message) => message.includes('"tracing.contentGates.userprompt"')), "unknown key in the contentGates level")
 })
 
-test("content=false：toolDetails/toolContent 默认关，可单独拉回", () => {
+test("content=false: toolDetails/toolContent off by default, individually re-enableable", () => {
   const { config } = loadFrom(`{
     "tracing": { "content": false, "contentGates": { "toolContent": true } }
   }`)
@@ -99,19 +99,19 @@ test("content=false：toolDetails/toolContent 默认关，可单独拉回", () =
   assert.strictEqual(config.tracing.contentGates.toolContent, true)
 })
 
-test("annotations 开关：默认开、可关、坏类型回落并告警", () => {
+test("annotations toggle: on by default, can be disabled, bad types fall back and warn", () => {
   const off = loadFrom(`{ "tracing": { "annotations": { "enabled": false } } }`)
-  assert.strictEqual(off.config.tracing.annotations.enabled, false, "非 Phoenix 后端可显式关闭")
+  assert.strictEqual(off.config.tracing.annotations.enabled, false, "non-Phoenix backends can disable it explicitly")
 
   const badType = loadFrom(`{ "tracing": { "annotations": { "enabled": "false" } } }`)
-  assert.strictEqual(badType.config.tracing.annotations.enabled, true, "字符串 'false' 不得生效")
+  assert.strictEqual(badType.config.tracing.annotations.enabled, true, "the string 'false' must not take effect")
   assert.ok(badType.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("tracing.annotations.enabled")))
 
   const unknown = loadFrom(`{ "tracing": { "annotations": { "auto": true } } }`)
   assert.ok(unknown.warnings.some((warning) => warning.kind === "unknown-key" && warning.message.includes("tracing.annotations.auto")))
 })
 
-test("OTEL env 覆盖文件层：endpoint 归一化、headers 合并、坏对告警", () => {
+test("OTEL env overrides the file layer: endpoint normalized, headers merged, bad pairs warn", () => {
   const { config, warnings } = loadFrom(
     `{ "tracing": { "endpoint": "http://file:6006", "headers": { "file-key": "fv" } } }`,
     {
@@ -120,7 +120,7 @@ test("OTEL env 覆盖文件层：endpoint 归一化、headers 合并、坏对告
       OTEL_RESOURCE_ATTRIBUTES: "env-attr=eav",
     },
   )
-  assert.strictEqual(config.tracing.endpoint, "http://env:9", "专用 env endpoint 应覆盖文件")
+  assert.strictEqual(config.tracing.endpoint, "http://env:9", "the dedicated env endpoint must override the file")
   assert.deepStrictEqual(config.tracing.headers, { "file-key": "fv", "env-key": "ev" })
   assert.deepStrictEqual(config.tracing.resourceAttributes, { "env-attr": "eav" })
 
@@ -129,7 +129,7 @@ test("OTEL env 覆盖文件层：endpoint 归一化、headers 合并、坏对告
   assert.deepStrictEqual(bad.config.tracing.headers, { a: "1" })
 })
 
-test("Bug 9（opencode #55002 同款）：OTEL env 值按 W3C Baggage percent-decode，坏序列原样保留", () => {
+test("Bug 9 (same as opencode #55002): OTEL env values percent-decode per W3C Baggage; bad sequences kept verbatim", () => {
   const { config } = loadFrom(`{}`, {
     OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Bearer%20test-token,x-api-key=abc%zz",
     OTEL_RESOURCE_ATTRIBUTES: "team=platform%20team,rate=100%",
@@ -137,47 +137,47 @@ test("Bug 9（opencode #55002 同款）：OTEL env 值按 W3C Baggage percent-de
   assert.strictEqual(
     config.tracing.headers.Authorization,
     "Bearer test-token",
-    "percent-encoded 空格必须解码，否则 collector 收到 Bearer%20test-token 会直接拒收",
+    "percent-encoded spaces must decode, or the collector rejects Bearer%20test-token outright",
   )
-  assert.strictEqual(config.tracing.headers["x-api-key"], "abc%zz", "非法 escape 序列不得抛异常，原样保留")
-  assert.strictEqual(config.tracing.resourceAttributes.team, "platform team", "resource attributes 同格式同样解码")
-  assert.strictEqual(config.tracing.resourceAttributes.rate, "100%", "裸 % 不解码也不得抛")
+  assert.strictEqual(config.tracing.headers["x-api-key"], "abc%zz", "an invalid escape sequence must not throw and is kept verbatim")
+  assert.strictEqual(config.tracing.resourceAttributes.team, "platform team", "resource attributes use the same format and decode too")
+  assert.strictEqual(config.tracing.resourceAttributes.rate, "100%", "a bare % is left undecoded and must not throw")
 })
 
-test("wire.maxFrameBytes：默认 -1，三态语义与坏值回落", () => {
+test("wire.maxFrameBytes: default -1, tri-state semantics and bad-value fallback", () => {
   const def = loadFrom(null)
-  assert.strictEqual(def.config.wire.maxFrameBytes, -1, "默认全量不截断")
+  assert.strictEqual(def.config.wire.maxFrameBytes, -1, "default keeps the full frame untruncated")
 
   const bad = loadFrom(`{ "wire": { "maxFrameBytes": "4096" } }`)
-  assert.strictEqual(bad.config.wire.maxFrameBytes, -1, "字符串不得生效")
+  assert.strictEqual(bad.config.wire.maxFrameBytes, -1, "a string must not take effect")
   assert.ok(bad.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("wire.maxFrameBytes")))
 
   const tooLow = loadFrom(`{ "wire": { "maxFrameBytes": -2 } }`)
-  assert.strictEqual(tooLow.config.wire.maxFrameBytes, -1, "小于 -1 告警回落")
+  assert.strictEqual(tooLow.config.wire.maxFrameBytes, -1, "below -1 warns and falls back")
   assert.ok(tooLow.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("wire.maxFrameBytes")))
 
   const meta = loadFrom(`{ "wire": { "maxFrameBytes": 0 } }`)
-  assert.strictEqual(meta.config.wire.maxFrameBytes, 0, "0 = 只记元数据")
+  assert.strictEqual(meta.config.wire.maxFrameBytes, 0, "0 = metadata only")
   const capped = loadFrom(`{ "wire": { "maxFrameBytes": 65536 } }`)
-  assert.strictEqual(capped.config.wire.maxFrameBytes, 65536, "N = 前 N 字节")
+  assert.strictEqual(capped.config.wire.maxFrameBytes, 65536, "N = first N bytes")
 })
 
-test("tracing.contentMaxLength：默认 61440，与 wire.maxFrameBytes 三态语义一致", () => {
+test("tracing.contentMaxLength: default 61440, same tri-state semantics as wire.maxFrameBytes", () => {
   const def = loadFrom(null)
-  assert.strictEqual(def.config.tracing.contentMaxLength, 61440, "默认 60 KB（对齐 Claude）")
+  assert.strictEqual(def.config.tracing.contentMaxLength, 61440, "default 60 KB (aligned with Claude)")
 
   const bad = loadFrom(`{ "tracing": { "contentMaxLength": "1000" } }`)
-  assert.strictEqual(bad.config.tracing.contentMaxLength, 61440, "字符串不得生效")
+  assert.strictEqual(bad.config.tracing.contentMaxLength, 61440, "a string must not take effect")
   assert.ok(bad.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("tracing.contentMaxLength")))
 
   const tooLow = loadFrom(`{ "tracing": { "contentMaxLength": -2 } }`)
-  assert.strictEqual(tooLow.config.tracing.contentMaxLength, 61440, "小于 -1 告警回落")
+  assert.strictEqual(tooLow.config.tracing.contentMaxLength, 61440, "below -1 warns and falls back")
   assert.ok(tooLow.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("tracing.contentMaxLength")))
 
   const unlimited = loadFrom(`{ "tracing": { "contentMaxLength": -1 } }`)
-  assert.strictEqual(unlimited.config.tracing.contentMaxLength, -1, "-1 = 不截断")
+  assert.strictEqual(unlimited.config.tracing.contentMaxLength, -1, "-1 = no truncation")
   const zero = loadFrom(`{ "tracing": { "contentMaxLength": 0 } }`)
-  assert.strictEqual(zero.config.tracing.contentMaxLength, 0, "0 = 不保留 attr 值，仅记 *_original_length")
+  assert.strictEqual(zero.config.tracing.contentMaxLength, 0, "0 = drop attribute values, keep only *_original_length")
   const capped = loadFrom(`{ "tracing": { "contentMaxLength": 1000 } }`)
-  assert.strictEqual(capped.config.tracing.contentMaxLength, 1000, "N = 截到 N 字符")
+  assert.strictEqual(capped.config.tracing.contentMaxLength, 1000, "N = truncate to N chars")
 })

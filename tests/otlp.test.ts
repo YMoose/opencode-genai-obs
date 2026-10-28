@@ -19,18 +19,18 @@ const span: SpanRecord = {
   status: { code: 1 },
 }
 
-test("buildBody：内置 resource 键优先，自定义属性并入", () => {
+test("buildBody: builtin resource keys win, custom attributes are merged in", () => {
   const body = buildBody([span], {
     project: "proj-x",
     resourceAttributes: { "service.name": "evil-override", team: "core" },
   })
-  assert.ok(body.includes(Buffer.from("opencode-genai-obs", "utf-8")), "service.name 内置值必须在")
-  assert.ok(!body.includes("evil-override"), "resourceAttributes 不得覆盖内置 service.name")
-  assert.ok(body.includes(Buffer.from("proj-x", "utf-8")), "project 名必须在")
-  assert.ok(body.includes(Buffer.from("team", "utf-8")), "自定义属性键必须在")
+  assert.ok(body.includes(Buffer.from("opencode-genai-obs", "utf-8")), "the builtin service.name must be present")
+  assert.ok(!body.includes("evil-override"), "resourceAttributes must not override the builtin service.name")
+  assert.ok(body.includes(Buffer.from("proj-x", "utf-8")), "the project name must be present")
+  assert.ok(body.includes(Buffer.from("team", "utf-8")), "custom attribute keys must be present")
 })
 
-test("postSpans：成功路径带 protobuf 头，且不发送任何后端专属头", async (t) => {
+test("postSpans: success path sends the protobuf content type and no backend-specific headers", async (t) => {
   const server: TestServer = await startServer((_req, res) => {
     res.statusCode = 200
     res.end()
@@ -42,10 +42,10 @@ test("postSpans：成功路径带 protobuf 头，且不发送任何后端专属�
   assert.strictEqual(server.requests[0]!.headers["content-type"], "application/x-protobuf")
   // De-platforming contract: the project semantic rides resource attributes only — no backend-specific headers like x-project-name
   assert.strictEqual(server.requests[0]!.headers["x-project-name"], undefined)
-  assert.ok(server.requests[0]!.body.length > 0, "应发送 protobuf body")
+  assert.ok(server.requests[0]!.body.length > 0, "must send a protobuf body")
 })
 
-test("postSpans：非 200 抛错（调用方负责重试）", async (t) => {
+test("postSpans: non-200 throws (the caller owns retries)", async (t) => {
   const server = await startServer((_req, res) => {
     res.statusCode = 500
     res.end("boom")
@@ -54,7 +54,7 @@ test("postSpans：非 200 抛错（调用方负责重试）", async (t) => {
   await assert.rejects(postSpans([span], server.url, { timeoutMs: 2_000 }), /OTLP export failed: 500/)
 })
 
-test("Bug 2：对端挂死时 postSpans 按超时中止，不再永久 pending", async (t) => {
+test("Bug 2: a hung peer aborts postSpans by timeout instead of pending forever", async (t) => {
   // accepts the request but never responds (simulates a half-open / SIGSTOPped backend)
   const server = await startServer(() => {})
   t.after(() => server.close())
@@ -64,5 +64,5 @@ test("Bug 2：对端挂死时 postSpans 按超时中止，不再永久 pending",
     (error: Error) => /abort|timeout/i.test(error.name + error.message),
   )
   const elapsed = Date.now() - start
-  assert.ok(elapsed < 3_000, `应在超时后很快拒绝（实际 ${elapsed}ms）`)
+  assert.ok(elapsed < 3_000, `must reject promptly after the timeout (actual: ${elapsed}ms)`)
 })

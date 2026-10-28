@@ -42,12 +42,12 @@ Every bug fix lands with an accompanying test:
 - Write the test first and confirm it fails against the unfixed code (red), then fix and
   confirm green. The commit that fixes a bug must contain its test.
 - Continue the `Bug N` numbering in test titles (currently Bug 1–9); cite the upstream origin
-  in the title when one exists (e.g. `Bug 9（opencode #55002 同款）`).
+  in the title when one exists (e.g. `Bug 9 (same as opencode #55002)`).
 - The test must assert the observable behavior that was wrong, not just that code ran.
 
 ## Testing conventions
 
-- Test titles and assertion messages are Chinese string literals; code comments are English.
+- Test titles, assertion messages, and code comments are English.
 - globalThis keys `__ocgObsPipeline$` / `__ocgObsPipelineGen$` are shared process state: tests
   that install them must clean up via `t.after(...)`, or they contaminate the whole file.
 - Config tests: use `snapshotEnv`/`restoreEnv`/`tempDir` from `tests/helpers.ts` (see

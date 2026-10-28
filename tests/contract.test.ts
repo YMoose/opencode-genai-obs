@@ -30,7 +30,7 @@ function prepare(t: { after: (fn: () => Promise<void> | void) => void }, configJ
   return dir
 }
 
-test("禁用合同：enabled=false 时不读取 ctx、不注册 hook、不建 pipeline", async (t) => {
+test("disabled contract: enabled=false reads no ctx, registers no hook, builds no pipeline", async (t) => {
   prepare(t, { enabled: false })
   const ctx = new Proxy(
     {},
@@ -41,11 +41,11 @@ test("禁用合同：enabled=false 时不读取 ctx、不注册 hook、不建 pi
     },
   )
   const unload = await setup(ctx) // must not throw
-  assert.strictEqual(unload, undefined, "禁用时 setup 不返回 unload")
-  assert.strictEqual(pipelineGlobalValue(), undefined, "禁用时不发布 pipeline")
+  assert.strictEqual(unload, undefined, "disabled setup returns no unload")
+  assert.strictEqual(pipelineGlobalValue(), undefined, "disabled setup publishes no pipeline")
 })
 
-test("unload 是幂等 finalizer：重复调用不抛错且注销全部 hook", async (t) => {
+test("unload is an idempotent finalizer: repeated calls never throw and unregister every hook", async (t) => {
   const server = await startServer((_req, res) => {
     res.statusCode = 200
     res.end()
@@ -56,17 +56,17 @@ test("unload 是幂等 finalizer：重复调用不抛错且注销全部 hook", a
   const mock = makeCtx()
   const unload = await setup(mock.ctx)
   assert.ok(typeof unload === "function")
-  assert.ok(mock.has("experimental.ws.send") && mock.has("http.request") && mock.has("prompt"), "注册三类 hook")
+  assert.ok(mock.has("experimental.ws.send") && mock.has("http.request") && mock.has("prompt"), "all three hook kinds registered")
 
   await unload!()
-  assert.ok(!mock.has("experimental.ws.send") && !mock.has("http.request") && !mock.has("prompt"), "unload 后 hook 全部注销")
-  assert.strictEqual(pipelineGlobalValue(), undefined, "unload 后 globalThis pipeline 清空")
+  assert.ok(!mock.has("experimental.ws.send") && !mock.has("http.request") && !mock.has("prompt"), "all hooks unregistered after unload")
+  assert.strictEqual(pipelineGlobalValue(), undefined, "globalThis pipeline cleared after unload")
 
   await unload!() // idempotent: the second call must not throw
   await unload!()
 })
 
-test("标准 reload（先卸旧再载新）：新实例直接成为 owner", async (t) => {
+test("standard reload (unload old, then load new): the new instance becomes owner directly", async (t) => {
   const server = await startServer((_req, res) => {
     res.statusCode = 200
     res.end()
@@ -77,15 +77,15 @@ test("标准 reload（先卸旧再载新）：新实例直接成为 owner", asyn
   const first = makeCtx()
   const second = makeCtx()
   const unloadFirst = await setup(first.ctx)
-  assert.strictEqual(first.feeds.length, 1, "首实例为 owner")
+  assert.strictEqual(first.feeds.length, 1, "the first instance is the owner")
 
   await unloadFirst!()
-  assert.strictEqual(pipelineGlobalValue(), undefined, "旧 owner 卸载后 pipeline 清空")
+  assert.strictEqual(pipelineGlobalValue(), undefined, "pipeline cleared after the old owner unloads")
 
   const unloadSecond = await setup(second.ctx)
   t.after(async () => {
     if (unloadSecond) await unloadSecond()
   })
-  assert.strictEqual(second.feeds.length, 1, "reload 后新实例直接成为 owner 并订阅")
-  assert.notStrictEqual(pipelineGlobalValue(), undefined, "pipeline 重新发布")
+  assert.strictEqual(second.feeds.length, 1, "after reload the new instance is owner directly and subscribes")
+  assert.notStrictEqual(pipelineGlobalValue(), undefined, "pipeline republished")
 })

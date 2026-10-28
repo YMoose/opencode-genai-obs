@@ -43,7 +43,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 25))
 
 const event = (type: string, created: number, data: Record<string, unknown>) => ({ type, created, data })
 
-test("happy path：turn root + chat span，确定性 id 与哈希公式一致", async () => {
+test("happy path: turn root + chat span; deterministic ids match the hash formulas", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "hello world")
@@ -61,18 +61,18 @@ test("happy path：turn root + chat span，确定性 id 与哈希公式一致", 
   await settle()
 
   const chat = spans.find((span) => span.name === "chat gpt")
-  assert.ok(chat, "应发出 chat span")
+  assert.ok(chat, "must emit the chat span")
   assert.strictEqual(chat.spanId, hash("opencode-chat:a1", 8))
   assert.strictEqual(chat.traceId, hash("opencode-turn:s1:m1", 16))
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
-  assert.ok(root, "应发出 turn root span")
+  assert.ok(root, "must emit the turn root span")
   assert.strictEqual(root.name, "hello world")
   const output = root.attributes.find(([key]) => key === "output.value")
-  assert.equal(output?.[1], "answer", "最后一答应进轮根 output.value")
+  assert.equal(output?.[1], "answer", "last answer must land in the turn root output.value")
 })
 
-test("Bug 3：空 prompt 的轮根名回退到 session title，而不是 '(empty)'", async () => {
+test("Bug 3: empty-prompt turn root falls back to the session title, not '(empty)'", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "")
@@ -82,11 +82,11 @@ test("Bug 3：空 prompt 的轮根名回退到 session title，而不是 '(empty
   await settle()
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
-  assert.ok(root, "应发出 turn root span")
-  assert.strictEqual(root.name, "T", "空输入应回退到 getSessionInfo 的 title")
+  assert.ok(root, "must emit the turn root span")
+  assert.strictEqual(root.name, "T", "empty input must fall back to the getSessionInfo title")
 })
 
-test("Bug 6：缺 assistantMessageID / tool id 的 malformed 事件不产生伪 id span", async () => {
+test("Bug 6: malformed events missing assistantMessageID / tool id produce no bogus-id span", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "q")
@@ -99,16 +99,16 @@ test("Bug 6：缺 assistantMessageID / tool id 的 malformed 事件不产生伪 
   builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
   await settle()
 
-  assert.strictEqual(spans.length, 1, "只应剩 turn root")
+  assert.strictEqual(spans.length, 1, "only the turn root must remain")
   const bogusChat = hash("opencode-chat:undefined", 8)
   const bogusTool = hash("opencode-tool:undefined:undefined", 8)
   for (const span of spans) {
-    assert.notStrictEqual(span.spanId, bogusChat, "不得出现 'undefined' 哈希的 chat span")
-    assert.notStrictEqual(span.spanId, bogusTool, "不得出现 'undefined' 哈希的 tool span")
+    assert.notStrictEqual(span.spanId, bogusChat, "no chat span hashed from 'undefined' may appear")
+    assert.notStrictEqual(span.spanId, bogusTool, "no tool span hashed from 'undefined' may appear")
   }
 })
 
-test("Bug 4：session.deleted 补发未收尾轮根并清空该会话状态", async () => {
+test("Bug 4: session.deleted flushes the unfinished turn root and clears that session's state", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "q")
@@ -116,13 +116,13 @@ test("Bug 4：session.deleted 补发未收尾轮根并清空该会话状态", as
   builder.handleEvent(event("session.deleted", 1_500, { sessionID: "s1" }))
   await settle()
   const afterDelete = spans.length
-  assert.strictEqual(afterDelete, 1, "删除时应补发未收尾的轮根")
+  assert.strictEqual(afterDelete, 1, "deletion must flush the unfinished turn root")
 
   await builder.flushAll()
-  assert.strictEqual(spans.length, 1, "删除后 flushAll 不应再产出该会话任何 span")
+  assert.strictEqual(spans.length, 1, "flushAll must not produce any span for the deleted session")
 })
 
-test("子会话多轮 execution：每轮都发容器 span（同一确定性 id）", async () => {
+test("sub-session multi-round execution: each round emits a container span (same deterministic id)", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "go")
@@ -151,10 +151,10 @@ test("子会话多轮 execution：每轮都发容器 span（同一确定性 id�
 
   const containerId = hash("opencode-session:s2", 8)
   const containers = spans.filter((span) => span.spanId === containerId)
-  assert.strictEqual(containers.length, 2, "两轮 execution 各发一个容器 span")
+  assert.strictEqual(containers.length, 2, "two execution rounds must each emit one container span")
 })
 
-test("user_prompt.length：不受 userPrompts gate 影响，始终进轮根", async () => {
+test("user_prompt.length: not affected by the userPrompts gate; always lands on the turn root", async () => {
   const { spans, builder } = makeHarness({ gates: { ...GATES, userPrompts: false } })
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "hello world") // 11 chars
@@ -165,11 +165,11 @@ test("user_prompt.length：不受 userPrompts gate 影响，始终进轮根", as
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
   assert.ok(root)
-  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 11, "未 gate，长度仍进 attr")
-  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "gate 关闭时 input.value 不出现")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 11, "not gated, length still lands in the attribute")
+  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "input.value must not appear when the gate is off")
 })
 
-test("opencode.agent.parent_session_id：子 agent chat span 带父 session id，根会话不带", async () => {
+test("opencode.agent.parent_session_id: child-agent chat span carries the parent session id; root session does not", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "go")
@@ -194,15 +194,15 @@ test("opencode.agent.parent_session_id：子 agent chat span 带父 session id�
   await settle()
 
   const childChat = spans.find((span) => span.spanId === hash("opencode-chat:c1", 8))
-  assert.ok(childChat, "应发出子 agent 的 chat span")
-  assert.equal(childChat.attributes.find(([key]) => key === "opencode.agent.parent_session_id")?.[1], "s1", "子 agent chat 应带父 session id")
+  assert.ok(childChat, "must emit the child-agent chat span")
+  assert.equal(childChat.attributes.find(([key]) => key === "opencode.agent.parent_session_id")?.[1], "s1", "child-agent chat must carry the parent session id")
 
   const rootChat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
-  assert.ok(rootChat, "应发出根会话的 chat span")
-  assert.ok(!rootChat.attributes.some(([key]) => key === "opencode.agent.parent_session_id"), "根会话不得带 parent_session_id")
+  assert.ok(rootChat, "must emit the root-session chat span")
+  assert.ok(!rootChat.attributes.some(([key]) => key === "opencode.agent.parent_session_id"), "root session must not carry parent_session_id")
 })
 
-test("content 门：content=false 时 toolDetails/toolContent 默认关", async () => {
+test("content gate: content=false turns toolDetails/toolContent off by default", async () => {
   const { spans, builder } = makeHarness({
     gates: { ...GATES, toolDetails: false, toolContent: false },
   })
@@ -216,15 +216,15 @@ test("content 门：content=false 时 toolDetails/toolContent 默认关", async 
   await settle()
 
   const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
-  assert.ok(tool, "应发出 tool span")
+  assert.ok(tool, "must emit the tool span")
   const keys = new Set(tool.attributes.map(([key]) => key))
-  assert.ok(!keys.has("gen_ai.tool.call.arguments"), "toolDetails=false 时不应带调用参数")
-  assert.ok(!keys.has("gen_ai.tool.call.result"), "toolContent=false 时不应带工具结果")
+  assert.ok(!keys.has("gen_ai.tool.call.arguments"), "toolDetails=false must not carry call arguments")
+  assert.ok(!keys.has("gen_ai.tool.call.result"), "toolContent=false must not carry the tool result")
 })
 
-// ------------------------------------------------------------------ compaction（#35935 对齐）
+// ------------------------------------------------------------------ compaction (aligned with #35935)
 
-test("compaction：started→ended 独立成 trace，model/usage/cost/摘要齐备", async () => {
+test("compaction: started→ended becomes its own trace with model/usage/cost/summary", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "q")
@@ -245,25 +245,25 @@ test("compaction：started→ended 独立成 trace，model/usage/cost/摘要齐�
   await settle()
 
   const compaction = spans.find((span) => span.name === "compaction")
-  assert.ok(compaction, "应发出 compaction span")
-  assert.strictEqual(compaction.traceId, hash("opencode-compaction:s1:2000", 16), "确定性 trace id")
-  assert.strictEqual(compaction.spanId, hash("opencode-compaction-span:s1:2000", 8), "确定性 span id")
-  assert.notStrictEqual(compaction.traceId, hash("opencode-turn:s1:m1", 16), "不得挂进 turn trace")
+  assert.ok(compaction, "must emit the compaction span")
+  assert.strictEqual(compaction.traceId, hash("opencode-compaction:s1:2000", 16), "deterministic trace id")
+  assert.strictEqual(compaction.spanId, hash("opencode-compaction-span:s1:2000", 8), "deterministic span id")
+  assert.notStrictEqual(compaction.traceId, hash("opencode-turn:s1:m1", 16), "must not attach to the turn trace")
   const attr = (name: string) => compaction.attributes.find(([key]) => key === name)?.[1]
   assert.equal(attr("gen_ai.operation.name"), "compaction")
   assert.equal(attr("gen_ai.request.model"), "model-x")
   assert.equal(attr("opencode.compaction.reason"), "auto")
   assert.equal(attr("opencode.compaction.native"), false)
-  assert.equal(attr("gen_ai.usage.input_tokens"), 110, "input 含 cache.read")
+  assert.equal(attr("gen_ai.usage.input_tokens"), 110, "input includes cache.read")
   assert.equal(attr("gen_ai.usage.output_tokens"), 50)
   assert.equal(attr("llm.token_count.total"), 160)
   assert.equal(attr("opencode.cost.usd"), 0.02)
-  assert.equal(attr("output.value"), "summary of the conversation", "摘要进 output.value")
+  assert.equal(attr("output.value"), "summary of the conversation", "summary lands in output.value")
   assert.equal(attr("openinference.span.kind"), "LLM")
   assert.equal(compaction.status.code, 1)
 })
 
-test("compaction failed：status=2 且带错误信息", async () => {
+test("compaction failed: status=2 with the error message", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "manual" }))
@@ -281,10 +281,10 @@ test("compaction failed：status=2 且带错误信息", async () => {
   const compaction = spans.find((span) => span.name === "compaction")
   assert.ok(compaction)
   assert.equal(compaction.status.code, 2)
-  assert.ok(String(compaction.status.message).includes("boom"), "错误信息进 status")
+  assert.ok(String(compaction.status.message).includes("boom"), "error message lands in status")
 })
 
-test("compaction：assistantResponses=false 时摘要不落 span；ended 无 started 则忽略", async () => {
+test("compaction: assistantResponses=false keeps the summary off the span; ended without started is ignored", async () => {
   const gated = makeHarness({ gates: { ...GATES, assistantResponses: false } })
   gated.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   gated.builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
@@ -293,28 +293,28 @@ test("compaction：assistantResponses=false 时摘要不落 span；ended 无 sta
   )
   await settle()
   const keys = new Set(gated.spans.find((span) => span.name === "compaction")?.attributes.map(([key]) => key))
-  assert.ok(!keys.has("output.value"), "门控关闭时摘要不得落 span")
+  assert.ok(!keys.has("output.value"), "summary must not land on the span when the gate is off")
 
   const orphan = makeHarness()
   orphan.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   orphan.builder.handleEvent(event("session.compaction.ended", 3_000, { sessionID: "s1", reason: "auto" }))
   await settle()
-  assert.ok(!orphan.spans.some((span) => span.name === "compaction"), "没有 started 的 ended 不应发 span")
+  assert.ok(!orphan.spans.some((span) => span.name === "compaction"), "an ended without a started must not emit a span")
 })
 
-test("compaction：started 后未结束，flushAll 兜底发出裸 span", async () => {
+test("compaction: started never ended; flushAll emits a bare fallback span", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
   await builder.flushAll()
   const compaction = spans.find((span) => span.name === "compaction")
-  assert.ok(compaction, "flushAll 应兜底发出未完结的 compaction")
+  assert.ok(compaction, "flushAll must emit the unfinished compaction as a fallback")
   assert.equal(compaction.attributes.find(([key]) => key === "opencode.compaction.reason")?.[1], "auto")
 })
 
-// ------------------------------------------------------------------ retry（#35935 对齐）
+// ------------------------------------------------------------------ retry (aligned with #35935)
 
-test("retry：scheduled 盖章到下一次尝试的 chat span，且只盖一次", async () => {
+test("retry: scheduled stamps the next attempt's chat span, exactly once", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "q")
@@ -334,13 +334,13 @@ test("retry：scheduled 盖章到下一次尝试的 chat span，且只盖一次"
   const second = spans.find((span) => span.spanId === hash("opencode-chat:a2", 8))
   const third = spans.find((span) => span.spanId === hash("opencode-chat:a3", 8))
   assert.ok(first && second && third)
-  assert.ok(!first.attributes.some(([key]) => key === "opencode.retry.attempt"), "失败当次的 span 已发出，不可能回填")
-  assert.equal(second.attributes.find(([key]) => key === "opencode.retry.attempt")?.[1], 2, "重试尝试号应盖在重试 span 上")
+  assert.ok(!first.attributes.some(([key]) => key === "opencode.retry.attempt"), "the failed attempt's span is already emitted, so it cannot be backfilled")
+  assert.equal(second.attributes.find(([key]) => key === "opencode.retry.attempt")?.[1], 2, "the retry attempt number must land on the retry span")
   assert.ok(String(second.attributes.find(([key]) => key === "opencode.retry.error")?.[1]).includes("429"))
-  assert.ok(!third.attributes.some(([key]) => key === "opencode.retry.attempt"), "盖章一次性消费，不得泄漏到后续 span")
+  assert.ok(!third.attributes.some(([key]) => key === "opencode.retry.attempt"), "the stamp is consumed once and must not leak into later spans")
 })
 
-test("retry：attempt 非法（字符串/缺失/≤0）静默忽略", async () => {
+test("retry: invalid attempt (string/missing/<=0) is silently ignored", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "q")
@@ -352,12 +352,12 @@ test("retry：attempt 非法（字符串/缺失/≤0）静默忽略", async () =
   await settle()
   const chat = spans.find((span) => span.name === "chat unknown")
   assert.ok(chat)
-  assert.ok(!chat.attributes.some(([key]) => key === "opencode.retry.attempt"), "非法 attempt 不得盖章")
+  assert.ok(!chat.attributes.some(([key]) => key === "opencode.retry.attempt"), "an invalid attempt must not stamp")
 })
 
-// ------------------------------------------------------------------ contentMaxLength 三态
+// ------------------------------------------------------------------ contentMaxLength tri-state
 
-test("contentMaxLength=-1：长 prompt 不截断，无 original_length 标记", async () => {
+test("contentMaxLength=-1: long prompt is not truncated, no original_length marker", async () => {
   const { spans, builder } = makeHarness()
   const longPrompt = "x".repeat(5000)
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
@@ -369,11 +369,11 @@ test("contentMaxLength=-1：长 prompt 不截断，无 original_length 标记", 
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
   assert.ok(root)
-  assert.equal(root.attributes.find(([key]) => key === "input.value")?.[1], longPrompt, "全量进 attr")
-  assert.ok(!root.attributes.some(([key]) => key === "input.value_original_length"), "无截断则无 original_length")
+  assert.equal(root.attributes.find(([key]) => key === "input.value")?.[1], longPrompt, "full value lands in the attribute")
+  assert.ok(!root.attributes.some(([key]) => key === "input.value_original_length"), "no truncation means no original_length")
 })
 
-test("contentMaxLength=0：值字段省略，仅留 *_original_length", async () => {
+test("contentMaxLength=0: value fields omitted, only *_original_length remains", async () => {
   const { spans, builder } = makeHarness({ contentMaxLength: 0 })
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "hello world") // 11 chars
@@ -385,13 +385,13 @@ test("contentMaxLength=0：值字段省略，仅留 *_original_length", async ()
 
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
   assert.ok(root)
-  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "值字段不得出现")
-  assert.ok(!root.attributes.some(([key]) => key === "output.value"), "output.value 同样省略")
-  assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 11, "长度保留")
+  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "value field must not appear")
+  assert.ok(!root.attributes.some(([key]) => key === "output.value"), "output.value is omitted too")
+  assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 11, "length is preserved")
   assert.equal(root.attributes.find(([key]) => key === "output.value_original_length")?.[1], 6)
 })
 
-test("contentMaxLength=N>0：截到 N 字符，附 [TRUNCATED] 标记与 *_original_length", async () => {
+test("contentMaxLength=N>0: truncates to N chars with a [TRUNCATED] marker and *_original_length", async () => {
   const { spans, builder } = makeHarness({ contentMaxLength: 10 })
   const longPrompt = "a".repeat(100)
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
@@ -404,7 +404,7 @@ test("contentMaxLength=N>0：截到 N 字符，附 [TRUNCATED] 标记与 *_origi
   const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
   assert.ok(root)
   const inputValue = root.attributes.find(([key]) => key === "input.value")?.[1]
-  assert.ok(typeof inputValue === "string" && inputValue.startsWith("a".repeat(10)), "截到 10 字符")
-  assert.ok(String(inputValue).includes("[TRUNCATED original_length=100]"), "含 truncated 标记")
+  assert.ok(typeof inputValue === "string" && inputValue.startsWith("a".repeat(10)), "truncated to 10 chars")
+  assert.ok(String(inputValue).includes("[TRUNCATED original_length=100]"), "carries the truncated marker")
   assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 100)
 })

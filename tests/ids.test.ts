@@ -19,7 +19,7 @@ import {
   compactionSpanId,
 } from "../src/ids.js"
 
-test("ID 契约冻结：已知输入的精确输出（红了 = 你在改契约，不是在修 bug）", () => {
+test("ID contract frozen: exact outputs for known inputs (red means you are changing the contract, not fixing a bug)", () => {
   assert.equal(turnTraceId("ses_X", "msg_Y"), "afcd33c83d11c5e7c8775ab2d910c17a")
   assert.equal(turnSpanId("ses_X", "msg_Y"), "21827aa15490503f")
   assert.equal(chatSpanId("asst_Z"), "b8ab94b3814dbe0d")
@@ -30,7 +30,7 @@ test("ID 契约冻结：已知输入的精确输出（红了 = 你在改契约�
   assert.equal(compactionSpanId("ses_X", "1729"), "47a0ab348004b544")
 })
 
-test("ID 契约冻结：trace 32 hex / span 16 hex 长度恒定", () => {
+test("ID contract frozen: trace 32 hex / span 16 hex lengths are fixed", () => {
   assert.equal(turnTraceId("a", "b").length, 32)
   assert.equal(orphanTraceId("a").length, 32)
   assert.equal(compactionTraceId("a", "1").length, 32)
