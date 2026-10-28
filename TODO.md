@@ -95,3 +95,59 @@ Design sketch if picked up: decide at trace open from the deterministic traceId 
 (stateless, identical verdict across instances and reloads; all spans of an unselected
 trace are dropped at emit time — head sampling keeps traces whole). Default stays
 `1.0` (full export).
+
+## Borrowed from Claude Code's monitoring-usage (medium/long-term)
+
+Ideas lifted from <https://code.claude.com/docs/en/monitoring-usage>, ranked by
+expected value vs implementation cost.
+
+**Instrumentation gaps (span-level)**
+
+- **TTFT / first-content timing on chat spans** — Claude exports `ttft_ms` and
+  `first_content_ms` per llm_request. Requires a first-chunk timestamp source from
+  opencode (SSE wire signal or streaming hook); we only see start/end today.
+  Highest observability value per unit effort; blocked on an upstream signal.
+- **Per-retry span events** — Claude emits each retry attempt as a
+  `gen_ai.request.attempt` span event (with `attempt` number +
+  `client_request_id`). We currently stamp `opencode.retry.attempt` on the retrying
+  span only; per-attempt timing/errors get flattened. Needs span-event support in
+  `src/otlp.ts` (encoder + SpanRecord) plus a per-attempt timing source.
+- **`request_id` / `client_request_id` on chat spans** — lets operators join our
+  traces with provider-side logs. Depends on whether opencode's hook context /
+  response headers expose the x-client-request-id and provider request id; needs
+  recon.
+
+- **`gen_ai.tool.call.{arguments,result}_original_length` + `*_truncated` boolean** — the wire
+  JSONL records `frameBytes` and `truncated: true`; `input.value` / `output.value` already
+  carry `_original_length` after the 60 KB cap, but the `gen_ai.tool.call.*` keys themselves
+  lose all trace of the original size when capped. Adding the length + a boolean
+  (`input.value_truncated`) lets backends query truncation cleanly
+  (`WHERE input.value_truncated = true` instead of a LIKE on the marker text).
+
+**Privacy / cardinality**
+
+- **`*_safe` de-identified attribute family** — Claude emits `tool_name_safe`,
+  `bash_command_class`, `bash_argv0`, `query_source_safe` alongside the gated
+  originals: builtin names pass verbatim, user-defined names are bucketed
+  (`mcp_other`, `custom`, …). Lets orgs run dashboards against tool/query mix
+  without enabling `toolDetails`. Meaningful only at multi-user scale.
+- **Managed-settings lock** — admin-forced OTLP endpoint/headers that override
+  user config (Claude strips developer-set conflicts at startup). Only matters
+  for org rollouts; today we document the env-override convention and rely on
+  env > file > default precedence.
+
+**Trace context propagation (bigger lifts)**
+
+- **W3C `traceparent` propagation** — Claude (a) injects `TRACEPARENT` env into
+  Bash/MCP subprocesses, (b) sends a `traceparent` header on the LLM request and
+  records `traceresponse` as a span link, (c) accepts inbound `TRACEPARENT` when
+  spawned by Agent SDK / `-p`. Would turn opencode into a first-class citizen of
+  a wider distributed trace. Three separable workstreams, each an opt-in.
+
+**Three-signal coverage**
+
+- The OTLP metrics + logs/events export roadmap section above already covers
+  this. Claude's event-stream vocabulary (`user_prompt` / `tool_decision` /
+  `api_request` / `compaction` / `subagent_completed` …) is a useful reference
+  when we scope the logs signal — most events map to events we already
+  consume in `src/spans.ts`.
