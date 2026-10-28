@@ -38,6 +38,23 @@ Targeted configuration would scope behavior to specific projects or sessions:
 - Open questions: resolution timing (session start vs hot reload), and how the
   override layers stack against env-driven org-wide settings (env should stay top).
 
+## Per-tool capture scoping
+
+`contentGates.toolDetails` / `toolContent` currently gate tool-call capture uniformly
+across every tool. A per-tool scope would select which tools' arguments/results land on
+tool spans at all:
+
+- Use cases: privacy (bash command lines are the sensitive surface — capture only those,
+  or exclude them); volume (read/glob results dominate span bytes); focused analysis
+  (downstream file-set reconstruction only needs bash + edit).
+- Config sketch: `tracing.contentGates.toolScope: { "include": ["bash", "edit"] }` or
+  `{ "exclude": ["read"] }`, intersected with the domain gates — a tool call must pass
+  both the scope and `toolDetails`/`toolContent` to be captured.
+- Matching needs a story for MCP tool names (namespaced, e.g. `mcp__server__tool`):
+  exact names plus `prefix:*` globs are the likely shape.
+- Scope: span attributes only; the wire JSONL stays all-or-nothing (it is the request
+  body, not per-tool telemetry).
+
 ## TUI sidebar status indicator
 
 A small sidebar presence like omo-slim's — an activity indicator while a turn is being
