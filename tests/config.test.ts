@@ -285,3 +285,14 @@ test("logs.intervalMs: default 2000, file-configurable, non-numbers warn and fal
   assert.strictEqual(bad.logs.intervalMs, 2000)
   assert.ok(warnings.some((w) => w.kind === "bad-type" && w.message.includes("logs.intervalMs")))
 })
+
+test("parseKvList edge cases: first '=' splits, empty values kept, malformed pairs skipped", () => {
+  const { config } = loadFrom(null, {
+    OTEL_EXPORTER_OTLP_HEADERS: "auth=Bearer abc=123,empty=,novalue,=nokey,valid=yes",
+  })
+  assert.strictEqual(config.tracing.headers["auth"], "Bearer abc=123", "a value may itself contain '=' — split on the first only")
+  assert.strictEqual(config.tracing.headers["empty"], "", "empty values are kept")
+  assert.strictEqual(config.tracing.headers["valid"], "yes")
+  assert.strictEqual(config.tracing.headers["novalue"], undefined, "a pair without '=' is skipped")
+  assert.strictEqual(config.tracing.headers[""], undefined, "a pair without a key is skipped")
+})

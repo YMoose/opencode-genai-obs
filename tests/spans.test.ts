@@ -577,3 +577,59 @@ test("log events: system event fires only when a wire frame is consumed", async 
   assert.ok(system, "wire frame present → system event")
   assert.strictEqual(system!.gated, false)
 })
+
+test("Bug 13: duplicate step.ended delivery (opencode V2 multi-instance fan-out) must not double-emit span/metrics/logs", async () => {
+  const observations: Array<Record<string, unknown>> = []
+  const logEvents: Array<Record<string, unknown>> = []
+  const { spans, builder } = makeHarness({
+    observe: (obs) => observations.push(obs as unknown as Record<string, unknown>),
+    emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>),
+  })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  const ended = event("session.step.ended", 1_200, {
+    sessionID: "s1",
+    assistantMessageID: "a1",
+    tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+    finish: "stop",
+  })
+  builder.handleEvent(ended)
+  builder.handleEvent(ended) // duplicate delivery of the same event (V2 fan-out)
+
+  assert.strictEqual(spans.filter((s) => s.name === "chat m").length, 1, "duplicate step.ended must not emit a second chat span")
+  assert.strictEqual(observations.filter((o) => o.metric === "token").length, 2, "duplicate step.ended must not double-count token metrics")
+  assert.strictEqual(observations.filter((o) => o.metric === "duration").length, 1, "duplicate step.ended must not double-count duration")
+  assert.strictEqual(logEvents.filter((e) => e.event === "choice").length, 1, "duplicate step.ended must not emit a second choice event")
+})
+
+test("text.ended: out-of-order ordinals are reassembled in ordinal order on the chat span", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  // Deliver segments out of order (ordinal 1 before ordinal 0), as the protocol permits
+  builder.handleEvent(event("session.text.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", ordinal: 1, text: "world" }))
+  builder.handleEvent(event("session.text.ended", 1_210, { sessionID: "s1", assistantMessageID: "a1", ordinal: 0, text: "hello" }))
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } } }))
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat)
+  assert.strictEqual(chat.attributes.find(([k]) => k === "output.value")?.[1], "hello\n\nworld", "segments must be reassembled by ordinal, not arrival order")
+})
+
+test("tool span timing: starts at input.started (end-to-end audit view), not tool.called", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  // Slow argument streaming: input.started at 1_200, called at 5_000, success at 5_300
+  builder.handleEvent(event("session.tool.input.started", 1_200, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", name: "read" }))
+  builder.handleEvent(event("session.tool.called", 5_000, { sessionID: "s1", assistantMessageID: "a1", id: "tc1", input: {} }))
+  builder.handleEvent(event("session.tool.success", 5_300, { sessionID: "s1", assistantMessageID: "a1", id: "tc1", content: [{ type: "text", text: "ok" }] }))
+  const tool = spans.find((span) => span.name === "execute_tool read")
+  assert.ok(tool)
+  // Audit semantics: the span covers LLM argument generation + execution (unlike
+  // opencode-plugin-otel, which starts at tool.called to measure pure execution).
+  assert.strictEqual(tool.startTimeUnixNano, 1_200_000_000n, "tool span starts at input.started")
+  assert.strictEqual(tool.endTimeUnixNano, 5_300_000_000n)
+})

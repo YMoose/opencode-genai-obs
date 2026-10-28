@@ -73,6 +73,11 @@ function truncate(value: string, limit: number): { value: string; originalLength
   return { value: cutUtf8Bytes(value, limit) + `[TRUNCATED original_length=${bytes}]`, originalLength: bytes }
 }
 
+/** Reassemble text segments in ordinal order (arrival order may differ) */
+function orderedTexts(texts: Map<number, string>): string[] {
+  return [...texts.entries()].sort(([a], [b]) => a - b).map(([, text]) => text)
+}
+
 /** Skip null/undefined/empty-string values, keep the rest (mirrors adapter._attrs) */
 function attrs(...pairs: ReadonlyArray<readonly [string, AttrValue | null | undefined]>): Array<readonly [string, AttrValue]> {
   const out: Array<readonly [string, AttrValue]> = []
@@ -136,7 +141,8 @@ interface StepState {
   readonly agent: string
   readonly model: { readonly id: string; readonly providerID: string }
   readonly startedNano: bigint
-  texts: string[]
+  /** text segments keyed by their protocol ordinal — reassembled in ordinal order, not arrival order */
+  texts: Map<number, string>
   reasoning: string[]
 }
 
@@ -208,6 +214,14 @@ export function createSpanBuilder(
   const pendingPrompts = new Map<string, { messageID: string; text: string }>()
   /** Transient step state: assistantMessageID → StepState */
   const steps = new Map<string, StepState>()
+  /**
+   * Terminal-step registry: assistantMessageIDs that already emitted a chat span via
+   * step.ended/failed. opencode V2 may fan the same event out to multiple plugin
+   * instances (see DEVtheOPS AGENTS.md) — without this, a duplicate step.ended would
+   * re-emit the span and double-count metrics/logs (Bug 13). Nested by sessionID so
+   * session.deleted can purge it (the only registry that grows monotonically otherwise).
+   */
+  const endedSteps = new Map<string, Set<string>>()
   /** Transient tool state: toolCallId → ToolState */
   const tools = new Map<string, ToolState>()
   /** Sub-agent attachment points: child sessionID → { toolSpanId, traceId, parentSid } */
@@ -243,6 +257,7 @@ export function createSpanBuilder(
     pendingPrompts.delete(sid)
     compactions.delete(sid)
     pendingRetries.delete(sid)
+    endedSteps.delete(sid)
   }
 
   const isChild = (sid: string): boolean => {
@@ -404,7 +419,7 @@ export function createSpanBuilder(
           agent: (data.agent as string) ?? "",
           model: { id: model.id ?? "unknown", providerID: model.providerID ?? "" },
           startedNano: nano((data.started as number) ?? event.created),
-          texts: [],
+          texts: new Map(),
           reasoning: [],
         })
         return
@@ -413,10 +428,11 @@ export function createSpanBuilder(
       case "session.text.ended": {
         const step = steps.get(data.assistantMessageID as string)
         if (step) {
-          step.texts.push(data.text as string)
-          // candidate for the turn's final answer
+          const ordinal = typeof data.ordinal === "number" ? data.ordinal : step.texts.size
+          step.texts.set(ordinal, data.text as string)
+          // candidate for the turn's final answer (ordinal-ordered)
           const turn = openTurns.get(sid)
-          if (turn) turn.lastAnswer = step.texts.join("\n\n")
+          if (turn) turn.lastAnswer = orderedTexts(step.texts).join("\n\n")
         }
         return
       }
@@ -460,6 +476,14 @@ export function createSpanBuilder(
       case "session.step.ended":
       case "session.step.failed": {
         const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
+        // Idempotency: a duplicate terminal event for the same assistant message is a
+        // no-op — the span/metrics/logs were already emitted on first delivery.
+        if (assistantMessageID) {
+          const ended = endedSteps.get(sid) ?? new Set<string>()
+          if (ended.has(assistantMessageID)) return
+          ended.add(assistantMessageID)
+          endedSteps.set(sid, ended)
+        }
         const step = assistantMessageID ? steps.get(assistantMessageID) : undefined
         if (assistantMessageID) steps.delete(assistantMessageID)
         const endNano = nano(event.created)
@@ -568,7 +592,7 @@ export function createSpanBuilder(
     const cost = data.cost as number | undefined
     const finish = data.finish as string | undefined
     const model = step?.model ?? { id: "unknown", providerID: "" }
-    const texts = step?.texts ?? []
+    const texts = step ? orderedTexts(step.texts) : []
     const reasoning = step?.reasoning ?? []
     const wire = options.consumeWire(sid)
     // retry.scheduled arrived after the failed span was emitted — stamp this (retrying) span instead
