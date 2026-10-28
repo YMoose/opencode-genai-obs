@@ -326,3 +326,99 @@ test("Bug 12: startup backfill annotates every existing session across list page
     "the backfilled title comes from the listed session",
   )
 })
+
+test("trace propagation: model.request injects traceparent only for whitelisted providers with an in-flight step", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-prop-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      tracing: {
+        enabled: true,
+        endpoint: server.url,
+        project: "t",
+        annotations: { enabled: false },
+        propagation: { providers: ["aliyun"] },
+      },
+    }),
+    "utf-8",
+  )
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload())
+
+  assert.ok(mock.has("model.request"), "the model.request hook must be registered when propagation is configured")
+
+  // No step in flight → nothing to propagate
+  const noStepHeaders: Record<string, string> = {}
+  mock.fire("model.request", { sessionID: "s1", agent: "build", model: { providerID: "aliyun", id: "kimi-k3" }, kind: "primary", headers: noStepHeaders })
+  assert.strictEqual(noStepHeaders.traceparent, undefined, "no active step → no injection")
+
+  // A step is now in flight — feed is an async pump: wait until the builder has
+  // processed step.started before firing the request
+  mock.feeds[0]!.push({ type: "session.created", created: 1_000, data: { sessionID: "s1", agent: "build" } })
+  mock.fire("prompt", { sessionID: "s1", messageID: "m1", prompt: { text: "hi" } })
+  mock.feeds[0]!.push({ type: "session.step.started", created: 1_100, data: { sessionID: "s1", assistantMessageID: "a1", agent: "build", model: { id: "kimi-k3", providerID: "aliyun" } } })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  // Whitelisted provider, matching step → inject
+  const headers: Record<string, string> = {}
+  mock.fire("model.request", { sessionID: "s1", agent: "build", model: { providerID: "aliyun", id: "kimi-k3" }, kind: "primary", headers })
+  assert.ok(headers.traceparent, "whitelisted provider with an in-flight step must be injected")
+  const parts = headers.traceparent!.split("-")
+  assert.strictEqual(parts.length, 4, "W3C traceparent has 4 dash-separated fields")
+  assert.strictEqual(parts[0], "00")
+  assert.strictEqual(parts[1]!.length, 32, "trace-id is 32 hex chars")
+  assert.strictEqual(parts[2]!.length, 16, "span-id is 16 hex chars")
+  assert.strictEqual(parts[3], "01", "sampled flag")
+
+  // Non-whitelisted provider → no injection
+  const otherHeaders: Record<string, string> = {}
+  mock.fire("model.request", { sessionID: "s1", agent: "build", model: { providerID: "volces", id: "x" }, kind: "primary", headers: otherHeaders })
+  assert.strictEqual(otherHeaders.traceparent, undefined, "non-whitelisted provider must not be injected")
+
+  // Auxiliary request (title generation) → never injected
+  const titleHeaders: Record<string, string> = {}
+  mock.fire("model.request", { sessionID: "s1", agent: "build", model: { providerID: "aliyun", id: "kimi-k3" }, kind: "title", headers: titleHeaders })
+  assert.strictEqual(titleHeaders.traceparent, undefined, "auxiliary requests must not be injected")
+
+  // Mismatched model → the request is not the active step → no injection
+  const mismatchHeaders: Record<string, string> = {}
+  mock.fire("model.request", { sessionID: "s1", agent: "build", model: { providerID: "aliyun", id: "other-model" }, kind: "primary", headers: mismatchHeaders })
+  assert.strictEqual(mismatchHeaders.traceparent, undefined, "a request that does not match the active step must not be injected")
+})
+
+test("trace propagation: the model.request hook is not registered when no providers are configured", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-propnil-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, annotations: { enabled: false } } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload())
+
+  assert.ok(!mock.has("model.request"), "no propagation configured → no hook registration")
+})

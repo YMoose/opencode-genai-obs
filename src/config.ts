@@ -95,6 +95,18 @@ export interface TracingConfig {
   /** Custom attributes merged into the OTLP resource block (host.name / team etc.; builtin keys win on conflicts) */
   readonly resourceAttributes: Record<string, string>
   readonly annotations: AnnotationsConfig
+  readonly propagation: PropagationConfig
+}
+
+export interface PropagationConfig {
+  /**
+   * Provider IDs (or "*") whose primary model requests receive a W3C `traceparent`
+   * header pointing at the in-flight chat span — an OTel-instrumented gateway
+   * (LiteLLM, vLLM, …) can then parent its spans under ours. Default [] (off):
+   * injecting into a provider that cannot parse it is harmless but pointless.
+   * Title/compaction/generate requests are never injected (they would mis-parent).
+   */
+  readonly providers: readonly string[]
 }
 
 export interface Config {
@@ -124,6 +136,7 @@ const TRACING_KEYS = new Set([
 ])
 const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "toolContent", "wireBody"])
 const ANNOTATION_KEYS = new Set(["enabled"])
+const PROPAGATION_KEYS = new Set(["providers"])
 
 // ---------------------------------------------------------------------------
 // Type validation + default fallback
@@ -170,6 +183,24 @@ function recordField(value: unknown, path: string, warnings: ConfigWarning[]): R
       continue
     }
     out[key] = item
+  }
+  return out
+}
+
+/** String list: non-string entries are skipped with a warning */
+function stringListField(value: unknown, path: string, fallback: readonly string[], warnings: ConfigWarning[]): readonly string[] {
+  if (value === undefined) return fallback
+  if (!Array.isArray(value)) {
+    warnings.push({ kind: "bad-type", message: `${path}: expected array, got ${JSON.stringify(value)}; using default` })
+    return fallback
+  }
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item !== "string") {
+      warnings.push({ kind: "bad-type", message: `${path}: non-string entry ${JSON.stringify(item)}; skipped` })
+      continue
+    }
+    out.push(item)
   }
   return out
 }
@@ -264,6 +295,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       contentMaxLength: 61440,
       resourceAttributes: {},
       annotations: { enabled: true },
+      propagation: { providers: [] },
     },
   }
 
@@ -293,6 +325,8 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
         unknownKeys(gatesRaw, GATE_KEYS, "tracing.contentGates", configPath, warnings)
         const annotationsRaw = section(tracingRaw.annotations, "tracing.annotations", warnings)
         unknownKeys(annotationsRaw, ANNOTATION_KEYS, "tracing.annotations", configPath, warnings)
+        const propagationRaw = section(tracingRaw.propagation, "tracing.propagation", warnings)
+        unknownKeys(propagationRaw, PROPAGATION_KEYS, "tracing.propagation", configPath, warnings)
 
         const content = boolField(tracingRaw.content, "tracing.content", defaults.tracing.content, warnings)
         fileConfig = {
@@ -313,6 +347,9 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
             resourceAttributes: recordField(tracingRaw.resourceAttributes, "tracing.resourceAttributes", warnings),
             annotations: {
               enabled: boolField(annotationsRaw.enabled, "tracing.annotations.enabled", defaults.tracing.annotations.enabled, warnings),
+            },
+            propagation: {
+              providers: stringListField(propagationRaw.providers, "tracing.propagation.providers", defaults.tracing.propagation.providers, warnings),
             },
           },
         }

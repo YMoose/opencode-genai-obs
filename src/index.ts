@@ -38,6 +38,14 @@ interface Pipeline {
   recordWsSend: (event: Record<string, unknown>) => void
   recordHttpRequest: (event: Record<string, unknown>) => void
   handlePrompt: (sessionID: string, messageID: string, text: string) => void
+  /** Inject a W3C traceparent into the outgoing model request's headers (no-op unless the provider is whitelisted and a step is in flight) */
+  injectTraceContext: (event: {
+    sessionID: string
+    agent: string
+    model: { providerID: string; id: string }
+    kind: string
+    headers: Record<string, string>
+  }) => void
 }
 
 const pipelineGlobal = {
@@ -92,6 +100,9 @@ function projectLabel(directory: string | undefined): string | undefined {
  */
 const POST_SPAN_ANNOTATE_DELAY_MS = 3_000
 
+/** W3C traceparent: version 00, sampled flag 01 (we never sample) */
+const formatTraceparent = (traceId: string, spanId: string): string => `00-${traceId}-${spanId}-01`
+
 async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline> {
   const wire = createWireRecorder(config.wire, log)
 
@@ -107,6 +118,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),
       recordHttpRequest: (event) => wire.recordHttpRequest(event as unknown as Parameters<typeof wire.recordHttpRequest>[0]),
       handlePrompt: () => {},
+      injectTraceContext: () => {},
     }
   }
 
@@ -145,6 +157,8 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     (span) => sender.push(span),
     log,
   )
+
+  const propagationProviders = new Set(config.tracing.propagation.providers)
 
   /**
    * session.created / session.renamed → real-time project/title annotation
@@ -279,6 +293,18 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),
     recordHttpRequest: (event) => wire.recordHttpRequest(event as unknown as Parameters<typeof wire.recordHttpRequest>[0]),
     handlePrompt: (sessionID, messageID, text) => spanBuilder.handlePrompt(sessionID, messageID, text),
+    injectTraceContext: (event) => {
+      // Auxiliary requests (title/compaction/generate) share the session but not the
+      // active step — injecting the step's context would mis-parent them
+      if (event.kind !== "primary") return
+      if (!propagationProviders.has("*") && !propagationProviders.has(event.model.providerID)) return
+      const active = spanBuilder.activeChatContext(event.sessionID)
+      if (!active) return
+      // Only the request that IS the active step may carry its context: provider,
+      // model and agent must match (concurrent background requests must not attach)
+      if (active.agent !== event.agent || active.model.providerID !== event.model.providerID || active.model.id !== event.model.id) return
+      event.headers.traceparent = formatTraceparent(active.traceId, active.spanId)
+    },
   }
 }
 
@@ -355,6 +381,21 @@ export default Plugin.define({
         dispatch("prompt", (pipeline) => pipeline.handlePrompt(promptEvent.sessionID, promptEvent.messageID, promptEvent.prompt.text))
       })
       disposers.push(() => { promptReg.dispose() })
+
+      if (config.tracing.propagation.providers.length > 0) {
+        const modelReqReg = await ctx.session.hook("model.request", (event) => {
+          const req = event as unknown as {
+            sessionID: string
+            agent: string
+            model: { providerID: string; id: string }
+            kind: string
+            headers: Record<string, string>
+          }
+          dispatch("model.request", (pipeline) => pipeline.injectTraceContext(req))
+        })
+        disposers.push(() => { modelReqReg.dispose() })
+        log("trace propagation on", { providers: config.tracing.propagation.providers })
+      }
     }
 
     // --- First election: the first instance to arrive builds and publishes the shared pipeline ---

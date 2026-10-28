@@ -130,6 +130,7 @@ interface TurnState {
 
 interface StepState {
   readonly assistantMessageID: string
+  readonly sessionID: string
   readonly agent: string
   readonly model: { readonly id: string; readonly providerID: string }
   readonly startedNano: bigint
@@ -177,6 +178,14 @@ export interface SpanBuilder {
   readonly handlePrompt: (sessionID: string, messageID: string, text: string) => void
   /** Finish: flush every in-flight turn/container (called on plugin unload) */
   readonly flushAll: () => Promise<void>
+  /**
+   * W3C trace-context coordinates of the session's in-flight chat step (the span that
+   * the current LLM request will become). Undefined between steps — callers must not
+   * guess. Used by the model.request hook to inject traceparent.
+   */
+  readonly activeChatContext: (
+    sessionID: string,
+  ) => { readonly traceId: string; readonly spanId: string; readonly agent: string; readonly model: { readonly id: string; readonly providerID: string } } | undefined
   readonly emit: (span: SpanRecord) => void
 }
 
@@ -381,6 +390,7 @@ export function createSpanBuilder(
         const model = (data.model ?? {}) as { id?: string; providerID?: string }
         steps.set(assistantMessageID, {
           assistantMessageID,
+          sessionID: sid,
           agent: (data.agent as string) ?? "",
           model: { id: model.id ?? "unknown", providerID: model.providerID ?? "" },
           startedNano: nano((data.started as number) ?? event.created),
@@ -794,6 +804,22 @@ export function createSpanBuilder(
       for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now)
       for (const sid of [...containers.keys()]) await flushContainer(sid, now)
       for (const [sid, state] of [...compactions]) emitCompactionSpan(sid, state, {}, now, false)
+    },
+    activeChatContext(sessionID) {
+      // steps is keyed by assistantMessageID; at most one step per session is in flight
+      // (opencode serializes the step loop), so the first session match IS the active one
+      for (const step of steps.values()) {
+        if (step.sessionID !== sessionID) continue
+        const traceId = isChild(sessionID) ? childTrace(sessionID).traceId : openTurns.get(sessionID)?.traceId
+        if (!traceId) return undefined
+        return {
+          traceId,
+          spanId: chatSpanId(step.assistantMessageID),
+          agent: step.agent,
+          model: step.model,
+        }
+      }
+      return undefined
     },
     emit,
   }
