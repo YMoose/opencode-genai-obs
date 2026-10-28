@@ -112,7 +112,7 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 
 ## 路线图
 
-路线图与 TODO（英文，单一维护源）见 [README.md · Roadmap / TODO](README.md#roadmap--todo)。
+见 [TODO.md](TODO.md)（英文，单一维护源）。
 
 ## 开发
 

@@ -110,14 +110,9 @@ Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record p
 
 **Privacy**: bodies contain the full system prompt + history + tools. Files are mode 0600, never committed to git, never sent anywhere. Delete the files when you no longer need them.
 
-## Roadmap / TODO
+## Roadmap
 
-- [ ] OTLP metrics + logs/events export (session/tool/token/cost metrics and log events
-      from the existing event stream, via the OTLP HTTP protocols)
-- [ ] Backend-specific capability extension points — a registration/callback mechanism so
-      platform-specific behavior (today: the Phoenix-compatible session annotations)
-      becomes pluggable instead of core
-- [ ] Trace head sampling (`tracing.sampleRatio`; deferred — full export stays the default)
+Tracked in [TODO.md](TODO.md).
 
 ## Development
 
