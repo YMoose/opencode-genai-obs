@@ -2,8 +2,8 @@
  * ids.ts contract tests: exact hex outputs are PINNED LITERALS, recomputed independently
  * (node crypto one-liner, not via src/ids.ts) — so any formula drift goes red here.
  *
- * These formulas are a frozen cross-system contract, byte-identical to
- * obsystem/otel-span-exportor/adapter.py. If this suite fails, you are changing the
+ * These formulas are a frozen cross-system contract, byte-identical to an internal
+ * offline replay lane (Python). If this suite fails, you are changing the
  * contract (breaking offline-replay dedup), not fixing a bug.
  */
 import test from "node:test"

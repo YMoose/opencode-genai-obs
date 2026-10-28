@@ -1,5 +1,5 @@
 /**
- * @fileoverview Real-time session annotations (Phase 2.5, optional enhancement).
+ * @fileoverview Real-time session annotations (optional enhancement).
  *
  * Posts to the Phoenix-compatible REST API POST /v1/session_annotations?sync=true
  * (project/title as two CODE annotations, rendered as Sessions-table columns). This is

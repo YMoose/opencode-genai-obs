@@ -187,7 +187,7 @@ test("compaction：started→ended 独立成 trace，model/usage/cost/摘要齐�
     event("session.compaction.ended", 3_000, {
       sessionID: "s1",
       reason: "auto",
-      model: { id: "kimi", providerID: "volces" },
+      model: { id: "model-x", providerID: "example" },
       native: false,
       text: "summary of the conversation",
       cost: 0.02,
@@ -203,7 +203,7 @@ test("compaction：started→ended 独立成 trace，model/usage/cost/摘要齐�
   assert.notStrictEqual(compaction.traceId, hash("opencode-turn:s1:m1", 16), "不得挂进 turn trace")
   const attr = (name: string) => compaction.attributes.find(([key]) => key === name)?.[1]
   assert.equal(attr("gen_ai.operation.name"), "compaction")
-  assert.equal(attr("gen_ai.request.model"), "kimi")
+  assert.equal(attr("gen_ai.request.model"), "model-x")
   assert.equal(attr("opencode.compaction.reason"), "auto")
   assert.equal(attr("opencode.compaction.native"), false)
   assert.equal(attr("gen_ai.usage.input_tokens"), 110, "input 含 cache.read")

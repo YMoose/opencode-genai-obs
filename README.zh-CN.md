@@ -4,7 +4,7 @@
 
 OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出到任意 OTLP/HTTP 兼容后端（OTel Collector / Phoenix / SigNoz / Jaeger …）。只对齐语义约定（OTel GenAI semconv + OpenInference），不绑定特定观测平台。
 
-> **当前状态：运行中**。wire body 采集（Phase 1）+ 实时 OTLP tracing（Phase 2）已上线实测。**插件只做实时**；历史/崩溃数据补灌走 `obsystem/otel-span-exportor` 的离线链路（export → adapter → send，与插件幂等 id 一致）。
+> **当前状态：生产运行中。** 插件只做实时——崩溃修复与历史数据补灌由本仓库之外的离线链路承担。
 
 ## 安装
 
@@ -12,13 +12,13 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 
 ```json
 {
-  "plugin": ["/home/cambricon/yzh/ocg-obs"]
+  "plugin": ["/absolute/path/to/opencode-genai-obs"]
 }
 ```
 
 重启 opencode。
 
-## 功能：实时 OTLP tracing（Phase 2）
+## 功能：实时 OTLP tracing
 
 默认开启：session 事件流 → OTel GenAI semconv span → OTLP/HTTP 后端（protobuf）。一轮对话 = 一条 trace（轮根 span = 用户消息摘要），chat span（LLM 调用，带完整 wire body）/ execute_tool span 秒级实时可见。子 agent 会话整棵挂进调用它的 tool span。每次 compaction 独立成一条 trace（model/usage/cost/摘要走 `assistantResponses` 门控）；重试则盖章到重试那次尝试的 chat span 上（`opencode.retry.attempt` / `opencode.retry.error`）。
 
@@ -66,12 +66,12 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 行为要点：
 
 - `tracing.enabled: false` + `wire.enabled: true` = **wire-only 模式**：只落 JSONL，不订阅事件流，任何数据不离开本进程
-- 默认 endpoint 为 OTLP 标准端口 `http://localhost:4318`；此前默认 Phoenix 端口 `6006`，依赖默认值的 Phoenix 部署需显式配置 endpoint（**迁移提示**）
+- 默认 endpoint 为 OTLP 标准端口 `http://localhost:4318`；Phoenix 用户需显式配置 `http://localhost:6006`
 - 不发送任何后端专属请求头；project 语义统一走 `openinference.project.name` resource 属性
 - `tracing.annotations.enabled: false` 可关闭 Phoenix 兼容后端专属的 session annotation（非 Phoenix 后端建议关闭，避免 404 重试噪音）
 - OTLP POST 与 session annotation 请求带 30s 超时，对端挂死不会卡住发送队列/插件卸载
 - `session.deleted` 事件触发该会话全部内存状态清理（长驻进程防泄漏）
-- 插件热重载若先卸旧 owner，存活实例的 hook 回调会自动触发 pipeline 补选，采集不中断
+- 插件热重载后采集不中断
 
 ## 功能：wire body 采集
 
@@ -95,11 +95,11 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
   "ts": "2026-10-27T03:25:06.123Z",
   "seq": 42,
   "hook": "ws.send",
-  "sessionID": "ses_e84ae6de0ffeS1LUNCUejdumYi",
-  "agent": "sisyphus",
-  "model": { "providerID": "volces", "id": "volces/kimi-k3" },
+  "sessionID": "ses_example0123456789",
+  "agent": "build",
+  "model": { "providerID": "example", "id": "example/model-x" },
   "kind": "primary",
-  "frame": "{\"model\":\"volces/kimi-k3\",\"messages\":[...],\"tools\":[...],\"temperature\":0.6,...}"
+  "frame": "{\"model\":\"example/model-x\",\"messages\":[...],\"tools\":[...],\"temperature\":0.6,...}"
 }
 ```
 
@@ -113,9 +113,6 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 ## 路线图
 
 路线图与 TODO（英文，单一维护源）见 [README.md · Roadmap / TODO](README.md#roadmap--todo)。
-
-设计文档：`../obsystem/otel-span-exportor/MERGED-PLUGIN.md`  
-调研：`../obsystem/otel-span-exportor/RESEARCH.md`
 
 ## 开发
 

@@ -4,8 +4,8 @@
  * Every trace/span id is a pure hash of stable inputs (no random ids, no UUIDs), so that:
  * - multiple plugin realms emitting the same event produce identical ids → backends with
  *   idempotent upserts (Phoenix-style DO_NOTHING) dedupe them for free
- * - the offline replay lane (obsystem/otel-span-exportor/adapter.py) computes byte-identical
- *   ids from stored data → crash repair / historical backfill never creates duplicates
+ * - an internal offline replay lane (outside this repo) computes byte-identical ids from
+ *   stored data → crash repair / historical backfill never creates duplicates
  *
  * CONTRACT: these formulas are mirrored in Python and must stay byte-stable once published.
  * Changing a prefix, an input order, or a byte length silently breaks offline-replay dedup.

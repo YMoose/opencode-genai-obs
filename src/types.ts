@@ -1,6 +1,6 @@
 /**
  * @fileoverview One JSONL record of a raw LLM request body (wire body).
- * Fields align with obsystem/otel-span-exportor/RAW-REQUESTS.md.
+ * Fields align with the offline lane's raw-request schema.
  */
 export interface WireRecord {
   /** Schema version; bump on breaking changes */

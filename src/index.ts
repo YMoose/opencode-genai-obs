@@ -1,8 +1,8 @@
 /**
  * @fileoverview opencode-genai-obs — plugin entry.
  *
- * Phase 1: wire body capture (v2 session hook → JSONL + pending slots)
- * Phase 2: event-driven span builder (ctx.event.subscribe → OTLP spans → any OTLP/HTTP backend)
+ * Wire body capture: v2 session hooks → JSONL + pending slots
+ * Real-time tracing: event stream → OTLP spans → any OTLP/HTTP backend
  *
  * Install: add this directory's absolute path to the plugin array in
  * ~/.config/opencode/opencode.json

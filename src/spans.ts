@@ -1,8 +1,8 @@
 /**
- * @fileoverview Event-driven span builder (the real-time lane) — a streaming version of adapter.py's
- * projection logic.
+ * @fileoverview Event-driven span builder (the real-time lane) — a streaming projection
+ * of the session event stream into OTel GenAI spans.
  *
- * State machine (see obsystem/otel-span-exportor/MERGED-PLUGIN.md §2):
+ * State machine design (internal design doc):
  * - The prompt hook stashes {messageID, text}; the first step.started opens the turn
  *   (session.created has necessarily passed the SSE pump by then, so root/sub-agent
  *   classification is reliable)
@@ -23,7 +23,7 @@
  *   its parentSpanId to the container span
  *
  * Deterministic ids live in ids.ts — a FROZEN contract, byte-identical to the offline
- * replay lane (adapter.py), which relies on them for idempotent dedup. Derivation inputs:
+ * replay lane, which relies on them for idempotent dedup. Derivation inputs:
  * turn ids from sessionID × userMessageID; chat/tool ids from assistantMessageID ×
  * toolCallID; session ids from the child sessionID; compaction ids from sessionID ×
  * start timestamp. Exact outputs are pinned by tests/ids.test.ts.

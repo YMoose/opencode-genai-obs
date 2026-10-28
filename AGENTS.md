@@ -15,9 +15,9 @@ only — never bound to a specific observability platform. Runtime dependency cl
   pipeline singleton shared across opencode's per-location module realms)
 - `src/config.ts` — env/config loading and validation (env > config file > defaults)
 - `src/spans.ts` — event → span state machine (turns/steps/tools/compaction/retry)
-- `src/ids.ts` — the FROZEN deterministic-id contract (byte-identical to the offline lane's
-  adapter.py; never change published formulas — tests/ids.test.ts pins exact outputs, and
-  drift silently breaks offline-replay dedup)
+- `src/ids.ts` — the FROZEN deterministic-id contract (byte-identical to the internal
+  offline replay lane; never change published formulas — tests/ids.test.ts pins exact
+  outputs, and drift silently breaks offline-replay dedup)
 - `src/otlp.ts` — dependency-free OTLP/HTTP protobuf encoder
 - `src/sender.ts` — send queue with retry/backoff and drain-on-dispose
 - `src/wire.ts` — wire-body JSONL capture (`experimental.ws.send` + `http.request` hooks)
