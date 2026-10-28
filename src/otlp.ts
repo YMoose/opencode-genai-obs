@@ -14,6 +14,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto"
 import { ExportResultCode, type InstrumentationScope } from "@opentelemetry/core"
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base"
+import { PLUGIN_VERSION } from "./version.js"
 
 export type AttrValue = string | number | boolean
 
@@ -29,7 +30,7 @@ export interface SpanRecord {
   readonly status: { readonly code: number; readonly message?: string } // 1=OK 2=ERROR
 }
 
-const SCOPE: InstrumentationScope = { name: "opencode-genai-obs", version: "0.1.0" }
+const SCOPE: InstrumentationScope = { name: "opencode-genai-obs", version: PLUGIN_VERSION }
 
 /** bigint nanos → HrTime [seconds, sub-second nanos] */
 const nanoToHr = (nano: bigint): HrTime => [Number(nano / 1_000_000_000n), Number(nano % 1_000_000_000n)]

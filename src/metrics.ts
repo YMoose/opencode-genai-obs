@@ -12,6 +12,7 @@ import { MeterProvider } from "@opentelemetry/sdk-metrics"
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics"
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto"
 import type { Attributes } from "@opentelemetry/api"
+import { PLUGIN_VERSION } from "./version.js"
 
 /** One metric observation reported by the span state machine */
 export type MetricObservation =
@@ -66,7 +67,7 @@ export function createMetrics(options: MetricsOptions): Metrics {
     exportIntervalMillis: options.intervalMs ?? 60_000,
   })
   const provider = new MeterProvider({ resource, readers: [reader] })
-  const meter = provider.getMeter("opencode-genai-obs", "0.1.0")
+  const meter = provider.getMeter("opencode-genai-obs", PLUGIN_VERSION)
 
   const tokenUsage = meter.createHistogram("gen_ai.client.token.usage", {
     description: "Number of input/output tokens per GenAI operation",

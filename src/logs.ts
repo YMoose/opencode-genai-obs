@@ -23,6 +23,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources"
 import { LoggerProvider } from "@opentelemetry/sdk-logs"
 import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs"
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto"
+import { PLUGIN_VERSION } from "./version.js"
 import { cutUtf8Bytes } from "./truncate.js"
 
 /**
@@ -124,7 +125,7 @@ export function createLogs(options: LogsOptions): Logs {
       ),
     ],
   })
-  const logger = provider.getLogger("opencode-genai-obs", "0.1.0")
+  const logger = provider.getLogger("opencode-genai-obs", PLUGIN_VERSION)
 
   const limit = options.contentMaxLength
   const clip = (text: string | undefined): string | undefined =>
