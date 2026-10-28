@@ -4,21 +4,25 @@
 
 <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 
-**OpenTelemetry GenAI tracing and raw LLM wire capture for OpenCode v2.**
+**Audit-grade GenAI observability for OpenCode v2 — standard OTLP traces & metrics, plus full-fidelity raw wire capture.**
 
 `opencode-genai-obs` hooks into the OpenCode v2 session event stream and transport layer, exporting structured agent traces over OTLP/HTTP (protobuf) to any compatible backend (Arize Phoenix, Jaeger, SigNoz, OTel Collector, …) while optionally recording the exact provider request payloads to local JSONL.
+
+Where ops-monitoring plugins answer *"how many tokens did we burn today?"*, this plugin answers *"what exactly went over the wire, and why did this turn cost what it cost?"* — full request payloads on disk, deterministic trace/span IDs, and session-level audit annotations.
 
 ## Scope
 
 Signals are **GenAI-semconv-scoped only**:
 
 - **Traces** — spans under `gen_ai.*` (+ OpenInference mirrors), the main signal
-- **Metrics** — `gen_ai.client.token.usage` (input/output per model) and `gen_ai.client.operation.duration` (chat / execute_tool); no infra/runtime or app-ops dashboard metrics (session counts, commit counters — that is the ops-monitoring plugin's job)
+- **Metrics** — `gen_ai.client.token.usage` and `gen_ai.client.operation.duration`; no infra/runtime or app-ops dashboard metrics (session counts, commit counters — that is the ops-monitoring plugin's job)
 - **Events/logs** — the five `gen_ai.*` message events (`system` / `user` / `assistant` / `tool` / `choice`), if a logs lane is added
 
 Custom `opencode.*` span attributes are unaffected — the scope limits which signal *domains* we emit, not per-span attributes.
 
-## Trace model & capabilities
+## What it instruments
+
+### Traces
 
 Each conversation turn is projected into a single trace in real time:
 
@@ -35,12 +39,38 @@ Each conversation turn is projected into a single trace in real time:
 compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standalone trace]
 ```
 
-- **Turn-scoped trace hierarchy** — One user turn = one trace (`invoke_agent` root span → `chat` model steps → `execute_tool` calls). Child sessions spawned via `subagent` / `task` link their `invoke_agent` container span directly under the parent tool span.
-- **OTel GenAI semconv + OpenInference** — Populates standard `gen_ai.*` attributes (`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens` / `cache_read.input_tokens` / `cache_write.input_tokens` / `reasoning.output_tokens`, `gen_ai.tool.call.*`) alongside OpenInference mirrors (`openinference.span.kind`, `llm.token_count.*`, `llm.total_cost`, `input.value`, `output.value`). Zero platform lock-in.
-- **Compaction & retry instrumentation** — Context compaction runs (`session.compaction.*`) emit standalone traces with model, token, cost, and summary attributes. Retried steps (`session.retry.scheduled`) stamp `opencode.retry.attempt` and `opencode.retry.error` onto the subsequent `chat` span.
-- **Raw wire-body capture** — Intercepts the exact serialized JSON sent to the LLM provider (full system prompt, message history, tool schemas, sampling parameters) for on-disk JSONL inspection and/or attachment to the chat span's `input.value`.
-- **Deterministic trace & span IDs** — IDs are SHA-256 digests of stable session/message/call identifiers rather than random UUIDs, guaranteeing idempotent deduplication across realms and offline replay pipelines.
-- **Privacy gates & secret redaction** — Independent content gates mirroring Claude Code's `OTEL_LOG_*` semantics (`userPrompts`, `assistantResponses`, `toolDetails`, `toolContent`, `wireBody`), configurable character/byte truncation, and automatic credential redaction in plugin logs.
+| Span | `gen_ai.operation.name` | Contents |
+|---|---|---|
+| Turn root | `invoke_agent` | User prompt preview, final answer, session title/directory, token & message totals, cost |
+| `chat <model>` | `chat` | Provider/model, input/output/reasoning/cache token counts, cost, output messages, wire-body `input.value` |
+| `execute_tool <name>` | `execute_tool` | Tool name/call id, arguments, result, duration, sub-agent attachment |
+| `invoke_agent <agent>` | `invoke_agent` | Child-session container span, linked under the parent tool span |
+| `compaction` | — (standalone trace) | Model, tokens, cost, summary, reason |
+
+Retry events stamp `opencode.retry.attempt` / `opencode.retry.error` onto the following chat span.
+
+### Metrics
+
+| Metric | Type | Attributes |
+|---|---|---|
+| `gen_ai.client.token.usage` | Histogram (`{token}`) | `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` = `input` / `output` (input includes billable cache read/write) |
+| `gen_ai.client.operation.duration` | Histogram (`s`) | `gen_ai.operation.name` (`chat` / `execute_tool`), provider & model for chat, `gen_ai.tool.name` for tools, `error.type` on failure |
+
+### Wire capture (local disk)
+
+| Record | Contents |
+|---|---|
+| `<sessionID>.jsonl` (mode `0600`) | One JSON line per outbound LLM request: timestamp, sequence, hook (`ws.send` / `http.request`), session/agent/model, request kind (`primary` / `compaction` / `title` / `generate`), and the exact serialized request frame |
+
+## Feature highlights
+
+- **Deterministic trace & span IDs** — SHA-256 digests of stable session/message/call identifiers rather than random UUIDs: idempotent deduplication across plugin realms, and byte-identical IDs in the offline replay lane (crash repair, historical backfill).
+- **Raw wire-body capture** — the exact JSON sent to the provider (full system prompt, message history, tool schemas, sampling parameters) lands on disk and/or in the chat span's `input.value`. See [Wire body capture](#wire-body-capture).
+- **W3C trace-context propagation** — optionally injects `traceparent` into whitelisted providers' requests, so an OTel-instrumented gateway (LiteLLM, vLLM, …) parents its spans under ours: one end-to-end trace instead of two disconnected ones.
+- **Session annotations** — project/title pushed to the Phoenix-compatible `/v1/session_annotations` REST API in real time (toggleable; off-standard but harmless elsewhere when disabled).
+- **OTel GenAI semconv + OpenInference** — standard `gen_ai.*` attributes alongside OpenInference mirrors (`openinference.span.kind`, `llm.token_count.*`, `llm.total_cost`, `input.value`, `output.value`). Zero platform lock-in.
+- **Privacy gates & secret redaction** — independent content gates mirroring Claude Code's `OTEL_LOG_*` semantics, byte-accurate truncation with a three-state budget, and automatic credential redaction in plugin logs.
+- **Official OTel SDK at the wire boundary** — OTLP protobuf encoding is delegated to `@opentelemetry/exporter-trace-otlp-proto` / `-metrics-`; the pipeline above it (span state machine, deterministic IDs, retry/drain queue) is ours.
 
 ## Quick start
 
@@ -72,6 +102,43 @@ For example, with a local [Arize Phoenix](https://github.com/Arize-ai/phoenix) i
 ```
 
 **3. Restart OpenCode.** Traces stream to `/v1/traces` as steps and tools complete.
+
+## Backend recipes
+
+**Arize Phoenix** (traces + annotations; Phoenix does not ingest metrics — disable them or route them elsewhere):
+
+```jsonc
+{
+  "tracing": { "endpoint": "http://localhost:6006", "project": "ocg-obs" },
+  "metrics": { "enabled": false }
+}
+```
+
+**OTel Collector / Jaeger** (4318 is the default; nothing to configure unless customized):
+
+```jsonc
+{
+  "tracing": { "endpoint": "http://localhost:4318" }
+}
+```
+
+**SigNoz Cloud** (one endpoint, ingestion key header; metrics included):
+
+```jsonc
+{
+  "tracing": {
+    "endpoint": "https://ingest.us.signoz.cloud:443",
+    "headers": { "signoz-ingestion-key": "<SIGNOZ_INGESTION_KEY>" }
+  }
+}
+```
+
+**Split routing** — traces to Phoenix, metrics to a metrics backend:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:6006"
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
+```
 
 ## Configuration
 
@@ -119,6 +186,16 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
 }
 ```
 
+### Disabling signals
+
+| Signal | How |
+|---|---|
+| Everything | `"enabled": false` (plugin becomes a no-op) |
+| All network egress | `"tracing.enabled": false` + `"wire.enabled": true` → wire-only mode (disk JSONL only) |
+| Metrics only | `"metrics.enabled": false` |
+| Session annotations only | `"tracing.annotations.enabled": false` |
+| Trace-context propagation | default off; configure `tracing.propagation.providers` to enable |
+
 ### Environment variables
 
 Standard OpenTelemetry environment variables override the config file (**env > config file > defaults**), enabling zero-touch organization rollouts:
@@ -126,6 +203,7 @@ Standard OpenTelemetry environment variables override the config file (**env > c
 | Variable | Target |
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint` (trailing `/v1/traces` is stripped automatically) |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `metrics.endpoint` (trailing `/v1/metrics` is stripped automatically) |
 | `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`, W3C Baggage percent-decoded; traces-specific wins) |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (`k1=v1,k2=v2`, percent-decoded) |
 

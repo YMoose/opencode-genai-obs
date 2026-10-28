@@ -4,21 +4,25 @@
 
 <a href="README.md">English</a> | <b>简体中文</b>
 
-**面向 OpenCode v2 的 OpenTelemetry GenAI 追踪与 LLM 原始请求采集插件。**
+**面向 OpenCode v2 的审计级 GenAI 可观测插件——标准 OTLP traces 与 metrics，外加全量原始请求落盘。**
 
 `opencode-genai-obs` 挂载于 OpenCode v2 的会话事件流与传输层钩子，通过标准 OTLP/HTTP（protobuf）将 Agent 执行链路实时导出至任意兼容后端（Arize Phoenix、Jaeger、SigNoz、OTel Collector 等），并支持将发往模型侧的原始请求体（wire body）落盘为本地 JSONL。
 
+运营监控类插件回答的是*"今天烧了多少 token"*；本插件回答的是*"线上究竟发出了什么、这一轮为什么花了这些钱"*——磁盘上保留完整请求体，trace/span ID 确定性可复算，会话级审计标注齐全。
+
 ## 信号范围
 
-本插件的信号**严格限定在 GenAI 语义约定内**:
+本插件的信号**严格限定在 GenAI 语义约定内**：
 
 - **Traces** —— `gen_ai.*` 属性 + OpenInference 镜像，主信号
-- **Metrics** —— 仅 `gen_ai.client.*`(token 用量、操作耗时）；不做 infra/运行时指标，也不做应用运营指标（会话计数、commit 计数等——那是运营监控类插件的定位）
-- **Events/Logs** —— 如将来增加 logs 通道，仅发 `gen_ai.*` 的五种消息事件（system/user/assistant/tool/choice)
+- **Metrics** —— `gen_ai.client.token.usage` 与 `gen_ai.client.operation.duration`；不做 infra/运行时指标，也不做应用运营指标（会话计数、commit 计数等——那是运营监控类插件的定位）
+- **Events/Logs** —— 如将来增加 logs 通道，仅发 `gen_ai.*` 的五种消息事件（system/user/assistant/tool/choice）
 
 `opencode.*` 自定义 span 属性不受此限——范围约束的是"做哪些信号域"，不是 span 上的自有属性。
 
-## 追踪模型与核心能力
+## 观测内容
+
+### Traces
 
 每一轮对话（Turn）实时映射为一条结构化 Trace：
 
@@ -35,12 +39,38 @@
 compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standalone trace]
 ```
 
-- **Turn 级调用链拓扑** — 一轮用户交互对应一条 Trace（`invoke_agent` 轮根 Span → `chat` 模型步 → `execute_tool` 工具调用）。通过 `subagent` / `task` 派生的子会话，其 `invoke_agent` 容器 Span 直接作为子树挂载在触发它的工具 Span 下。
-- **OTel GenAI semconv + OpenInference 双语义约定** — 同时写入标准 `gen_ai.*` 属性（`gen_ai.operation.name`、`gen_ai.request.model`、`gen_ai.usage.input_tokens` / `output_tokens` / `cache_read.input_tokens` / `cache_write.input_tokens` / `reasoning.output_tokens`、`gen_ai.tool.call.*`）与 OpenInference 镜像属性（`openinference.span.kind`、`llm.token_count.*`、`llm.total_cost`、`input.value`、`output.value`），不绑定特定平台即可在 Phoenix 与通用 OTel 后端获得完整视图。
-- **Compaction 与 Retry 可观测** — 上下文压缩（`session.compaction.*`）独立成条 Trace，携带模型、Token、成本与摘要文本；发生重试的模型步（`session.retry.scheduled`）会在随后重试的 `chat` Span 上打标 `opencode.retry.attempt` 与 `opencode.retry.error`。
-- **LLM 原始请求体（Wire Body）采集** — 拦截发往模型厂商的序列化请求 JSON（完整 system prompt、裁剪后消息历史、tools schema、采样参数），落盘为按会话切分的 JSONL，并可按需注入 `chat` Span 的 `input.value`。
-- **确定性 Trace / Span ID** — ID 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID），保证多模块实例（realm）与离线补灌链路下的幂等去重。
-- **细粒度隐私门控与日志脱敏** — 对齐 Claude Code `OTEL_LOG_*` 语义的五路内容开关（`userPrompts`、`assistantResponses`、`toolDetails`、`toolContent`、`wireBody`），支持属性字符数与磁盘字节数截断，插件日志自动脱敏凭证。
+| Span | `gen_ai.operation.name` | 内容 |
+|---|---|---|
+| 轮根（用户提问预览） | `invoke_agent` | 用户输入预览、最终回答、会话标题/目录、token 与消息总数、成本 |
+| `chat <model>` | `chat` | 厂商/模型、输入/输出/推理/缓存 token、成本、输出消息、wire 帧 `input.value` |
+| `execute_tool <name>` | `execute_tool` | 工具名/调用 ID、参数、结果、耗时、子代理挂载 |
+| `invoke_agent <agent>` | `invoke_agent` | 子会话容器 span，直接挂在父级工具 span 下 |
+| `compaction` | —（独立 trace） | 模型、token、成本、摘要、触发原因 |
+
+发生重试时，随后的 chat span 会打标 `opencode.retry.attempt` / `opencode.retry.error`。
+
+### Metrics
+
+| 指标 | 类型 | 属性 |
+|---|---|---|
+| `gen_ai.client.token.usage` | Histogram（`{token}`） | `gen_ai.provider.name`、`gen_ai.request.model`、`gen_ai.token.type` = `input` / `output`（input 含可计费缓存读写） |
+| `gen_ai.client.operation.duration` | Histogram（`s`） | `gen_ai.operation.name`（`chat` / `execute_tool`）、chat 带厂商与模型、工具带 `gen_ai.tool.name`、失败带 `error.type` |
+
+### Wire 采集（本地磁盘）
+
+| 记录 | 内容 |
+|---|---|
+| `<sessionID>.jsonl`（权限 `0600`） | 每次外发 LLM 请求一行 JSON：时间戳、序号、钩子（`ws.send` / `http.request`）、会话/代理/模型、请求类别（`primary` / `compaction` / `title` / `generate`）、原始请求帧 |
+
+## 特性一览
+
+- **确定性 Trace / Span ID** —— 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID）：多模块实例（realm）间幂等去重，离线补灌链路产出字节一致的 ID（崩溃修复、历史回填）。
+- **LLM 原始请求体采集** —— 发往厂商的序列化 JSON（完整 system prompt、消息历史、tools schema、采样参数）落盘为按会话切分的 JSONL，并可按需注入 chat span 的 `input.value`。详见 [Wire 原始请求采集](#wire-原始请求采集)。
+- **W3C trace-context 传播** —— 可选地向白名单厂商的请求注入 `traceparent`,OTel 插桩网关（LiteLLM、vLLM 等）可将自身 span 挂到我们的 trace 下：端到端一棵树，而非两条孤链。
+- **会话标注** —— 实时向 Phoenix 兼容的 `/v1/session_annotations` REST API 推送项目名/标题（可开关；非 Phoenix 后端关闭即可，无副作用）。
+- **OTel GenAI semconv + OpenInference 双语义约定** —— 标准 `gen_ai.*` 属性与 OpenInference 镜像（`openinference.span.kind`、`llm.token_count.*`、`llm.total_cost`、`input.value`、`output.value`）同时写入，零平台绑定。
+- **细粒度隐私门控与日志脱敏** —— 对齐 Claude Code `OTEL_LOG_*` 语义的内容开关、字节级三态截断、插件日志自动脱敏凭证。
+- **线格式交给官方 OTel SDK** —— OTLP protobuf 编码委托给 `@opentelemetry/exporter-trace-otlp-proto` / `-metrics-`；其上的管线（span 状态机、确定性 ID、重试/排空队列）为自研。
 
 ## 快速开始
 
@@ -72,6 +102,43 @@ cd opencode-genai-obs && npm install && npm run build
 ```
 
 **3. 重启 OpenCode。** 模型步与工具执行完毕后，Span 会实时推送至 `/v1/traces`。
+
+## 后端配置示例
+
+**Arize Phoenix**(traces + 会话标注；Phoenix 不收 metrics——关闭或分流）:
+
+```jsonc
+{
+  "tracing": { "endpoint": "http://localhost:6006", "project": "ocg-obs" },
+  "metrics": { "enabled": false }
+}
+```
+
+**OTel Collector / Jaeger**(4318 即默认值，无需额外配置）:
+
+```jsonc
+{
+  "tracing": { "endpoint": "http://localhost:4318" }
+}
+```
+
+**SigNoz Cloud**（单端点 + ingestion key 请求头，含 metrics）:
+
+```jsonc
+{
+  "tracing": {
+    "endpoint": "https://ingest.us.signoz.cloud:443",
+    "headers": { "signoz-ingestion-key": "<SIGNOZ_INGESTION_KEY>" }
+  }
+}
+```
+
+**信号分流** —— traces 进 Phoenix,metrics 走指标后端：
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:6006"
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
+```
 
 ## 配置
 
@@ -119,6 +186,16 @@ cd opencode-genai-obs && npm install && npm run build
 }
 ```
 
+### 信号开关
+
+| 信号 | 关闭方式 |
+|---|---|
+| 全部 | `"enabled": false`(setup 空操作） |
+| 一切网络外发 | `"tracing.enabled": false` + `"wire.enabled": true` → wire-only 模式（仅磁盘 JSONL) |
+| 仅 metrics | `"metrics.enabled": false` |
+| 仅会话标注 | `"tracing.annotations.enabled": false` |
+| trace-context 传播 | 默认关闭；配置 `tracing.propagation.providers` 启用 |
+
 ### 环境变量
 
 标准 OpenTelemetry 环境变量优先于配置文件（**env > 配置文件 > 默认值**），便于团队或组织级统一注入：
@@ -126,6 +203,7 @@ cd opencode-genai-obs && npm install && npm run build
 | 环境变量 | 映射字段 |
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`（末尾的 `/v1/traces` 自动剥除） |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `metrics.endpoint`（末尾的 `/v1/metrics` 自动剥除） |
 | `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`，按 W3C Baggage 规范做 percent-decode；traces 专用优先） |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（`k1=v1,k2=v2`，支持 percent-decode） |
 
