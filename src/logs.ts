@@ -60,10 +60,12 @@ export interface LogsOptions {
   readonly endpoint: string
   /** Extra request headers (auth etc.) */
   readonly headers?: Record<string, string>
-  /** Custom attributes merged into the OTLP resource block (builtin keys win) */
+  /** Custom attributes merged into the OTLP resource block (service.name overridable) */
   readonly resourceAttributes?: Record<string, string>
   /** Max content bytes per event body field (same budget as tracing.contentMaxLength) */
   readonly contentMaxLength: number
+  /** BatchLogRecordProcessor scheduledDelayMillis (default 2000, from logs.intervalMs) */
+  readonly intervalMs?: number
 }
 
 export interface Logs {
@@ -107,10 +109,8 @@ function extractSystemText(frame: string): string | undefined {
 
 export function createLogs(options: LogsOptions): Logs {
   const resource = resourceFromAttributes({
-    ...Object.fromEntries(
-      Object.entries(options.resourceAttributes ?? {}).filter(([key]) => key !== "service.name"),
-    ),
-    "service.name": "opencode-genai-obs",
+    ...options.resourceAttributes,
+    "service.name": options.resourceAttributes?.["service.name"] ?? "opencode-genai-obs",
   })
   const provider = new LoggerProvider({
     resource,
@@ -120,7 +120,7 @@ export function createLogs(options: LogsOptions): Logs {
           url: `${options.endpoint.replace(/\/+$/, "")}/v1/logs`,
           headers: options.headers,
         }),
-        { scheduledDelayMillis: 2_000, maxExportBatchSize: 64 },
+        { scheduledDelayMillis: options.intervalMs ?? 2_000, maxExportBatchSize: 64 },
       ),
     ],
   })

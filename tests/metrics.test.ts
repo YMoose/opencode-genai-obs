@@ -50,3 +50,27 @@ test("a failing metrics backend never crashes observe() or shutdown()", async (t
   await waitFor(() => server.requests.length >= 1, 5_000)
   await metrics.shutdown() // must resolve despite the 500s
 })
+
+test("OTEL_SERVICE_NAME override: resourceAttributes service.name reaches the exported resource", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const metrics = createMetrics({
+    endpoint: server.url,
+    intervalMs: 100,
+    resourceAttributes: { "service.name": "org-opencode", "team.id": "core" },
+  })
+  metrics.observe({ metric: "token", tokenType: "input", value: 1, provider: "p", model: "m" })
+
+  await waitFor(() => server.requests.some((r) => r.path === "/v1/metrics"), 5_000)
+  const body = server.requests.find((r) => r.path === "/v1/metrics")!.body
+  assert.ok(body.includes("org-opencode"), "the overridden service.name must reach the resource")
+  // Note: the instrumentation scope name remains "opencode-genai-obs" — only the resource
+  // service.name is overridable; the default service.name value must not appear as a resource attr.
+  assert.ok(body.includes("core"), "other resource attributes still export")
+
+  await metrics.shutdown()
+})

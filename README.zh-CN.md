@@ -198,6 +198,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
     "enabled": false,                     // 可选开启：gen_ai.* 消息事件（system/user/tool/choice），OTLP/HTTP protobuf。
                                           // 内容与 span 属性有重叠——后端对日志事件的索引优于 span 时再开启。
                                           // 被门控的内容仍会上报事件，但仅含元数据
+    "intervalMs": 2_000,                  // 批量导出延迟（BatchLogRecordProcessor scheduledDelayMillis）
     "endpoint": null                      // logs 端点覆盖（默认：OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
                                           // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint）
   }
@@ -224,8 +225,10 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`（末尾的 `/v1/traces` 自动剥除） |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `metrics.endpoint`（末尾的 `/v1/metrics` 自动剥除） |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `logs.endpoint`（末尾的 `/v1/logs` 自动剥除） |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`，按 W3C Baggage 规范做 percent-decode；traces 专用优先） |
+| `OTEL_EXPORTER_OTLP_HEADERS` + 各信号 `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS` | 各信号独立 headers（`k1=v1,k2=v2`，支持 percent-decode；每信号按 通用 < 信号专用 合并，无跨信号串扰） |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（`k1=v1,k2=v2`，支持 percent-decode） |
+| `OTEL_SERVICE_NAME` | 全部信号的 resource `service.name`（优先于 `OTEL_RESOURCE_ATTRIBUTES`；默认 `opencode-genai-obs`） |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`、`OTEL_EXPORTER_OTLP_COMPRESSION`、`OTEL_EXPORTER_OTLP_TIMEOUT` | 由我们委托的官方 OTel SDK exporter 原生处理 |
 
 ## Wire 原始请求采集
 

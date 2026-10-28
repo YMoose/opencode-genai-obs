@@ -225,3 +225,63 @@ test("logs: off by default; endpoint resolves logs env > generic env > file > tr
   const { config: wireOnly } = loadFrom(`{ "tracing": { "enabled": false }, "logs": { "enabled": true } }`)
   assert.strictEqual(wireOnly.logs.enabled, false, "wire-only mode forces logs off")
 })
+
+test("OTEL_SERVICE_NAME: env sets the resource service.name, beating OTEL_RESOURCE_ATTRIBUTES and file", () => {
+  const { config: def } = loadFrom(null)
+  assert.strictEqual(def.tracing.resourceAttributes["service.name"], undefined, "no default service.name in config (modules apply the fallback)")
+
+  const { config: fromEnv } = loadFrom(null, { OTEL_SERVICE_NAME: "org-opencode" })
+  assert.strictEqual(fromEnv.tracing.resourceAttributes["service.name"], "org-opencode")
+
+  const { config: precedence } = loadFrom(null, {
+    OTEL_SERVICE_NAME: "org-opencode",
+    OTEL_RESOURCE_ATTRIBUTES: "service.name=ra-name,team.id=core",
+  })
+  assert.strictEqual(precedence.tracing.resourceAttributes["service.name"], "org-opencode", "OTEL_SERVICE_NAME wins over OTEL_RESOURCE_ATTRIBUTES")
+  assert.strictEqual(precedence.tracing.resourceAttributes["team.id"], "core", "other resource attributes still merge")
+
+  const { config: fileBase } = loadFrom(`{ "tracing": { "resourceAttributes": { "service.name": "file-name" } } }`, {
+    OTEL_SERVICE_NAME: "org-opencode",
+  })
+  assert.strictEqual(fileBase.tracing.resourceAttributes["service.name"], "org-opencode", "env wins over file")
+})
+
+test("per-signal headers: metrics/logs get file < generic env < signal env; traces headers must not leak across signals", () => {
+  const { config } = loadFrom(`{ "tracing": { "headers": { "shared": "file", "fileonly": "f" } } }`, {
+    OTEL_EXPORTER_OTLP_HEADERS: "shared=generic,genonly=g",
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS: "shared=traces,traceonly=t",
+    OTEL_EXPORTER_OTLP_METRICS_HEADERS: "shared=metrics,metonly=m",
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS: "shared=logs,logonly=l",
+  })
+  assert.deepStrictEqual(config.tracing.headers, {
+    shared: "traces",
+    fileonly: "f",
+    genonly: "g",
+    traceonly: "t",
+  })
+  assert.deepStrictEqual(config.metrics.headers, {
+    shared: "metrics",
+    fileonly: "f",
+    genonly: "g",
+    metonly: "m",
+  }, "metrics headers merge file<generic<metrics-env, no traces leak")
+  assert.deepStrictEqual(config.logs.headers, {
+    shared: "logs",
+    fileonly: "f",
+    genonly: "g",
+    logonly: "l",
+  }, "logs headers merge file<generic<logs-env, no traces leak")
+})
+
+test("logs.intervalMs: default 2000, file-configurable, non-numbers warn and fall back", () => {
+  const { config: def, warnings: defW } = loadFrom(null)
+  assert.strictEqual(def.logs.intervalMs, 2000, "default matches the BatchLogRecordProcessor delay we ship")
+  assert.deepStrictEqual(defW, [])
+
+  const { config: custom } = loadFrom(`{ "logs": { "intervalMs": 5000 } }`)
+  assert.strictEqual(custom.logs.intervalMs, 5000)
+
+  const { config: bad, warnings } = loadFrom(`{ "logs": { "intervalMs": "fast" } }`)
+  assert.strictEqual(bad.logs.intervalMs, 2000)
+  assert.ok(warnings.some((w) => w.kind === "bad-type" && w.message.includes("logs.intervalMs")))
+})

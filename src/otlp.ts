@@ -98,15 +98,14 @@ export interface TraceExporter {
 }
 
 export function createTraceExporter(options: ExporterOptions): TraceExporter {
-  // Builtin keys win over user-supplied resourceAttributes (Claude Code semantics);
-  // the project semantic rides the resource only — no backend-specific headers
+  // Builtin keys win over user-supplied resourceAttributes (Claude Code semantics),
+  // except service.name: OTEL_SERVICE_NAME / config resourceAttributes may override it,
+  // falling back to our builtin identity.
   const resource = resourceFromAttributes({
     ...Object.fromEntries(
-      Object.entries(options.resourceAttributes ?? {}).filter(
-        ([key]) => key !== "service.name" && key !== "openinference.project.name",
-      ),
+      Object.entries(options.resourceAttributes ?? {}).filter(([key]) => key !== "openinference.project.name"),
     ),
-    "service.name": "opencode-genai-obs",
+    "service.name": options.resourceAttributes?.["service.name"] ?? "opencode-genai-obs",
     ...(options.project ? { "openinference.project.name": options.project } : {}),
   })
 

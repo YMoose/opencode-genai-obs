@@ -22,7 +22,7 @@ const span: SpanRecord = {
   status: { code: 1 },
 }
 
-test("resource: builtin keys win, project + custom attributes land in the body", async (t) => {
+test("resource: project is pinned, service.name is user-overridable (OTEL_SERVICE_NAME chain)", async (t) => {
   const server: TestServer = await startServer((_req, res) => {
     res.statusCode = 200
     res.end()
@@ -31,15 +31,14 @@ test("resource: builtin keys win, project + custom attributes land in the body",
   const exporter = createTraceExporter({
     endpoint: server.url,
     project: "proj-x",
-    resourceAttributes: { "service.name": "evil-override", "openinference.project.name": "evil-project", team: "core" },
+    resourceAttributes: { "service.name": "org-opencode", "openinference.project.name": "evil-project", team: "core" },
   })
   await exporter.exportBatch([span])
   await exporter.close()
   assert.strictEqual(server.requests.length, 1)
   const body = server.requests[0]!.body
-  assert.ok(body.includes("opencode-genai-obs"), "the builtin service.name must be present")
-  assert.ok(!body.includes("evil-override"), "resourceAttributes must not override the builtin service.name")
-  assert.ok(!body.includes("evil-project"), "resourceAttributes must not override the builtin project")
+  assert.ok(body.includes("org-opencode"), "service.name override must reach the resource")
+  assert.ok(!body.includes("evil-project"), "resourceAttributes must not override the pinned project")
   assert.ok(body.includes("proj-x"), "the project name must be present")
   assert.ok(body.includes("team"), "custom attribute keys must be present")
 })

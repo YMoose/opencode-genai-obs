@@ -53,10 +53,8 @@ export interface Metrics {
 
 export function createMetrics(options: MetricsOptions): Metrics {
   const resource = resourceFromAttributes({
-    ...Object.fromEntries(
-      Object.entries(options.resourceAttributes ?? {}).filter(([key]) => key !== "service.name"),
-    ),
-    "service.name": "opencode-genai-obs",
+    ...options.resourceAttributes,
+    "service.name": options.resourceAttributes?.["service.name"] ?? "opencode-genai-obs",
   })
 
   const exporter = new OTLPMetricExporter({

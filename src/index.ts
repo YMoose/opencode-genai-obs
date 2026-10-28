@@ -141,7 +141,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   const metrics = config.metrics.enabled
     ? createMetrics({
         endpoint: config.metrics.endpoint ?? config.tracing.endpoint,
-        headers: config.tracing.headers,
+        headers: config.metrics.headers,
         resourceAttributes: config.tracing.resourceAttributes,
         intervalMs: config.metrics.intervalMs,
       })
@@ -150,9 +150,10 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   const logs = config.logs.enabled
     ? createLogs({
         endpoint: config.logs.endpoint ?? config.tracing.endpoint,
-        headers: config.tracing.headers,
+        headers: config.logs.headers,
         resourceAttributes: config.tracing.resourceAttributes,
         contentMaxLength: config.tracing.contentMaxLength,
+        intervalMs: config.logs.intervalMs,
       })
     : undefined
 

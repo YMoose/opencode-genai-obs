@@ -198,6 +198,7 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
     "enabled": false,                     // opt-in gen_ai.* message events (system/user/tool/choice), OTLP/HTTP protobuf.
                                           // Content overlaps span attributes — enable when the backend indexes
                                           // log events better than spans. Gated content still emits, metadata-only.
+    "intervalMs": 2_000,                  // batch export delay (BatchLogRecordProcessor scheduledDelayMillis)
     "endpoint": null                      // logs endpoint override (default: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
                                           // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint)
   }
@@ -224,8 +225,10 @@ Standard OpenTelemetry environment variables override the config file (**env > c
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint` (trailing `/v1/traces` is stripped automatically) |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `metrics.endpoint` (trailing `/v1/metrics` is stripped automatically) |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `logs.endpoint` (trailing `/v1/logs` is stripped automatically) |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`, W3C Baggage percent-decoded; traces-specific wins) |
+| `OTEL_EXPORTER_OTLP_HEADERS` + per-signal `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS` | per-signal headers (`k1=v1,k2=v2`, percent-decoded; each signal merges generic < signal-specific, no cross-signal leakage) |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (`k1=v1,k2=v2`, percent-decoded) |
+| `OTEL_SERVICE_NAME` | resource `service.name` on all signals (wins over `OTEL_RESOURCE_ATTRIBUTES`; default `opencode-genai-obs`) |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`, `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_TIMEOUT` | handled natively by the official OTel SDK exporters we delegate to |
 
 ## Wire body capture
 

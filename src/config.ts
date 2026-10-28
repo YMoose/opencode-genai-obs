@@ -129,6 +129,8 @@ export interface MetricsConfig {
   readonly intervalMs: number
   /** Metrics endpoint override; defaults to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint */
   readonly endpoint?: string
+  /** Resolved headers: tracing.headers < OTEL_EXPORTER_OTLP_HEADERS < OTEL_EXPORTER_OTLP_METRICS_HEADERS */
+  readonly headers?: Record<string, string>
 }
 
 export interface LogsConfig {
@@ -139,8 +141,12 @@ export interface LogsConfig {
    * (a gated event still fires, metadata-only).
    */
   readonly enabled: boolean
+  /** Export interval in ms, default 2000 (BatchLogRecordProcessor scheduledDelayMillis) */
+  readonly intervalMs: number
   /** Logs endpoint override; defaults to OTEL_EXPORTER_OTLP_LOGS_ENDPOINT > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint */
   readonly endpoint?: string
+  /** Resolved headers: tracing.headers < OTEL_EXPORTER_OTLP_HEADERS < OTEL_EXPORTER_OTLP_LOGS_HEADERS */
+  readonly headers?: Record<string, string>
 }
 
 export interface ConfigWarning {
@@ -151,7 +157,7 @@ export interface ConfigWarning {
 const ROOT_KEYS = new Set(["enabled", "wire", "tracing", "metrics", "logs"])
 const WIRE_KEYS = new Set(["enabled", "directory", "maxFrameBytes"])
 const METRICS_KEYS = new Set(["enabled", "intervalMs", "endpoint"])
-const LOGS_KEYS = new Set(["enabled", "endpoint"])
+const LOGS_KEYS = new Set(["enabled", "endpoint", "intervalMs"])
 const TRACING_KEYS = new Set([
   "enabled",
   "endpoint",
@@ -334,6 +340,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
     logs: {
       enabled: false,
       endpoint: undefined,
+      intervalMs: 2_000,
     },
   }
 
@@ -401,6 +408,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
           },
           logs: {
             enabled: boolField(logsRaw.enabled, "logs.enabled", defaults.logs.enabled, warnings),
+            intervalMs: intField(logsRaw.intervalMs, "logs.intervalMs", defaults.logs.intervalMs, warnings, 500),
             endpoint: logsRaw.endpoint === undefined ? undefined : stringField(logsRaw.endpoint, "logs.endpoint", "", warnings),
           },
         }
@@ -413,21 +421,27 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
 
   // --- Env layer (overrides the file layer; aligned with OTEL_EXPORTER_OTLP_* conventions) ---
   const envEndpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-  // Header merge: file < generic env < traces-specific env (Claude Code's env-over-file convention)
-  const envHeaders = {
-    ...parseKvList(process.env.OTEL_EXPORTER_OTLP_HEADERS, "OTEL_EXPORTER_OTLP_HEADERS", warnings),
-    ...parseKvList(process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", warnings),
-  }
-  // Resource attributes: file < env (same convention)
+  // Headers merge per signal: file < generic env < signal-specific env (Claude Code's
+  // "merged with the general headers" convention). Traces-specific headers must not
+  // leak into metrics/logs exports — each signal gets its own merged set.
+  const genericEnvHeaders = parseKvList(process.env.OTEL_EXPORTER_OTLP_HEADERS, "OTEL_EXPORTER_OTLP_HEADERS", warnings)
+  const tracesEnvHeaders = parseKvList(process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", warnings)
+  const metricsEnvHeaders = parseKvList(process.env.OTEL_EXPORTER_OTLP_METRICS_HEADERS, "OTEL_EXPORTER_OTLP_METRICS_HEADERS", warnings)
+  const logsEnvHeaders = parseKvList(process.env.OTEL_EXPORTER_OTLP_LOGS_HEADERS, "OTEL_EXPORTER_OTLP_LOGS_HEADERS", warnings)
+  // Resource attributes: file < OTEL_RESOURCE_ATTRIBUTES; OTEL_SERVICE_NAME then wins the
+  // service.name key outright (the standard env override chain for the service identity).
   const envResource = parseKvList(process.env.OTEL_RESOURCE_ATTRIBUTES, "OTEL_RESOURCE_ATTRIBUTES", warnings)
+  const resourceAttributes = { ...fileConfig.tracing.resourceAttributes, ...envResource }
+  const envServiceName = process.env.OTEL_SERVICE_NAME
+  if (envServiceName) resourceAttributes["service.name"] = envServiceName
 
   const config: Config = {
     ...fileConfig,
     tracing: {
       ...fileConfig.tracing,
       endpoint: normalizeEndpoint(envEndpoint ?? fileConfig.tracing.endpoint),
-      headers: { ...fileConfig.tracing.headers, ...envHeaders },
-      resourceAttributes: { ...fileConfig.tracing.resourceAttributes, ...envResource },
+      headers: { ...fileConfig.tracing.headers, ...genericEnvHeaders, ...tracesEnvHeaders },
+      resourceAttributes,
     },
     metrics: {
       ...fileConfig.metrics,
@@ -438,6 +452,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
           (fileConfig.metrics.endpoint || undefined) ??
           fileConfig.tracing.endpoint,
       ),
+      headers: { ...fileConfig.tracing.headers, ...genericEnvHeaders, ...metricsEnvHeaders },
       // Wire-only mode must not leak: metrics are a network signal too
       enabled: fileConfig.metrics.enabled && fileConfig.tracing.enabled,
     },
@@ -449,6 +464,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
           (fileConfig.logs.endpoint || undefined) ??
           fileConfig.tracing.endpoint,
       ),
+      headers: { ...fileConfig.tracing.headers, ...genericEnvHeaders, ...logsEnvHeaders },
       enabled: fileConfig.logs.enabled && fileConfig.tracing.enabled,
     },
   }
