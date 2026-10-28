@@ -73,7 +73,7 @@ test("exportBatch: non-200 rejects (the sender owns retries)", async (t) => {
   await exporter.close()
 })
 
-test("Bug 2: a hung peer resolves by timeout instead of pending forever", async (t) => {
+test("Bug 2 (exporter path): a hung peer resolves by timeout instead of pending forever", async (t) => {
   // accepts the request but never responds (simulates a half-open / SIGSTOPped backend)
   const server = await startServer(() => {})
   t.after(() => server.close())
