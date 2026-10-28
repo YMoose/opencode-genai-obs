@@ -31,6 +31,8 @@ jsonc-parser); zero new test dependencies (`node:test` + `node:assert`).
 - `src/logs.ts` — opt-in gen_ai.* message events (user/system/tool/choice) via sdk-logs;
   assistant.message folds into choice; span context joins log ↔ trace
 - `src/sender.ts` — send queue with retry/backoff and drain-on-dispose
+- `src/probe.ts` — one-shot startup TCP probe of the configured OTLP endpoints
+  (log-only diagnostics; never called in wire-only mode)
 - `src/wire.ts` — wire-body JSONL capture (`experimental.ws.send` + `http.request` hooks)
 - `src/annotations.ts` — Phoenix-compatible session annotations (toggleable extension)
 - `src/redact.ts`, `src/logger.ts`, `src/types.ts` — redaction, file logger, shared types

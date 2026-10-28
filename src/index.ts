@@ -29,6 +29,7 @@ import { createSpanBuilder } from "./spans.js"
 import { createAnnotator } from "./annotations.js"
 import { createMetrics } from "./metrics.js"
 import { createLogs } from "./logs.js"
+import { collectProbeTargets, probeEndpoint } from "./probe.js"
 
 const PIPELINE_KEY = "__ocgObsPipeline$"
 const GENERATION_KEY = "__ocgObsPipelineGen$"
@@ -272,8 +273,27 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     content: config.tracing.content,
     annotations: config.tracing.annotations.enabled,
     metrics: config.metrics.enabled ? { endpoint: config.metrics.endpoint ?? config.tracing.endpoint, intervalMs: config.metrics.intervalMs } : false,
-    logs: config.logs.enabled ? { endpoint: config.logs.endpoint ?? config.tracing.endpoint } : false,
+    logs: config.logs.enabled ? { endpoint: config.logs.endpoint ?? config.tracing.endpoint, intervalMs: config.logs.intervalMs } : false,
   })
+
+  // One-shot startup probe (fire-and-forget, log-only): know at boot whether the
+  // configured backends are reachable, instead of discovering it through the first
+  // span's retry/backoff cycle. Wire-only mode never reaches this line (the whole
+  // pipeline is skipped), so the zero-network-egress promise holds.
+  if (config.tracing.enabled) {
+    const targets = collectProbeTargets([
+      { label: "traces", endpoint: config.tracing.endpoint },
+      ...(config.metrics.enabled ? [{ label: "metrics", endpoint: config.metrics.endpoint ?? config.tracing.endpoint }] : []),
+      ...(config.logs.enabled ? [{ label: "logs", endpoint: config.logs.endpoint ?? config.tracing.endpoint }] : []),
+    ])
+    void Promise.all(
+      targets.map(async (target) => {
+        const outcome = await probeEndpoint(target.endpoint)
+        if (outcome.ok) log("otlp endpoint reachable", { signals: target.label, endpoint: target.endpoint, ms: outcome.ms })
+        else log("otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up", { signals: target.label, endpoint: target.endpoint, error: outcome.error })
+      }),
+    ).catch((error) => log("probe error", { error: String(error) }))
+  }
 
   // Sessions created before this process loaded (e.g. opencode restarted mid-session) never
   // emit session.created here; the upsert semantics make rewriting them harmless

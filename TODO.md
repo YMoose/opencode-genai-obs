@@ -29,6 +29,16 @@ built, it must re-derive the current semantics, not the ones at first writing:
 - The id formulas themselves (`opencode-turn/chat/tool` prefixes, byte lengths) are
   frozen by `tests/ids.test.ts`; the replay lane reads them from `src/ids.ts` verbatim.
 
+## Prompt source recon: `prompt` hook vs `session.inbox.enqueued`
+
+We capture prompts via the `prompt` session hook; DEVtheOPS uses the
+`session.inbox.enqueued` event instead. Not a migration candidate today — the hook's
+`messageID` feeds the FROZEN `turnTraceId` formula, and the event's `inboxID` is not
+verified to be the same value (a silent id-scheme change would break offline-replay
+dedup). Recon needed before any reconsideration: (a) does `inboxID` equal the chat
+message id byte-for-byte, (b) does the `prompt` hook fire for non-TUI-driven sessions
+(server API / `opencode run`), or does the event catch prompts the hook misses.
+
 ## Event coverage: skills / permissions / usage / non-session namespaces
 
 The SSE pump currently filters to `session.*` events only, but `ctx.event.subscribe()`
