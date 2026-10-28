@@ -129,7 +129,7 @@ Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record p
 - [ ] ~~**Phase 3**: startup replay (full projection from storage, as a crash/missed-event
       backstop)~~ **Dropped** (decided 2026-10-27): the plugin handles real-time only.
       Crash repair / historical backfill / re-ingestion belongs to the official offline lane
-      in `obsystem/otel-span-exportor` (its id algorithm is byte-identical to `src/spans.ts`
+      in `obsystem/otel-span-exportor` (its id algorithm is byte-identical to `src/ids.ts`
       → idempotent dedup via Phoenix-style `DO_NOTHING` upserts).
       Rationale: none of the four scenarios is a real-time need, and automatic replay is a
       dangerous default side effect. See the design doc §3.

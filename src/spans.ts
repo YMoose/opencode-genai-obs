@@ -22,18 +22,23 @@
  *   metadata.sessionID; every child span inherits the parent turn's traceId and chains
  *   its parentSpanId to the container span
  *
- * Deterministic ids (byte-identical to adapter.py; the offline replay lane relies on
- * them for idempotent dedup):
- *   traceId      = sha256("opencode-turn:{sid}:{userMessageID}")      first 16 bytes
- *   turnSpanId   = sha256("opencode-turn-span:{sid}:{userMessageID}") first 8 bytes
- *   chatSpanId   = sha256("opencode-chat:{assistantMessageID}")       first 8 bytes
- *   toolSpanId   = sha256("opencode-tool:{assistantMessageID}:{toolCallID}") first 8 bytes
- *   sessionSpanId= sha256("opencode-session:{childSessionID}")        first 8 bytes
- *   compactionTrace = sha256("opencode-compaction:{sid}:{startedMs}")     first 16 bytes
- *   compactionSpanId= sha256("opencode-compaction-span:{sid}:{startedMs}") first 8 bytes
+ * Deterministic ids live in ids.ts — a FROZEN contract, byte-identical to the offline
+ * replay lane (adapter.py), which relies on them for idempotent dedup. Derivation inputs:
+ * turn ids from sessionID × userMessageID; chat/tool ids from assistantMessageID ×
+ * toolCallID; session ids from the child sessionID; compaction ids from sessionID ×
+ * start timestamp. Exact outputs are pinned by tests/ids.test.ts.
  */
 
-import { createHash } from "node:crypto"
+import {
+  turnTraceId,
+  turnSpanId,
+  chatSpanId,
+  toolSpanId,
+  sessionSpanId,
+  orphanTraceId,
+  compactionTraceId,
+  compactionSpanId,
+} from "./ids.js"
 import type { SpanRecord, AttrValue } from "./otlp.js"
 
 const KIND_INTERNAL = 1
@@ -42,10 +47,6 @@ const KIND_CLIENT = 3
 // Session registry cap: sessions are unbounded in long-lived processes; evict the
 // oldest past the cap (Map iteration order = insertion order)
 const MAX_SESSIONS = 2048
-
-function hash(input: string, bytes: number): string {
-  return createHash("sha256").update(input).digest("hex").slice(0, bytes * 2)
-}
 
 function nano(ms: number): bigint {
   return BigInt(Math.floor(ms)) * 1_000_000n
@@ -229,7 +230,7 @@ export function createSpanBuilder(
 
   /** Sub-agent trace inheritance: use the link when known; otherwise the parent's open turn (last resort: open an independent trace) */
   const childTrace = (sid: string): { traceId: string; containerId: string } => {
-    const containerId = hash(`opencode-session:${sid}`, 8)
+    const containerId = sessionSpanId(sid)
     const link = links.get(sid)
     if (link) return { traceId: link.traceId, containerId }
     const info = sessions.get(sid)
@@ -237,7 +238,7 @@ export function createSpanBuilder(
     if (parentTurn) return { traceId: parentTurn.traceId, containerId }
     // Fallback: parent turn already closed and no link registered (abnormal ordering) —
     // open our own trace with the container as root
-    return { traceId: hash(`opencode-turn:${sid}:orphan`, 16), containerId }
+    return { traceId: orphanTraceId(sid), containerId }
   }
 
   const ensureContainer = (sid: string, nowNano: bigint) => {
@@ -298,8 +299,8 @@ export function createSpanBuilder(
     turnCounters.set(sid, index + 1)
     openTurns.set(sid, {
       key: messageID,
-      traceId: hash(`opencode-turn:${sid}:${messageID}`, 16),
-      spanId: hash(`opencode-turn-span:${sid}:${messageID}`, 8),
+      traceId: turnTraceId(sid, messageID),
+      spanId: turnSpanId(sid, messageID),
       startedNano: nano(nowMs),
       inputText: text,
       index,
@@ -558,7 +559,7 @@ export function createSpanBuilder(
 
     emit({
       traceId,
-      spanId: hash(`opencode-chat:${assistantMessageID}`, 8),
+      spanId: chatSpanId(assistantMessageID),
       parentSpanId: parentId,
       name: `chat ${model.id}`,
       kind: KIND_CLIENT,
@@ -619,7 +620,7 @@ export function createSpanBuilder(
     // skip entirely (including sub-agent attachment registration)
     if (!assistantMessageID) return
     // The tool span's parent is the chat span that issued it (deterministic id, so emit order does not matter)
-    const parentId = hash(`opencode-chat:${assistantMessageID}`, 8)
+    const parentId = chatSpanId(assistantMessageID)
     const name = tool?.name ?? "unknown"
     const input = tool?.input ?? {}
     const isSubagent = name === "subagent" || name === "task"
@@ -629,7 +630,7 @@ export function createSpanBuilder(
       : undefined
     const error = data.error as { type?: string; message?: string } | undefined
 
-    const spanId = hash(`opencode-tool:${assistantMessageID}:${callId}`, 8)
+    const spanId = toolSpanId(assistantMessageID, callId)
 
     // Sub-agent attachment: metadata.sessionID → register the attachment point
     if (isSubagent) {
@@ -696,8 +697,8 @@ export function createSpanBuilder(
       options.gates.assistantResponses && typeof data.text === "string" ? truncate(data.text, options.contentMaxLength) : undefined
 
     emit({
-      traceId: hash(`opencode-compaction:${sid}:${state.key}`, 16),
-      spanId: hash(`opencode-compaction-span:${sid}:${state.key}`, 8),
+      traceId: compactionTraceId(sid, state.key),
+      spanId: compactionSpanId(sid, state.key),
       name: "compaction",
       kind: KIND_CLIENT,
       startTimeUnixNano: state.startedNano,
@@ -743,7 +744,7 @@ export function createSpanBuilder(
 
     emit({
       traceId,
-      spanId: hash(`opencode-session:${sid}`, 8),
+      spanId: sessionSpanId(sid),
       parentSpanId: link?.toolSpanId,
       name: `invoke_agent ${info?.agent ?? "opencode"}`,
       kind: KIND_CLIENT,
