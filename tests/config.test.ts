@@ -42,7 +42,7 @@ test("无配置文件：全默认且无告警", () => {
   assert.strictEqual(config.wire.enabled, false)
   assert.strictEqual(config.tracing.enabled, true)
   assert.strictEqual(config.tracing.endpoint, "http://localhost:4318", "默认走 OTLP 标准端口")
-  assert.strictEqual(config.tracing.contentMaxLength, -1, "默认不截断（-1=全量）")
+  assert.strictEqual(config.tracing.contentMaxLength, 61440, "默认 60 KB（对齐 CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH，低于后端 64 KB 单 attr 上限）")
   assert.strictEqual(config.tracing.annotations.enabled, true, "annotations 默认开（兼容既有部署）")
   assert.deepStrictEqual(warnings, [])
 })
@@ -71,7 +71,7 @@ test("Bug 7：类型不匹配告警并回落默认", () => {
   }`)
   assert.strictEqual(config.enabled, true, "字符串 'false' 不得生效为关闭")
   assert.strictEqual(config.wire.enabled, false, "数字 1 不得生效为开启")
-  assert.strictEqual(config.tracing.contentMaxLength, -1, "字符串长度不得混入")
+  assert.strictEqual(config.tracing.contentMaxLength, 61440, "字符串长度不得混入")
   assert.deepStrictEqual(config.tracing.headers, { ok: "v" }, "非字符串 header 值跳过")
   const badTypes = warnings.filter((warning) => warning.kind === "bad-type")
   assert.ok(badTypes.length >= 5, `每个类型错误都应告警（实际 ${badTypes.length} 条）`)
@@ -162,20 +162,22 @@ test("wire.maxFrameBytes：默认 -1，三态语义与坏值回落", () => {
   assert.strictEqual(capped.config.wire.maxFrameBytes, 65536, "N = 前 N 字节")
 })
 
-test("tracing.contentMaxLength：默认 -1，与 wire.maxFrameBytes 三态语义一致", () => {
+test("tracing.contentMaxLength：默认 61440，与 wire.maxFrameBytes 三态语义一致", () => {
   const def = loadFrom(null)
-  assert.strictEqual(def.config.tracing.contentMaxLength, -1, "默认不截断")
+  assert.strictEqual(def.config.tracing.contentMaxLength, 61440, "默认 60 KB（对齐 Claude）")
 
   const bad = loadFrom(`{ "tracing": { "contentMaxLength": "1000" } }`)
-  assert.strictEqual(bad.config.tracing.contentMaxLength, -1, "字符串不得生效")
+  assert.strictEqual(bad.config.tracing.contentMaxLength, 61440, "字符串不得生效")
   assert.ok(bad.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("tracing.contentMaxLength")))
 
   const tooLow = loadFrom(`{ "tracing": { "contentMaxLength": -2 } }`)
-  assert.strictEqual(tooLow.config.tracing.contentMaxLength, -1, "小于 -1 告警回落")
+  assert.strictEqual(tooLow.config.tracing.contentMaxLength, 61440, "小于 -1 告警回落")
   assert.ok(tooLow.warnings.some((warning) => warning.kind === "bad-type" && warning.message.includes("tracing.contentMaxLength")))
 
+  const unlimited = loadFrom(`{ "tracing": { "contentMaxLength": -1 } }`)
+  assert.strictEqual(unlimited.config.tracing.contentMaxLength, -1, "-1 = 不截断")
   const zero = loadFrom(`{ "tracing": { "contentMaxLength": 0 } }`)
   assert.strictEqual(zero.config.tracing.contentMaxLength, 0, "0 = 不保留 attr 值，仅记 *_original_length")
-  const capped = loadFrom(`{ "tracing": { "contentMaxLength": 61440 } }`)
-  assert.strictEqual(capped.config.tracing.contentMaxLength, 61440, "N = 截到 N 字符")
+  const capped = loadFrom(`{ "tracing": { "contentMaxLength": 1000 } }`)
+  assert.strictEqual(capped.config.tracing.contentMaxLength, 1000, "N = 截到 N 字符")
 })

@@ -81,12 +81,14 @@ export interface TracingConfig {
   readonly contentGates: ContentGates
   /**
    * Max length (chars) of content attributes; three-state semantics aligned with wire.maxFrameBytes:
-   * - -1 (default): no truncation
+   * - -1: no truncation
    * -  0: metadata-only — the attribute value is omitted, only `<key>_original_length`
    *       is emitted when the span provides one (mirrors OTEL_LOG_*=0 semantics)
    * -  N > 0: cut at N UTF-16 code units with a `[TRUNCATED original_length=N]` marker
    *          and record `<key>_original_length`
-   * (The CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH default of 60 KB is a good N if you want a cap.)
+   * Default 61440 (60 KB), aligned with CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH — sized just
+   * under the 64 KB single-attribute limit enforced by Phoenix / Jaeger / ClickHouse, so
+   * a single oversized tool result or wire frame cannot reject the whole span at intake.
    */
   readonly contentMaxLength: number
   /** Custom attributes merged into the OTLP resource block (host.name / team etc.; builtin keys win on conflicts) */
@@ -258,7 +260,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       headers: {},
       content: true,
       contentGates: resolveGates(true, {}, warnings),
-      contentMaxLength: -1,
+      contentMaxLength: 61440,
       resourceAttributes: {},
       annotations: { enabled: true },
     },

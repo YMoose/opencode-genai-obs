@@ -83,7 +83,8 @@ cd opencode-genai-obs && npm install && npm run build
       "toolContent": true,                //   gen_ai.tool.call.result 与工具 output.value
       "wireBody": true                    //   将采集到的 wire 帧注入 chat Span input.value（需开启 wire.enabled）
     },
-    "contentMaxLength": -1,               // 内容属性最大字符数：-1 = 不截断，0 = 仅元数据（值省略，仅保留 *_original_length），
+    "contentMaxLength": 61440,            // 内容属性最大字符数（默认 60 KB，对齐后端 64 KB 单 attr 上限）：
+                                          //   -1 = 不截断，0 = 仅元数据（值省略，保留 *_original_length），
                                           //   N > 0 = 截到 N 字符并追加 [TRUNCATED]
     "resourceAttributes": {},             // 并入 OTLP Resource 块（内置键优先，不被覆盖）
     "annotations": { "enabled": true }    // 向 /v1/session_annotations 推送会话项目名与标题（Phoenix REST 扩展；

@@ -357,7 +357,7 @@ test("retry：attempt 非法（字符串/缺失/≤0）静默忽略", async () =
 
 // ------------------------------------------------------------------ contentMaxLength 三态
 
-test("contentMaxLength=-1（默认）：长 prompt 不截断，无 original_length 标记", async () => {
+test("contentMaxLength=-1：长 prompt 不截断，无 original_length 标记", async () => {
   const { spans, builder } = makeHarness()
   const longPrompt = "x".repeat(5000)
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))

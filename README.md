@@ -83,7 +83,8 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
       "toolContent": true,                //   gen_ai.tool.call.result & tool output.value
       "wireBody": true                    //   chat span input.value from the captured wire frame (requires wire.enabled)
     },
-    "contentMaxLength": -1,               // max chars per content attribute: -1 = unlimited, 0 = metadata-only
+    "contentMaxLength": 61440,            // max chars per content attribute (default 60 KB, sized under the 64 KB
+                                          //   single-attribute backend limit): -1 = unlimited, 0 = metadata-only
                                           //   (value omitted, *_original_length kept), N > 0 = first N chars + [TRUNCATED]
     "resourceAttributes": {},             // merged into the OTLP Resource block (builtin keys take precedence)
     "annotations": { "enabled": true }    // POST session project/title to /v1/session_annotations (Phoenix REST extension;
