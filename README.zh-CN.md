@@ -104,6 +104,14 @@ cd opencode-genai-obs && npm install && npm run build
                                           // vLLM 等）便可把自身 span 挂到我们的 trace 下；title/compaction/
                                           // generate 请求永不注入
   },
+  "metrics": {
+    "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration，
+                                          // OTLP/HTTP protobuf 导出。Phoenix 不收 metrics——请用
+                                          // OTEL_EXPORTER_OTLP_METRICS_ENDPOINT 指向指标后端（或关闭此项）
+    "intervalMs": 60_000,                 // 导出间隔
+    "endpoint": null                      // metrics 端点覆盖（默认：OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint）
+  },
   "wire": {
     "enabled": false,                     // 将发往模型侧的原始请求体追加写入本地 JSONL
     "maxFrameBytes": -1                   // 磁盘单帧字节上限：-1 = 全量，0 = 仅元数据，N > 0 = 前 N 字节

@@ -181,3 +181,31 @@ test("tracing.contentMaxLength: default 61440, same tri-state semantics as wire.
   const capped = loadFrom(`{ "tracing": { "contentMaxLength": 1000 } }`)
   assert.strictEqual(capped.config.tracing.contentMaxLength, 1000, "N = truncate to N chars")
 })
+
+test("metrics: defaults on with 60s interval; tracing.enabled=false forces metrics off", () => {
+  const { config: def } = loadFrom(null)
+  assert.strictEqual(def.metrics.enabled, true, "metrics are on by default")
+  assert.strictEqual(def.metrics.intervalMs, 60_000)
+
+  const { config: off } = loadFrom(`{ "metrics": { "enabled": false } }`)
+  assert.strictEqual(off.metrics.enabled, false)
+
+  // Wire-only mode (tracing.enabled=false) must not leak: metrics are a network signal too
+  const { config: wireOnly } = loadFrom(`{ "tracing": { "enabled": false }, "wire": { "enabled": true } }`)
+  assert.strictEqual(wireOnly.metrics.enabled, false, "wire-only mode forces metrics off")
+
+  const { config: bad, warnings } = loadFrom(`{ "metrics": { "intervalMs": "fast" } }`)
+  assert.strictEqual(bad.metrics.intervalMs, 60_000, "bad type falls back to default")
+  assert.ok(warnings.some((w) => w.message.includes("metrics.intervalMs")))
+})
+
+test("metrics endpoint: metrics env > generic env > file metrics.endpoint > tracing.endpoint", () => {
+  const { config: fromTracing } = loadFrom(`{ "tracing": { "endpoint": "http://traces:4318" } }`)
+  assert.strictEqual(fromTracing.metrics.endpoint, "http://traces:4318", "falls back to tracing.endpoint")
+
+  const { config: fromFile } = loadFrom(`{ "metrics": { "endpoint": "http://m:4318/v1/metrics" }, "tracing": { "endpoint": "http://t:4318" } }`)
+  assert.strictEqual(fromFile.metrics.endpoint, "http://m:4318", "file metrics.endpoint wins; /v1/metrics suffix stripped")
+
+  const { config: fromEnv } = loadFrom(null, { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://env:4318/" })
+  assert.strictEqual(fromEnv.metrics.endpoint, "http://env:4318", "metrics env wins over everything")
+})

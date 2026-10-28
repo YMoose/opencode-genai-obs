@@ -13,7 +13,7 @@
 Signals are **GenAI-semconv-scoped only**:
 
 - **Traces** — spans under `gen_ai.*` (+ OpenInference mirrors), the main signal
-- **Metrics** — `gen_ai.client.*` only (token usage, operation duration); no infra/runtime or app-ops dashboard metrics (session counts, commit counters — that is the ops-monitoring plugin's job)
+- **Metrics** — `gen_ai.client.token.usage` (input/output per model) and `gen_ai.client.operation.duration` (chat / execute_tool); no infra/runtime or app-ops dashboard metrics (session counts, commit counters — that is the ops-monitoring plugin's job)
 - **Events/logs** — the five `gen_ai.*` message events (`system` / `user` / `assistant` / `tool` / `choice`), if a logs lane is added
 
 Custom `opencode.*` span attributes are unaffected — the scope limits which signal *domains* we emit, not per-span attributes.
@@ -103,6 +103,14 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
                                           // whose primary requests carry the in-flight chat span's context, so an
                                           // OTel-instrumented gateway (LiteLLM, vLLM, …) can parent its spans under
                                           // ours. Title/compaction/generate requests are never injected.
+  },
+  "metrics": {
+    "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration via OTLP/HTTP
+                                          // protobuf. Phoenix does not ingest metrics — point
+                                          // OTEL_EXPORTER_OTLP_METRICS_ENDPOINT at a metrics backend (or disable).
+    "intervalMs": 60_000,                 // export interval
+    "endpoint": null                      // metrics endpoint override (default: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+                                          // > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint)
   },
   "wire": {
     "enabled": false,                     // append raw provider request payloads to per-session JSONL

@@ -474,3 +474,51 @@ test("propagation: activeChatContext survives a turn mid-flight (second step of 
   assert.strictEqual(ctx!.spanId, hash("opencode-chat:a2", 8), "the second step's chat span must be targeted")
   assert.strictEqual(ctx!.traceId, hash("opencode-turn:s1:m1", 16), "same turn → same trace")
 })
+
+test("metrics: step end observes input/output token usage and chat duration; tool end observes execute_tool duration", async () => {
+  const observations: Array<Record<string, unknown>> = []
+  const { builder } = makeHarness({ observe: (obs) => observations.push(obs as unknown as Record<string, unknown>) })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello world")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "kimi-k3", providerID: "aliyun" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", name: "grep" }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", content: [{ type: "text", text: "hit" }] }))
+  builder.handleEvent(
+    event("session.step.ended", 1_300, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 100, output: 40, reasoning: 10, cache: { read: 20, write: 30 } },
+      cost: 0.01,
+    }),
+  )
+
+  const tokenObs = observations.filter((o) => o.metric === "token")
+  assert.strictEqual(tokenObs.length, 2, "one input + one output observation per step")
+  const input = tokenObs.find((o) => o.tokenType === "input")
+  const output = tokenObs.find((o) => o.tokenType === "output")
+  assert.strictEqual(input!.value, 150, "input includes cache read+write (billable input)")
+  assert.strictEqual(output!.value, 50, "output includes reasoning")
+  assert.strictEqual(input!.provider, "aliyun")
+  assert.strictEqual(input!.model, "kimi-k3")
+
+  const chatDur = observations.find((o) => o.metric === "duration" && o.operation === "chat")
+  assert.ok(chatDur, "chat duration must be observed")
+  assert.strictEqual(typeof chatDur!.durationNano, "bigint")
+  assert.ok((chatDur!.durationNano as bigint) > 0n)
+
+  const toolDur = observations.find((o) => o.metric === "duration" && o.operation === "execute_tool")
+  assert.ok(toolDur, "tool duration must be observed")
+  assert.strictEqual(toolDur!.tool, "grep")
+  assert.strictEqual(toolDur!.errorType, undefined, "successful tool has no error.type")
+})
+
+test("metrics: a failed step observes duration with error.type", async () => {
+  const observations: Array<Record<string, unknown>> = []
+  const { builder } = makeHarness({ observe: (obs) => observations.push(obs as unknown as Record<string, unknown>) })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.failed", 1_200, { sessionID: "s1", assistantMessageID: "a1", error: { type: "rate_limit", message: "slow down" } }))
+  const dur = observations.find((o) => o.metric === "duration" && o.operation === "chat")
+  assert.strictEqual(dur!.errorType, "rate_limit")
+})

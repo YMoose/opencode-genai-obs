@@ -41,6 +41,7 @@ import {
   compactionSpanId,
 } from "./ids.js"
 import type { SpanRecord, AttrValue } from "./otlp.js"
+import type { MetricObservation } from "./metrics.js"
 
 const KIND_INTERNAL = 1
 const KIND_CLIENT = 3
@@ -169,6 +170,8 @@ export interface SpanBuilderOptions {
   readonly consumeWire: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined
   /** Fetch the session's latest info asynchronously (fills title/directory at turn close); undefined on failure */
   readonly getSessionInfo?: (sessionID: string) => Promise<SessionInfoLite | undefined>
+  /** GenAI-semconv metric observations (token usage + operation duration); undefined disables metrics */
+  readonly observe?: (obs: MetricObservation) => void
 }
 
 export interface SpanBuilder {
@@ -629,6 +632,21 @@ export function createSpanBuilder(
       ),
       status: error ? { code: 2, message: `${error.type ?? "error"}: ${error.message ?? "step failed"}` } : { code: 1 },
     })
+
+    // gen_ai.client.* metrics — input includes cache read/write (billable input, same
+    // aggregation as the span); a failed step's duration carries error.type
+    if (options.observe && step) {
+      if (inputTokens !== undefined) options.observe({ metric: "token", tokenType: "input", value: inputTokens, provider: model.providerID, model: model.id })
+      if (outputTokens !== undefined) options.observe({ metric: "token", tokenType: "output", value: outputTokens, provider: model.providerID, model: model.id })
+      options.observe({
+        metric: "duration",
+        operation: "chat",
+        durationNano: endNano > step.startedNano ? endNano - step.startedNano : 0n,
+        provider: model.providerID,
+        model: model.id,
+        errorType: error ? (error.type ?? "error") : undefined,
+      })
+    }
   }
 
   const emitToolSpan = (
@@ -701,6 +719,16 @@ export function createSpanBuilder(
       ),
       status: failed ? { code: 2, message: `${error?.type ?? "error"}: ${error?.message ?? "tool failed"}` } : { code: 1 },
     })
+
+    if (options.observe && tool) {
+      options.observe({
+        metric: "duration",
+        operation: "execute_tool",
+        durationNano: endNano > tool.startedNano ? endNano - tool.startedNano : 0n,
+        tool: name,
+        errorType: failed ? (error?.type ?? "tool_error") : undefined,
+      })
+    }
   }
 
   /**

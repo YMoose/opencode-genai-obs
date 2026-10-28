@@ -114,6 +114,20 @@ export interface Config {
   readonly enabled: boolean
   readonly wire: WireConfig
   readonly tracing: TracingConfig
+  readonly metrics: MetricsConfig
+}
+
+export interface MetricsConfig {
+  /**
+   * Default true: gen_ai.client.* metrics (token usage + operation duration) via
+   * OTLP/HTTP protobuf. Phoenix does not ingest metrics — point
+   * OTEL_EXPORTER_OTLP_METRICS_ENDPOINT at a metrics backend or disable this.
+   */
+  readonly enabled: boolean
+  /** Export interval in ms, default 60000 */
+  readonly intervalMs: number
+  /** Metrics endpoint override; defaults to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint */
+  readonly endpoint?: string
 }
 
 export interface ConfigWarning {
@@ -121,8 +135,9 @@ export interface ConfigWarning {
   readonly message: string
 }
 
-const ROOT_KEYS = new Set(["enabled", "wire", "tracing"])
+const ROOT_KEYS = new Set(["enabled", "wire", "tracing", "metrics"])
 const WIRE_KEYS = new Set(["enabled", "directory", "maxFrameBytes"])
+const METRICS_KEYS = new Set(["enabled", "intervalMs", "endpoint"])
 const TRACING_KEYS = new Set([
   "enabled",
   "endpoint",
@@ -259,9 +274,9 @@ function parseKvList(raw: string | undefined, envName: string, warnings: ConfigW
   return out
 }
 
-/** Endpoint normalization: strip trailing slashes and the /v1/traces suffix users copy from OTEL docs (we append the path ourselves when sending) */
+/** Endpoint normalization: strip trailing slashes and the per-signal path suffixes users copy from OTEL docs (we append the path ourselves when sending) */
 function normalizeEndpoint(endpoint: string): string {
-  return endpoint.replace(/\/+$/, "").replace(/\/v1\/traces$/, "")
+  return endpoint.replace(/\/+$/, "").replace(/\/v1\/(traces|metrics)$/, "")
 }
 
 function resolveGates(content: boolean, raw: Record<string, unknown>, warnings: ConfigWarning[]): ContentGates {
@@ -297,6 +312,11 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       annotations: { enabled: true },
       propagation: { providers: [] },
     },
+    metrics: {
+      enabled: true,
+      intervalMs: 60_000,
+      endpoint: undefined,
+    },
   }
 
   // --- File layer ---
@@ -318,8 +338,10 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
 
         const wireRaw = section(parsed.wire, "wire", warnings)
         const tracingRaw = section(parsed.tracing, "tracing", warnings)
+        const metricsRaw = section(parsed.metrics, "metrics", warnings)
         unknownKeys(wireRaw, WIRE_KEYS, "wire", configPath, warnings)
         unknownKeys(tracingRaw, TRACING_KEYS, "tracing", configPath, warnings)
+        unknownKeys(metricsRaw, METRICS_KEYS, "metrics", configPath, warnings)
 
         const gatesRaw = section(tracingRaw.contentGates, "tracing.contentGates", warnings)
         unknownKeys(gatesRaw, GATE_KEYS, "tracing.contentGates", configPath, warnings)
@@ -352,6 +374,11 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
               providers: stringListField(propagationRaw.providers, "tracing.propagation.providers", defaults.tracing.propagation.providers, warnings),
             },
           },
+          metrics: {
+            enabled: boolField(metricsRaw.enabled, "metrics.enabled", defaults.metrics.enabled, warnings),
+            intervalMs: intField(metricsRaw.intervalMs, "metrics.intervalMs", defaults.metrics.intervalMs, warnings, 1_000),
+            endpoint: metricsRaw.endpoint === undefined ? undefined : stringField(metricsRaw.endpoint, "metrics.endpoint", "", warnings),
+          },
         }
         log("loaded config", { path: configPath, wireEnabled: fileConfig.wire.enabled })
       }
@@ -377,6 +404,18 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       endpoint: normalizeEndpoint(envEndpoint ?? fileConfig.tracing.endpoint),
       headers: { ...fileConfig.tracing.headers, ...envHeaders },
       resourceAttributes: { ...fileConfig.tracing.resourceAttributes, ...envResource },
+    },
+    metrics: {
+      ...fileConfig.metrics,
+      // Endpoint: metrics-specific env > generic env > metrics.endpoint file field > tracing.endpoint
+      endpoint: normalizeEndpoint(
+        process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT ??
+          process.env.OTEL_EXPORTER_OTLP_ENDPOINT ??
+          (fileConfig.metrics.endpoint || undefined) ??
+          fileConfig.tracing.endpoint,
+      ),
+      // Wire-only mode must not leak: metrics are a network signal too
+      enabled: fileConfig.metrics.enabled && fileConfig.tracing.enabled,
     },
   }
 

@@ -27,6 +27,7 @@ import { createWireRecorder } from "./wire.js"
 import { createSender } from "./sender.js"
 import { createSpanBuilder } from "./spans.js"
 import { createAnnotator } from "./annotations.js"
+import { createMetrics } from "./metrics.js"
 
 const PIPELINE_KEY = "__ocgObsPipeline$"
 const GENERATION_KEY = "__ocgObsPipelineGen$"
@@ -134,6 +135,17 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   const annotator = config.tracing.annotations.enabled
     ? createAnnotator({ endpoint: config.tracing.endpoint, headers: config.tracing.headers }, log)
     : undefined
+  const propagationProviders = new Set(config.tracing.propagation.providers)
+
+  const metrics = config.metrics.enabled
+    ? createMetrics({
+        endpoint: config.metrics.endpoint ?? config.tracing.endpoint,
+        headers: config.tracing.headers,
+        resourceAttributes: config.tracing.resourceAttributes,
+        intervalMs: config.metrics.intervalMs,
+      })
+    : undefined
+
   const spanBuilder = createSpanBuilder(
     {
       gates: config.tracing.contentGates,
@@ -153,12 +165,11 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
           return undefined
         }
       },
+      observe: metrics?.observe,
     },
     (span) => sender.push(span),
     log,
   )
-
-  const propagationProviders = new Set(config.tracing.propagation.providers)
 
   /**
    * session.created / session.renamed → real-time project/title annotation
@@ -248,6 +259,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     project: config.tracing.project,
     content: config.tracing.content,
     annotations: config.tracing.annotations.enabled,
+    metrics: config.metrics.enabled ? { endpoint: config.metrics.endpoint ?? config.tracing.endpoint, intervalMs: config.metrics.intervalMs } : false,
   })
 
   // Sessions created before this process loaded (e.g. opencode restarted mid-session) never
@@ -288,6 +300,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       await spanBuilder.flushAll()
       await sender.drain()
       await sender.close()
+      await metrics?.shutdown()
       await wire.dispose()
     },
     recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),
