@@ -65,9 +65,9 @@ Every bug fix lands with an accompanying test:
 
 ## Commits
 
-Author: `YMoose <42179813+YMoose@users.noreply.github.com>` (GitHub noreply — never commit
-with a personal identity; no global git identity is configured on this machine, so pass
-`-c user.name=YMoose -c user.email=42179813+YMoose@users.noreply.github.com` or export
-GIT_AUTHOR_*/GIT_COMMITTER_*). Short imperative English subjects with a
-conventional prefix (`fix:` / `feat:` / `test:` / `docs:` / `style:` / `refactor:` / `chore:`);
-a short body when the subject alone can't carry the why.
+Short imperative English subjects with a conventional prefix (`fix:` / `feat:` / `test:` /
+`docs:` / `style:` / `refactor:` / `chore:`); a short body when the subject alone can't
+carry the why. Commit with your own identity — prefer a GitHub noreply address
+(`<id>+<username>@users.noreply.github.com`) over a personal email. This machine has no
+global git identity configured, so pass `-c user.name=… -c user.email=…` or export
+`GIT_AUTHOR_*` / `GIT_COMMITTER_*`.
