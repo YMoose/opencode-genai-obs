@@ -6,7 +6,7 @@
  */
 import test from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createWireRecorder } from "../src/wire.js"
 import { tempDir } from "./helpers.js"
@@ -124,4 +124,41 @@ test("maxFrameBytes: frames under the cap land on disk unchanged", async () => {
   const record = JSON.parse(readFileSync(join(dir, "s1.jsonl"), "utf-8").trim().split("\n")[0]!)
   assert.equal(record.frame, "small")
   assert.equal(record.truncated, undefined)
+})
+
+// ------------------------------------------------------- observe-only degradation (Bug 15)
+
+test("Bug 15: an unusable wire.directory degrades to no-op capture instead of throwing at setup", () => {
+  // A regular file as the parent makes mkdirSync fail with ENOTDIR
+  const blocker = join(tempDir("ocg-wire-nodir-"), "blocker")
+  writeFileSync(blocker, "", "utf-8")
+  const logs: string[] = []
+  const recorder = createWireRecorder(
+    { enabled: true, directory: join(blocker, "raw"), maxFrameBytes: -1 },
+    (msg) => logs.push(msg),
+  )
+  recorder.recordWsSend(hookEvent("s1", "{}") as never)
+  assert.strictEqual(recorder.consumePending("s1"), undefined, "no capture happens in degraded mode")
+  recorder.dispose()
+  assert.ok(logs.some((msg) => msg.includes("wire directory unusable")), "the degradation warns")
+})
+
+test("Bug 15: an http.request body that cannot be cloned is skipped, never thrown into the host", () => {
+  const logs: string[] = []
+  const recorder = createWireRecorder(
+    { enabled: true, directory: tempDir("ocg-wire-clone-"), maxFrameBytes: -1 },
+    (msg) => logs.push(msg),
+  )
+  // A disturbed body (already read) makes Request.clone() throw synchronously
+  const request = {
+    clone() {
+      throw new TypeError("Body is unusable: Body has already been read")
+    },
+  } as unknown as Request
+  assert.doesNotThrow(
+    () => recorder.recordHttpRequest({ ...hookEvent("s1", ""), request } as never),
+    "a disturbed body must not throw into the host hook",
+  )
+  assert.ok(logs.some((msg) => msg.includes("clone failed")), "the skipped frame warns")
+  recorder.dispose()
 })

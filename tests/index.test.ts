@@ -422,3 +422,73 @@ test("trace propagation: the model.request hook is not registered when no provid
 
   assert.ok(!mock.has("model.request"), "no propagation configured → no hook registration")
 })
+
+test("Bug 15: an unusable wire.directory must not fail plugin setup (degrade, hooks stay registered)", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-baddir-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  // A regular file as the parent makes the recorder's mkdirSync fail with ENOTDIR
+  const blocker = join(dir, "blocker")
+  writeFileSync(blocker, "", "utf-8")
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      tracing: { enabled: false },
+      wire: { enabled: true, directory: join(blocker, "raw") },
+    }),
+    "utf-8",
+  )
+  process.env.OCG_OBS_CONFIG = configPath
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx) // used to reject: ENOTDIR escaped through elect("setup")
+  t.after(() => unload())
+  assert.ok(mock.has("experimental.ws.send"), "wire hooks stay registered in degraded mode")
+  assert.doesNotThrow(
+    () => mock.fire("experimental.ws.send", { sessionID: "s1", kind: "primary", frame: "{}" }),
+    "degraded capture must not throw into the host",
+  )
+})
+
+test("Bug 15: a throwing pipeline member is contained at the dispatch boundary, never thrown into the host", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-poison-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      tracing: { enabled: false },
+      wire: { enabled: true, directory: join(dir, "raw") },
+    }),
+    "utf-8",
+  )
+  process.env.OCG_OBS_CONFIG = configPath
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  // t.after runs LIFO: global scrub first, then unload, then env restore
+  t.after(() => {
+    delete (globalThis as Record<string, unknown>)["__ocgObsPipeline$"]
+    delete (globalThis as Record<string, unknown>)["__ocgObsPipelineGen$"]
+  })
+  t.after(() => unload())
+  ;(globalThis as Record<string, unknown>)["__ocgObsPipeline$"] = {
+    generation: 999,
+    dispose: async () => {},
+    recordWsSend: () => {
+      throw new Error("poisoned pipeline member")
+    },
+    recordHttpRequest: () => {},
+    handlePrompt: () => {},
+    injectTraceContext: () => {},
+  }
+  assert.doesNotThrow(
+    () => mock.fire("experimental.ws.send", { sessionID: "s1", kind: "primary", frame: "{}" }),
+    "the dispatch boundary must contain a throwing deliver",
+  )
+})

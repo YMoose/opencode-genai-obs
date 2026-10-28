@@ -55,7 +55,7 @@ Every bug fix lands with an accompanying test:
 
 - Write the test first and confirm it fails against the unfixed code (red), then fix and
   confirm green. The commit that fixes a bug must contain its test.
-- Continue the `Bug N` numbering in test titles (currently Bug 1–14); cite the upstream origin
+- Continue the `Bug N` numbering in test titles (currently Bug 1–15); cite the upstream origin
   in the title when one exists (e.g. `Bug 9 (same as opencode #55002)`).
 - The test must assert the observable behavior that was wrong, not just that code ran.
 

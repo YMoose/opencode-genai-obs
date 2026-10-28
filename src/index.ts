@@ -392,11 +392,20 @@ export default Plugin.define({
       log("pipeline owner established", { generation: candidate.generation, reason })
     }
 
+    /** Observe-only contract: a throwing deliver must never escape into the host's hook */
+    const guardedDeliver = (hook: string, pipeline: Pipeline, deliver: (pipeline: Pipeline) => void): void => {
+      try {
+        deliver(pipeline)
+      } catch (error) {
+        log(`hook ${hook} failed (${error}); event dropped`)
+      }
+    }
+
     /** Unified hook-callback entry: deliver when the pipeline exists; otherwise re-elect and redeliver this event once done */
     const dispatch = (hook: string, deliver: (pipeline: Pipeline) => void): void => {
       const pipeline = pipelineGlobal.get()
       if (pipeline) {
-        deliver(pipeline)
+        guardedDeliver(hook, pipeline, deliver)
         return
       }
       if (unloading) return
@@ -404,7 +413,7 @@ export default Plugin.define({
       void elect(`hook:${hook}`)
         .then(() => {
           const revived = pipelineGlobal.get()
-          if (revived && !unloading) deliver(revived)
+          if (revived && !unloading) guardedDeliver(hook, revived, deliver)
         })
         .catch((error) => { log("pipeline re-elect failed", { error: String(error) }) })
     }
@@ -450,7 +459,13 @@ export default Plugin.define({
     if (existing !== undefined) {
       log(`pipeline owned by another realm (gen ${existing.generation}); observer instance`)
     } else {
-      await elect("setup")
+      // Observe-only: a pipeline-build failure must not fail plugin setup — hooks stay
+      // registered and idle; later events retry the election
+      try {
+        await elect("setup")
+      } catch (error) {
+        log(`pipeline setup failed (${error}); hooks idle`)
+      }
     }
 
     // If this instance owns the pipeline it must reclaim it on unload

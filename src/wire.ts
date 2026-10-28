@@ -39,6 +39,14 @@ export interface WireRecorder {
 }
 
 export function createWireRecorder(config: WireConfig, log: (msg: string, data?: unknown) => void): WireRecorder {
+  /** No-ops when capture is off or degraded — callers never need to check (consumePending simply has nothing) */
+  const noopRecorder = (): WireRecorder => ({
+    recordWsSend: () => {},
+    recordHttpRequest: () => {},
+    consumePending: () => undefined,
+    dispose: () => {},
+  })
+
   /** Pending slots: per-session, per-kind FIFO (the kind=primary queue is consumed by the span builder) */
   const pending = new Map<string, { primary: Array<{ frame: string; seq: number }>; other: number }>()
 
@@ -59,17 +67,16 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     } else slot.other += 1
   }
 
-  if (!config.enabled) {
-    // No-ops when disabled — callers never need to check enabled (consumePending simply has nothing)
-    return {
-      recordWsSend: () => {},
-      recordHttpRequest: () => {},
-      consumePending: () => undefined,
-      dispose: () => {},
-    }
-  }
+  if (!config.enabled) return noopRecorder()
 
-  mkdirSync(config.directory, { recursive: true, mode: 0o700 })
+  // Observe-only: an unusable directory (unwritable path, ENOTDIR, …) must degrade to
+  // no-op capture, never fail the pipeline setup that hosts this recorder
+  try {
+    mkdirSync(config.directory, { recursive: true, mode: 0o700 })
+  } catch (error) {
+    log(`wire directory unusable (${error}); wire capture degraded to no-op`)
+    return noopRecorder()
+  }
 
   /** One append stream per session (cached by file name), plus a process-wide seq counter */
   const streams = new Map<string, WriteStream>()
@@ -146,9 +153,17 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     },
 
     recordHttpRequest(event) {
-      // The body is a ReadableStream; clone before reading so the original is never consumed
       const recordSeq = ++seq
-      const cloned = event.request.clone()
+      // The body is a ReadableStream; clone before reading so the original is never
+      // consumed. A disturbed body makes clone() throw — skip the frame instead of
+      // throwing into the host's hook
+      let cloned: Request
+      try {
+        cloned = event.request.clone()
+      } catch (error) {
+        log(`http.request clone failed (${error}); frame skipped`)
+        return
+      }
       cloned
         .text()
         .then((body) => {
