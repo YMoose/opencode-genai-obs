@@ -1,6 +1,7 @@
 /**
- * @fileoverview GenAI-semconv message events (opt-in logs lane) — exactly the five
- * gen_ai.* events of the OTel GenAI "events" model, mapped to what our pipeline can
+ * @fileoverview GenAI-semconv message events (opt-in logs lane) — the five
+ * gen_ai.* events of the OTel GenAI "events" model collapse to four emitted
+ * (assistant.message folds into choice), mapped to what our pipeline can
  * source without new capture:
  *
  *   gen_ai.system.message    — system prompt, extracted best-effort from the wire frame

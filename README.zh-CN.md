@@ -254,6 +254,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 ## 诊断与开发
 
 - **插件日志**：`~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log`（保留 7 天，敏感凭据自动脱敏）。
+- **启动探测**：tracing 开启时，启动阶段对每个去重后的已配置 OTLP 端点（traces/metrics/logs）做一次 TCP 连接，记录 `otlp endpoint reachable` 或 `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` —— 纯诊断日志，导出行为由 sender 的重试/退避负责。wire-only 模式永不探测（零网络出流量）。
 - **属性映射**：[docs/semconv-mapping.md](docs/semconv-mapping.md) —— 从 OpenCode 采集到的数据如何一一对应到 GenAI semconv / OpenInference。
 - **路线图**：[TODO.md](TODO.md)
 

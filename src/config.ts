@@ -135,8 +135,9 @@ export interface MetricsConfig {
 
 export interface LogsConfig {
   /**
-   * Default false: the five gen_ai.* message events (system/user/tool/choice) via
-   * OTLP/HTTP protobuf. Opt-in: the content overlaps span attributes — enable when the
+   * Default false: gen_ai.* message events via OTLP/HTTP protobuf — four emitted
+   * (system/user/tool/choice); the model's fifth (assistant.message) folds into choice.
+   * Opt-in: the content overlaps span attributes — enable when the
    * backend indexes log events better than spans. Content follows contentGates
    * (a gated event still fires, metadata-only).
    */

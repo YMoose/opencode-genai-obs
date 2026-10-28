@@ -254,6 +254,7 @@ When `wire.enabled: true`, each outbound LLM request is recorded to `~/.local/sh
 ## Diagnostics & development
 
 - **Logs**: `~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log` (7-day retention, automatic secret redaction).
+- **Startup probe**: when tracing is enabled, one TCP connect per distinct configured OTLP endpoint (traces/metrics/logs, deduplicated) at boot logs `otlp endpoint reachable` or `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` — log-only diagnostics; the sender's retry/backoff owns the behavioral response. Wire-only mode never probes (zero network egress).
 - **Attribute mapping**: [docs/semconv-mapping.md](docs/semconv-mapping.md) — what we capture from OpenCode → where it lands in GenAI semconv / OpenInference.
 - **Roadmap**: [TODO.md](TODO.md)
 
