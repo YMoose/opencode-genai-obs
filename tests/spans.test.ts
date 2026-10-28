@@ -169,6 +169,39 @@ test("user_prompt.length：不受 userPrompts gate 影响，始终进轮根", as
   assert.ok(!root.attributes.some(([key]) => key === "input.value"), "gate 关闭时 input.value 不出现")
 })
 
+test("opencode.agent.parent_session_id：子 agent chat span 带父 session id，根会话不带", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "go")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  // Register s2 as a sub-agent of s1 via the task tool
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "task" }))
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { agent: "child" } }))
+  builder.handleEvent(
+    event("session.tool.success", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      id: "t1",
+      content: [{ type: "text", text: "ok" }],
+      metadata: { sessionID: "s2" },
+    }),
+  )
+  builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s2", assistantMessageID: "c1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "s2", assistantMessageID: "c1" }))
+  builder.handleEvent(event("session.step.ended", 1_500, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_600, { sessionID: "s2" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_700, { sessionID: "s1" }))
+  await settle()
+
+  const childChat = spans.find((span) => span.spanId === hash("opencode-chat:c1", 8))
+  assert.ok(childChat, "应发出子 agent 的 chat span")
+  assert.equal(childChat.attributes.find(([key]) => key === "opencode.agent.parent_session_id")?.[1], "s1", "子 agent chat 应带父 session id")
+
+  const rootChat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
+  assert.ok(rootChat, "应发出根会话的 chat span")
+  assert.ok(!rootChat.attributes.some(([key]) => key === "opencode.agent.parent_session_id"), "根会话不得带 parent_session_id")
+})
+
 test("content 门：content=false 时 toolDetails/toolContent 默认关", async () => {
   const { spans, builder } = makeHarness({
     gates: { ...GATES, toolDetails: false, toolContent: false },

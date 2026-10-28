@@ -602,6 +602,11 @@ export function createSpanBuilder(
         ["output.value_original_length", outputTrunc?.originalLength],
         ["opencode.message.id", assistantMessageID],
         ["opencode.agent", step?.agent],
+        // Sub-agent lineage: which session spawned this one. Links registered by the
+        // subagent/task tool carry the authoritative parentSid; fall back to the
+        // session registry's parentID (covers sessions whose tool link raced ahead
+        // of session.created). Absent on root sessions.
+        ["opencode.agent.parent_session_id", child ? (links.get(sid)?.parentSid ?? sessions.get(sid)?.parentID) : undefined],
         ["opencode.retry.attempt", retry?.attempt],
         ["opencode.retry.error", retryError],
         ["opencode.wire.seq", wireTrunc ? wire?.seq : undefined],

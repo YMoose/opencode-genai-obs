@@ -104,6 +104,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `output.value_original_length` | truncation marker | |
 | `opencode.message.id` | `assistantMessageID` | deterministic-id input |
 | `opencode.agent` | `step.agent` | |
+| `opencode.agent.parent_session_id` | parent session's ID (from the subagent/task link or session registry) | sub-agent sessions only |
 | `opencode.retry.attempt` | stamped from prior `session.retry.scheduled` in the same session | consumed once |
 | `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
 | `opencode.wire.seq` | `wire.seq` of the consumed frame | correlation back to the on-disk JSONL |
