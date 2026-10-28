@@ -87,8 +87,12 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/
                                           //   single-attribute backend limit): -1 = unlimited, 0 = metadata-only
                                           //   (value omitted, *_original_length kept), N > 0 = first N bytes + [TRUNCATED]
     "resourceAttributes": {},             // merged into the OTLP Resource block (builtin keys take precedence)
-    "annotations": { "enabled": true }    // POST session project/title to /v1/session_annotations (Phoenix REST extension;
+    "annotations": { "enabled": true },   // POST session project/title to /v1/session_annotations (Phoenix REST extension;
                                           // set false on non-Phoenix backends to avoid 404 retries)
+    "propagation": { "providers": [] }    // W3C traceparent injection into outbound model requests: provider IDs (or "*")
+                                          // whose primary requests carry the in-flight chat span's context, so an
+                                          // OTel-instrumented gateway (LiteLLM, vLLM, …) can parent its spans under
+                                          // ours. Title/compaction/generate requests are never injected.
   },
   "wire": {
     "enabled": false,                     // append raw provider request payloads to per-session JSONL

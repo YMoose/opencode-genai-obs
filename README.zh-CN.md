@@ -87,8 +87,12 @@ cd opencode-genai-obs && npm install && npm run build
                                           //   -1 = 不截断，0 = 仅元数据（值省略，保留 *_original_length），
                                           //   N > 0 = 截到 N 字节（字符边界安全）并追加 [TRUNCATED]
     "resourceAttributes": {},             // 并入 OTLP Resource 块（内置键优先，不被覆盖）
-    "annotations": { "enabled": true }    // 向 /v1/session_annotations 推送会话项目名与标题（Phoenix REST 扩展；
+    "annotations": { "enabled": true },   // 向 /v1/session_annotations 推送会话项目名与标题（Phoenix REST 扩展；
                                           // 非 Phoenix 后端建议设为 false 以免产生 404 重试）
+    "propagation": { "providers": [] }    // 向出站模型请求注入 W3C traceparent：列入 provider ID（或 "*"）后，
+                                          // 主循环请求携带当前 chat span 的上下文，OTel 插桩网关（LiteLLM、
+                                          // vLLM 等）便可把自身 span 挂到我们的 trace 下；title/compaction/
+                                          // generate 请求永不注入
   },
   "wire": {
     "enabled": false,                     // 将发往模型侧的原始请求体追加写入本地 JSONL
