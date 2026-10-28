@@ -13,6 +13,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { createServer as createNetServer, type AddressInfo } from "node:net"
 import plugin from "../src/index.js"
 import {
   startServer,
@@ -491,4 +492,50 @@ test("Bug 15: a throwing pipeline member is contained at the dispatch boundary, 
     () => mock.fire("experimental.ws.send", { sessionID: "s1", kind: "primary", frame: "{}" }),
     "the dispatch boundary must contain a throwing deliver",
   )
+})
+
+test("wire-only mode never runs the startup probe; tracing mode probes once per distinct endpoint", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-probe-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+
+  let connections = 0
+  const netServer = createNetServer(() => { connections += 1 })
+  await new Promise<void>((resolve) => netServer.listen(0, "127.0.0.1", resolve))
+  const { port } = netServer.address() as AddressInfo
+  t.after(() => new Promise<void>((resolve) => netServer.close(() => resolve())))
+
+  const writeConfig = (tracingEnabled: boolean) => {
+    const configPath = join(dir, `cfg-${tracingEnabled ? "on" : "off"}.json`)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        tracing: { enabled: tracingEnabled, endpoint: `http://127.0.0.1:${port}` },
+        wire: { enabled: true, directory: join(dir, "raw") },
+      }),
+      "utf-8",
+    )
+    process.env.OCG_OBS_CONFIG = configPath
+  }
+
+  // Wire-only: nothing may leave the process — the probe must not even connect
+  writeConfig(false)
+  const off = makeCtx()
+  const unloadOff = await setup(off.ctx)
+  t.after(() => unloadOff())
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.strictEqual(connections, 0, "wire-only mode must not open any connection (probe included)")
+  // The wire-only pipeline owns globalThis until unloaded; a second setup would just be
+  // an observer instance and never build (or probe) — unload first (idempotent in t.after)
+  await unloadOff()
+
+  // Tracing enabled: exactly one deduped connect (metrics shares the traces endpoint here)
+  writeConfig(true)
+  const on = makeCtx()
+  const unloadOn = await setup(on.ctx)
+  t.after(() => unloadOn())
+  await waitFor(() => connections >= 1)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.strictEqual(connections, 1, "one connect per distinct endpoint, traces+metrics deduped")
 })
