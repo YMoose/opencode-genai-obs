@@ -8,6 +8,16 @@
 
 `opencode-genai-obs` 挂载于 OpenCode v2 的会话事件流与传输层钩子，通过标准 OTLP/HTTP（protobuf）将 Agent 执行链路实时导出至任意兼容后端（Arize Phoenix、Jaeger、SigNoz、OTel Collector 等），并支持将发往模型侧的原始请求体（wire body）落盘为本地 JSONL。
 
+## 信号范围
+
+本插件的信号**严格限定在 GenAI 语义约定内**:
+
+- **Traces** —— `gen_ai.*` 属性 + OpenInference 镜像，主信号
+- **Metrics** —— 仅 `gen_ai.client.*`(token 用量、操作耗时）；不做 infra/运行时指标，也不做应用运营指标（会话计数、commit 计数等——那是运营监控类插件的定位）
+- **Events/Logs** —— 如将来增加 logs 通道，仅发 `gen_ai.*` 的五种消息事件（system/user/assistant/tool/choice)
+
+`opencode.*` 自定义 span 属性不受此限——范围约束的是"做哪些信号域"，不是 span 上的自有属性。
+
 ## 追踪模型与核心能力
 
 每一轮对话（Turn）实时映射为一条结构化 Trace：

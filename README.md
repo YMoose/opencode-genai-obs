@@ -8,6 +8,16 @@
 
 `opencode-genai-obs` hooks into the OpenCode v2 session event stream and transport layer, exporting structured agent traces over OTLP/HTTP (protobuf) to any compatible backend (Arize Phoenix, Jaeger, SigNoz, OTel Collector, …) while optionally recording the exact provider request payloads to local JSONL.
 
+## Scope
+
+Signals are **GenAI-semconv-scoped only**:
+
+- **Traces** — spans under `gen_ai.*` (+ OpenInference mirrors), the main signal
+- **Metrics** — `gen_ai.client.*` only (token usage, operation duration); no infra/runtime or app-ops dashboard metrics (session counts, commit counters — that is the ops-monitoring plugin's job)
+- **Events/logs** — the five `gen_ai.*` message events (`system` / `user` / `assistant` / `tool` / `choice`), if a logs lane is added
+
+Custom `opencode.*` span attributes are unaffected — the scope limits which signal *domains* we emit, not per-span attributes.
+
 ## Trace model & capabilities
 
 Each conversation turn is projected into a single trace in real time:

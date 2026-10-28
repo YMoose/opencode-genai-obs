@@ -73,18 +73,21 @@ traced/sent, backend connectivity, queue depth, spans sent/dropped counters.
 
 ## OTLP metrics + logs/events export
 
-Data source is the existing session event stream (zero new capture):
+Scope: **GenAI-semconv only** (see README Scope). Data source is the existing session
+event stream (zero new capture):
 
-- Metric candidates: `opencode.session.count` (created),
-  `opencode.llm.tokens{model,direction}` (step.ended), `opencode.cost.usd`
-  (step.ended cost), `opencode.tool.calls{tool,status}` (tool.success/failed),
-  turn/tool duration histograms.
-- Export via OTLP/HTTP JSON (Phoenix does not ingest metrics; target backends are
-  SigNoz / OTel Collector → Prometheus).
-- Logs/events candidates: `user_prompt` / `tool_result` / `step_failed` events,
-  reusing contentGates as the content gate, via the OTLP logs protocol.
+- Metrics (exactly two, per the semconv): `gen_ai.client.token.usage` (Histogram,
+  attrs: `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` =
+  input/output/cache_read/cache_write/reasoning) and `gen_ai.client.operation.duration`
+  (Histogram, attrs: `gen_ai.operation.name` = chat/execute_tool, provider, model).
+  Cost stays a span attribute (`opencode.cost.usd`) — not a semconv metric.
+- Export via OTLP/HTTP protobuf (`@opentelemetry/exporter-metrics-otlp-proto` +
+  `@opentelemetry/sdk-metrics` PeriodicExportingMetricReader). Phoenix does not ingest
+  metrics; target backends are SigNoz / OTel Collector → Prometheus.
+- Logs/events candidates: the five `gen_ai.*` message events (`system` / `user` /
+  `assistant` / `tool` / `choice`), reusing contentGates as the content gate.
 - Configuration follows the existing OTEL env conventions (separate
-  `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` / `_LOGS_ENDPOINT` routes); stays on HTTP, no gRPC.
+  `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` route); stays on HTTP, no gRPC.
 
 ## Backend-specific capability extension points
 

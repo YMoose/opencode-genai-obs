@@ -6,10 +6,12 @@ Guidelines for agents working in this repository.
 
 opencode-genai-obs (`ocg-obs`): an OpenCode v2 plugin providing GenAI-semconv OTLP tracing
 (real-time lane) plus raw LLM wire-body capture, aligned with OTel GenAI semconv + OpenInference
-only — never bound to a specific observability platform. The OTLP protobuf encoding is
-delegated to the official @opentelemetry SDK (pinned closure: api / core / resources /
-sdk-trace-base / exporter-trace-otlp-proto + jsonc-parser); zero new test dependencies
-(`node:test` + `node:assert`).
+only — never bound to a specific observability platform. Signals are GenAI-semconv-scoped:
+traces under `gen_ai.*`; metrics limited to `gen_ai.client.*`; events limited to the five
+`gen_ai.*` message events. No infra/runtime metrics, no app-ops dashboard metrics, no
+general log piping. The OTLP protobuf encoding is delegated to the official @opentelemetry
+SDK (pinned closure: api / core / resources / sdk-trace-base / exporter-trace-otlp-proto +
+jsonc-parser); zero new test dependencies (`node:test` + `node:assert`).
 
 ## Layout
 
