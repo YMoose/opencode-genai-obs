@@ -66,5 +66,6 @@ Every bug fix lands with an accompanying test:
 ## Commits
 
 Author: `YZH <yzh@localhost>` (no global git identity on this machine — pass
-`-c user.name=YZH -c user.email=yzh@localhost`). Short imperative subjects with a conventional
-prefix (`fix:` / `feat:` / `test:` / `docs:` / `style:` / `refactor:`), Chinese description.
+`-c user.name=YZH -c user.email=yzh@localhost`). Short imperative English subjects with a
+conventional prefix (`fix:` / `feat:` / `test:` / `docs:` / `style:` / `refactor:` / `chore:`);
+a short body when the subject alone can't carry the why.
