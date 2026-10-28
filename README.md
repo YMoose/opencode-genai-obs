@@ -4,13 +4,44 @@
 
 <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 
-OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, exporting to any OTLP/HTTP-compatible backend (OTel Collector / Phoenix / SigNoz / Jaeger …). It aligns with semantic conventions only (OTel GenAI semconv + OpenInference) and is not tied to any specific observability platform.
+**OpenTelemetry GenAI tracing and raw LLM wire capture for OpenCode v2.**
 
-> **Status: stable, running in production.** Real-time only — crash repair and historical backfill are handled by a separate offline lane outside this repository.
+`opencode-genai-obs` hooks into the OpenCode v2 session event stream and transport layer, exporting structured agent traces over OTLP/HTTP (protobuf) to any compatible backend (Arize Phoenix, Jaeger, SigNoz, OTel Collector, …) while optionally recording the exact provider request payloads to local JSONL.
 
-## Installation
+## Trace model & capabilities
 
-Add this repository's absolute path to the `plugin` array in `~/.config/opencode/opencode.json`:
+Each conversation turn is projected into a single trace in real time:
+
+```text
+<user prompt preview>                                    [AGENT · invoke_agent · 4.2s]
+├── chat claude-sonnet-4-5           1,840 → 312 tok · $0.009  [LLM · chat]
+├── execute_tool grep                "timeout" in src/         [TOOL · execute_tool · 80ms]
+├── execute_tool subagent (explorer)                           [TOOL · execute_tool]
+│   └── invoke_agent explorer                                  [AGENT · child session]
+│       ├── chat gemini-flash        920 → 180 tok             [LLM · chat]
+│       └── execute_tool read        src/auth/client.ts        [TOOL · execute_tool]
+└── chat claude-sonnet-4-5           2,310 → 490 tok · $0.014  [LLM · chat]
+
+compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standalone trace]
+```
+
+- **Turn-scoped trace hierarchy** — One user turn = one trace (`invoke_agent` root span → `chat` model steps → `execute_tool` calls). Child sessions spawned via `subagent` / `task` link their `invoke_agent` container span directly under the parent tool span.
+- **OTel GenAI semconv + OpenInference** — Populates standard `gen_ai.*` attributes (`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens` / `cache_read.input_tokens` / `cache_write.input_tokens` / `reasoning.output_tokens`, `gen_ai.tool.call.*`) alongside OpenInference mirrors (`openinference.span.kind`, `llm.token_count.*`, `llm.total_cost`, `input.value`, `output.value`). Zero platform lock-in.
+- **Compaction & retry instrumentation** — Context compaction runs (`session.compaction.*`) emit standalone traces with model, token, cost, and summary attributes. Retried steps (`session.retry.scheduled`) stamp `opencode.retry.attempt` and `opencode.retry.error` onto the subsequent `chat` span.
+- **Raw wire-body capture** — Intercepts the exact serialized JSON sent to the LLM provider (full system prompt, message history, tool schemas, sampling parameters) for on-disk JSONL inspection and/or attachment to the chat span's `input.value`.
+- **Deterministic trace & span IDs** — IDs are SHA-256 digests of stable session/message/call identifiers rather than random UUIDs, guaranteeing idempotent deduplication across realms and offline replay pipelines.
+- **Privacy gates & secret redaction** — Independent content gates mirroring Claude Code's `OTEL_LOG_*` semantics (`userPrompts`, `assistantResponses`, `toolDetails`, `toolContent`, `wireBody`), configurable character/byte truncation, and automatic credential redaction in plugin logs.
+
+## Quick start
+
+**1. Build and register**
+
+```bash
+git clone https://github.com/YMoose/opencode-genai-obs.git
+cd opencode-genai-obs && npm install && npm run build
+```
+
+Add the plugin path to `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -18,81 +49,65 @@ Add this repository's absolute path to the `plugin` array in `~/.config/opencode
 }
 ```
 
-Restart opencode.
+**2. Configure the OTLP endpoint** (optional — defaults to `http://localhost:4318`)
 
-## Real-time OTLP tracing
-
-On by default: session event stream → OTel GenAI semconv spans → OTLP/HTTP backend (protobuf). One conversation turn = one trace (the root span carries the user-message summary); chat spans (LLM calls, with the full wire body) and `execute_tool` spans show up within seconds. Sub-agent sessions attach as a subtree under the tool span that spawned them. Each compaction run lands as its own trace (model, usage, cost, summary behind the `assistantResponses` gate), and retry attempts are stamped onto the retried chat span (`opencode.retry.attempt` / `opencode.retry.error`).
+For example, with a local [Arize Phoenix](https://github.com/Arize-ai/phoenix) instance (`docker run -p 6006:6006 arizephoenix/phoenix`), create `~/.config/opencode/ocg-obs.json`:
 
 ```jsonc
 {
   "tracing": {
-    "enabled": true,                    // default true
-    "endpoint": "http://localhost:4318",// any OTLP/HTTP backend; 4318 = standard OTLP port
-                                        // (Phoenix users: http://localhost:6006)
-    "project": "opencode",              // openinference.project.name resource attribute
-    "headers": {},                      // extra request headers (auth), shared by /v1/traces and /v1/session_annotations
-    "content": true,                    // coarse switch: false → toolDetails / toolContent default off
-    "contentGates": {                   // fine-grained gates (each overridable, mirrors Claude Code OTEL_LOG_* semantics)
-      "userPrompts": true,              //   root-span input.value (user message)
-      "assistantResponses": true,       //   root output.value, chat output.value, gen_ai.output.messages, reasoning
-      "toolDetails": true,              //   tool call arguments (defaults to follow content)
-      "toolContent": true,              //   tool call result (defaults to follow content)
-      "wireBody": true                  //   wire body into chat-span input.value (false = JSONL only)
-    },
-    "contentMaxLength": 0,              // max chars for content attributes, 0 = no truncation;
-                                        // truncation appends an [TRUNCATED] marker plus *_original_length attributes
-    "resourceAttributes": {},           // merged into the OTLP resource block (host.name / team.*; builtin keys win)
-    "annotations": { "enabled": true }  // real-time session project/title columns (Phoenix-compatible
-                                        // /v1/session_annotations, not an OTLP standard; disable for other backends)
-  },
-  "wire": { "enabled": true }           // wire body to disk + into chat-span input.value
-}
-```
-
-### Environment variables (override the config file, standard OTEL conventions)
-
-For organization-wide rollout, drive everything via shell env — no per-user config edits:
-
-| Variable | Effect |
-|---|---|
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint`; a trailing `/v1/traces` path is stripped automatically |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`; traces-specific wins; values percent-decoded per W3C Baggage) |
-| `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (same format) |
-
-Precedence: **env > config file > defaults** (same convention as the Claude Code monitoring-usage docs).
-Config file lookup: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`.
-
-Config validation: every field is type-checked; a mismatch (e.g. the string `"false"`) **warns and falls back to the default** instead of silently passing through JS truthiness. Unknown keys (typos) are reported at the root, `wire`, `tracing`, and `contentGates` levels. Warnings go to the log.
-
-Behavior notes:
-
-- `tracing.enabled: false` + `wire.enabled: true` = **wire-only mode**: JSONL capture only, no event-stream subscription, nothing leaves the process
-- The default endpoint is the standard OTLP port `http://localhost:4318`; Phoenix users should set `http://localhost:6006` explicitly
-- No backend-specific request headers are sent; the project semantic goes exclusively through the `openinference.project.name` resource attribute
-- `tracing.annotations.enabled: false` turns off the Phoenix-compatible session annotations (recommended for non-Phoenix backends to avoid 404-retry noise)
-- OTLP POSTs and annotation requests carry a 30s timeout; a hung backend can no longer stall the send queue or plugin unload
-- `session.deleted` events clean up all in-memory state for that session (leak protection for long-lived processes)
-- Capture keeps running across plugin hot reloads
-
-## Wire body capture
-
-Every raw request body sent to the LLM (full system prompt + trimmed messages + tools schema + sampling params + provider-specific options) is appended to a JSONL file.
-
-**Off by default.** To enable, create `~/.config/opencode/ocg-obs.json`:
-
-```json
-{
-  "wire": {
-    "enabled": true,
-    "maxFrameBytes": -1
+    "endpoint": "http://localhost:6006"
   }
 }
 ```
 
-`maxFrameBytes` caps the **on-disk** frame only (spans always receive the full frame, governed by `contentGates.wireBody` + `contentMaxLength`): `-1` = full frame (default), `0` = metadata-only records (frame content dropped), `N > 0` = first N bytes cut at a UTF-8 character boundary, suffixed with `[TRUNCATED]`.
+**3. Restart OpenCode.** Traces stream to `/v1/traces` as steps and tools complete.
 
-Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record per line:
+## Configuration
+
+Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json` (JSONC supported). All fields are optional and strictly type-checked (invalid types or unknown keys log a warning and fall back to defaults):
+
+```jsonc
+{
+  "enabled": true,                        // master switch (false = no-op on setup)
+  "tracing": {
+    "enabled": true,                      // false + wire.enabled = wire-only mode (disk JSONL only, zero network egress)
+    "endpoint": "http://localhost:4318",  // base OTLP/HTTP URL (4318 = standard OTLP; 6006 = Phoenix)
+    "project": "opencode",                // sets the openinference.project.name resource attribute
+    "headers": {},                        // extra headers for /v1/traces and /v1/session_annotations
+    "content": true,                      // coarse gate: false defaults toolDetails & toolContent to false
+    "contentGates": {                     // fine-grained gates (each overrides `content`)
+      "userPrompts": true,                //   turn root input.value
+      "assistantResponses": true,         //   root/chat output.value, gen_ai.output.messages, opencode.reasoning, compaction text
+      "toolDetails": true,                //   gen_ai.tool.call.arguments & tool input.value
+      "toolContent": true,                //   gen_ai.tool.call.result & tool output.value
+      "wireBody": true                    //   chat span input.value from the captured wire frame (requires wire.enabled)
+    },
+    "contentMaxLength": 0,                // max chars per content attribute (0 = unlimited; appends [TRUNCATED] + *_original_length)
+    "resourceAttributes": {},             // merged into the OTLP Resource block (builtin keys take precedence)
+    "annotations": { "enabled": true }    // POST session project/title to /v1/session_annotations (Phoenix REST extension;
+                                          // set false on non-Phoenix backends to avoid 404 retries)
+  },
+  "wire": {
+    "enabled": false,                     // append raw provider request payloads to per-session JSONL
+    "maxFrameBytes": -1                   // on-disk frame cap: -1 = full, 0 = metadata only, N > 0 = first N bytes
+  }
+}
+```
+
+### Environment variables
+
+Standard OpenTelemetry environment variables override the config file (**env > config file > defaults**), enabling zero-touch organization rollouts:
+
+| Variable | Target |
+|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`) | `tracing.endpoint` (trailing `/v1/traces` is stripped automatically) |
+| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers` (`k1=v1,k2=v2`, W3C Baggage percent-decoded; traces-specific wins) |
+| `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes` (`k1=v1,k2=v2`, percent-decoded) |
+
+## Wire body capture
+
+When `wire.enabled: true`, each outbound LLM request is recorded to `~/.local/share/opencode/raw-requests/<sessionID>.jsonl` (mode `0600`):
 
 ```json
 {
@@ -104,28 +119,23 @@ Location: `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`, one record p
   "agent": "build",
   "model": { "providerID": "example", "id": "example/model-x" },
   "kind": "primary",
-  "frame": "{\"model\":\"example/model-x\",\"messages\":[...],\"tools\":[...],\"temperature\":0.6,...}"
+  "frame": "{\"model\":\"example/model-x\",\"messages\":[...],\"tools\":[...],\"temperature\":0.6}"
 }
 ```
 
-- `hook`: which hook captured it (`ws.send` is the main path, `http.request` is the fallback)
-- `kind`: `primary` | `compaction` | `title` | `generate` (opencode's own request classification)
-- `frame`: the full wire body (frame string for ws, request-body text for http; first `maxFrameBytes` bytes when capped)
-- `seq`: process-wide monotonically increasing sequence number
-- `truncated` / `frameBytes`: present when `maxFrameBytes` capped the frame; `frameBytes` records the original size
+- `kind`: OpenCode's request classification (`primary` | `compaction` | `title` | `generate`). Only `primary` frames are consumed into chat-span `input.value` (FIFO).
+- `wire.maxFrameBytes` caps **on-disk** JSONL frames only (spans still receive the full frame, governed by `contentGates.wireBody` + `contentMaxLength`):
+  - `-1` (default): full payload
+  - `0`: metadata-only (`frame: ""`, `truncated: true`, `frameBytes: <original_bytes>`)
+  - `N > 0`: first `N` bytes cut at a UTF-8 character boundary, suffixed with `[TRUNCATED]`, plus `truncated: true` and `frameBytes`
 
-**Privacy**: bodies contain the full system prompt + history + tools. Files are mode 0600, never committed to git, never sent anywhere. Delete the files when you no longer need them.
+## Diagnostics & development
 
-## Roadmap
-
-Tracked in [TODO.md](TODO.md).
-
-## Development
+- **Logs**: `~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log` (7-day retention, automatic secret redaction).
+- **Roadmap**: [TODO.md](TODO.md)
 
 ```bash
 npm run build      # compile src/ → dist/
-npm run typecheck  # type check
-npm test           # compile and run the node:test suite (tests/ → dist-test/)
+npm run typecheck  # tsc --noEmit
+npm test           # compile and run the node:test suite
 ```
-
-Test coverage: the span state machine (deterministic ids, content gates, malformed-event guards, session cleanup), OTLP encoding/POST (timeout, non-200), the send queue (retry, dropping), annotation retries, wire capture/flush, config validation, redaction and logging (patterns adopted from oh-my-opencode-slim), plugin contracts (disabled setup never touches ctx, idempotent unload, reload re-establishment, symmetric hook deregistration), and a dependency contract (minimal runtime dependency closure + src import-graph boundary).

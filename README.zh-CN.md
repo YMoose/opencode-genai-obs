@@ -4,13 +4,44 @@
 
 <a href="README.md">English</a> | <b>简体中文</b>
 
-OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出到任意 OTLP/HTTP 兼容后端（OTel Collector / Phoenix / SigNoz / Jaeger …）。只对齐语义约定（OTel GenAI semconv + OpenInference），不绑定特定观测平台。
+**面向 OpenCode v2 的 OpenTelemetry GenAI 追踪与 LLM 原始请求采集插件。**
 
-> **当前状态：生产运行中。** 插件只做实时——崩溃修复与历史数据补灌由本仓库之外的离线链路承担。
+`opencode-genai-obs` 挂载于 OpenCode v2 的会话事件流与传输层钩子，通过标准 OTLP/HTTP（protobuf）将 Agent 执行链路实时导出至任意兼容后端（Arize Phoenix、Jaeger、SigNoz、OTel Collector 等），并支持将发往模型侧的原始请求体（wire body）落盘为本地 JSONL。
 
-## 安装
+## 追踪模型与核心能力
 
-在 `~/.config/opencode/opencode.json` 的 `plugin` 数组里加本仓库的绝对路径：
+每一轮对话（Turn）实时映射为一条结构化 Trace：
+
+```text
+<user prompt preview>                                    [AGENT · invoke_agent · 4.2s]
+├── chat claude-sonnet-4-5           1,840 → 312 tok · $0.009  [LLM · chat]
+├── execute_tool grep                "timeout" in src/         [TOOL · execute_tool · 80ms]
+├── execute_tool subagent (explorer)                           [TOOL · execute_tool]
+│   └── invoke_agent explorer                                  [AGENT · child session]
+│       ├── chat gemini-flash        920 → 180 tok             [LLM · chat]
+│       └── execute_tool read        src/auth/client.ts        [TOOL · execute_tool]
+└── chat claude-sonnet-4-5           2,310 → 490 tok · $0.014  [LLM · chat]
+
+compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standalone trace]
+```
+
+- **Turn 级调用链拓扑** — 一轮用户交互对应一条 Trace（`invoke_agent` 轮根 Span → `chat` 模型步 → `execute_tool` 工具调用）。通过 `subagent` / `task` 派生的子会话，其 `invoke_agent` 容器 Span 直接作为子树挂载在触发它的工具 Span 下。
+- **OTel GenAI semconv + OpenInference 双语义约定** — 同时写入标准 `gen_ai.*` 属性（`gen_ai.operation.name`、`gen_ai.request.model`、`gen_ai.usage.input_tokens` / `output_tokens` / `cache_read.input_tokens` / `cache_write.input_tokens` / `reasoning.output_tokens`、`gen_ai.tool.call.*`）与 OpenInference 镜像属性（`openinference.span.kind`、`llm.token_count.*`、`llm.total_cost`、`input.value`、`output.value`），不绑定特定平台即可在 Phoenix 与通用 OTel 后端获得完整视图。
+- **Compaction 与 Retry 可观测** — 上下文压缩（`session.compaction.*`）独立成条 Trace，携带模型、Token、成本与摘要文本；发生重试的模型步（`session.retry.scheduled`）会在随后重试的 `chat` Span 上打标 `opencode.retry.attempt` 与 `opencode.retry.error`。
+- **LLM 原始请求体（Wire Body）采集** — 拦截发往模型厂商的序列化请求 JSON（完整 system prompt、裁剪后消息历史、tools schema、采样参数），落盘为按会话切分的 JSONL，并可按需注入 `chat` Span 的 `input.value`。
+- **确定性 Trace / Span ID** — ID 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID），保证多模块实例（realm）与离线补灌链路下的幂等去重。
+- **细粒度隐私门控与日志脱敏** — 对齐 Claude Code `OTEL_LOG_*` 语义的五路内容开关（`userPrompts`、`assistantResponses`、`toolDetails`、`toolContent`、`wireBody`），支持属性字符数与磁盘字节数截断，插件日志自动脱敏凭证。
+
+## 快速开始
+
+**1. 编译并注册插件**
+
+```bash
+git clone https://github.com/YMoose/opencode-genai-obs.git
+cd opencode-genai-obs && npm install && npm run build
+```
+
+将仓库绝对路径加入 `~/.config/opencode/opencode.json`：
 
 ```json
 {
@@ -18,81 +49,65 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
 }
 ```
 
-重启 opencode。
+**2. 配置 OTLP 后端地址**（可选——默认发往 `http://localhost:4318`）
 
-## 功能：实时 OTLP tracing
-
-默认开启：session 事件流 → OTel GenAI semconv span → OTLP/HTTP 后端（protobuf）。一轮对话 = 一条 trace（轮根 span = 用户消息摘要），chat span（LLM 调用，带完整 wire body）/ execute_tool span 秒级实时可见。子 agent 会话整棵挂进调用它的 tool span。每次 compaction 独立成一条 trace（model/usage/cost/摘要走 `assistantResponses` 门控）；重试则盖章到重试那次尝试的 chat span 上（`opencode.retry.attempt` / `opencode.retry.error`）。
+若使用本地 [Arize Phoenix](https://github.com/Arize-ai/phoenix)（`docker run -p 6006:6006 arizephoenix/phoenix`），新建 `~/.config/opencode/ocg-obs.json`：
 
 ```jsonc
 {
   "tracing": {
-    "enabled": true,                    // 默认 true
-    "endpoint": "http://localhost:4318",// 任意 OTLP/HTTP 后端；4318 = OTLP 标准端口
-                                        // （Phoenix 用户配 http://localhost:6006）
-    "project": "opencode",              // openinference.project.name resource 属性
-    "headers": {},                      // 附加请求头（认证），/v1/traces 与 /v1/session_annotations 共用
-    "content": true,                    // 粗开关：false → toolDetails / toolContent 默认关
-    "contentGates": {                   // 细粒度门（均可单独覆盖，对齐 Claude Code OTEL_LOG_* 语义）
-      "userPrompts": true,              //   轮根 span input.value（用户消息）
-      "assistantResponses": true,       //   轮根 output.value、chat output.value、gen_ai.output.messages、reasoning
-      "toolDetails": true,              //   tool call arguments（默认跟随 content）
-      "toolContent": true,              //   tool call result（默认跟随 content）
-      "wireBody": true                  //   wire body 进 chat span input.value（false = 只落盘 JSONL）
-    },
-    "contentMaxLength": 0,              // 内容类属性最大字符数，0 = 不截断；
-                                        // 截断追加 [TRUNCATED] 标记并补 *_original_length 属性
-    "resourceAttributes": {},           // 并入 OTLP resource 块（host.name / team.* 等；内置键不覆盖）
-    "annotations": { "enabled": true }  // session project/title 实时列（走 Phoenix 兼容后端的
-                                        // /v1/session_annotations，非 OTLP 标准；其他后端建议关闭）
-  },
-  "wire": { "enabled": true }           // wire body 落盘 + 喂进 chat span input.value
-}
-```
-
-### 环境变量（覆盖配置文件，对齐标准 OTEL 惯例）
-
-组织级统一部署可以不改每人配置，直接 shell env 驱动：
-
-| 环境变量 | 作用 |
-|---|---|
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回落 `OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`；`/v1/traces` 尾路径自动剥掉 |
-| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`；traces 专用优先；值按 W3C Baggage 规范 percent-decode） |
-| `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（同格式） |
-
-优先级：**env > 配置文件 > 默认**（同 Claude Code monitoring-usage 文档惯例）。
-配置文件查找：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`。
-
-配置校验：所有字段做类型检查，类型不匹配（如 `"false"` 字符串）**告警并回落默认值**，不按 JS 真值性静默生效；根级与 `wire` / `tracing` / `contentGates` 层的未知 key（拼写错误）同样告警。告警见日志。
-
-行为要点：
-
-- `tracing.enabled: false` + `wire.enabled: true` = **wire-only 模式**：只落 JSONL，不订阅事件流，任何数据不离开本进程
-- 默认 endpoint 为 OTLP 标准端口 `http://localhost:4318`；Phoenix 用户需显式配置 `http://localhost:6006`
-- 不发送任何后端专属请求头；project 语义统一走 `openinference.project.name` resource 属性
-- `tracing.annotations.enabled: false` 可关闭 Phoenix 兼容后端专属的 session annotation（非 Phoenix 后端建议关闭，避免 404 重试噪音）
-- OTLP POST 与 session annotation 请求带 30s 超时，对端挂死不会卡住发送队列/插件卸载
-- `session.deleted` 事件触发该会话全部内存状态清理（长驻进程防泄漏）
-- 插件热重载后采集不中断
-
-## 功能：wire body 采集
-
-每次发往 LLM 的原始请求体（完整 system prompt + 裁剪后 messages + tools schema + 采样参数 + provider 专属 options）落盘成 JSONL。
-
-**默认关闭**。开启：创建 `~/.config/opencode/ocg-obs.json`：
-
-```json
-{
-  "wire": {
-    "enabled": true,
-    "maxFrameBytes": -1
+    "endpoint": "http://localhost:6006"
   }
 }
 ```
 
-`maxFrameBytes` 只限制**磁盘**上的 frame（span 路径始终拿全量帧，由 `contentGates.wireBody` + `contentMaxLength` 控制）：`-1` = 全量（默认），`0` = 只记元数据（不输出 frame 内容），`N > 0` = 前 N 字节（按 UTF-8 字符边界切割，尾部追加 `[TRUNCATED]` 标识）。
+**3. 重启 OpenCode。** 模型步与工具执行完毕后，Span 会实时推送至 `/v1/traces`。
 
-落盘位置：`~/.local/share/opencode/raw-requests/<sessionID>.jsonl`，每行一条记录：
+## 配置
+
+配置文件查找顺序：`OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `~/.config/opencode/ocg-obs.json`（支持 JSONC 注释与尾逗号）。所有字段均可选且经过严格类型校验（类型错误或未知字段会写日志告警并回退至默认值）：
+
+```jsonc
+{
+  "enabled": true,                        // 总开关（false 时 setup 直接空操作返回）
+  "tracing": {
+    "enabled": true,                      // false + wire.enabled = wire-only 模式（仅写本地 JSONL，零网络外发）
+    "endpoint": "http://localhost:4318",  // OTLP/HTTP 基础地址（4318 = 标准 OTLP；6006 = Phoenix）
+    "project": "opencode",                // 写入 openinference.project.name resource 属性
+    "headers": {},                        // 附加请求头（/v1/traces 与 /v1/session_annotations 共用）
+    "content": true,                      // 粗粒度隐私门：false 时 toolDetails 与 toolContent 默认关闭
+    "contentGates": {                     // 细粒度隐私门（均可单独覆盖 content）
+      "userPrompts": true,                //   轮根 Span 的 input.value（用户提问）
+      "assistantResponses": true,         //   轮根/chat output.value、gen_ai.output.messages、opencode.reasoning、compaction 摘要
+      "toolDetails": true,                //   gen_ai.tool.call.arguments 与工具 input.value
+      "toolContent": true,                //   gen_ai.tool.call.result 与工具 output.value
+      "wireBody": true                    //   将采集到的 wire 帧注入 chat Span input.value（需开启 wire.enabled）
+    },
+    "contentMaxLength": 0,                // 内容属性最大字符数（0 = 不截断；超长追加 [TRUNCATED] 并附 *_original_length）
+    "resourceAttributes": {},             // 并入 OTLP Resource 块（内置键优先，不被覆盖）
+    "annotations": { "enabled": true }    // 向 /v1/session_annotations 推送会话项目名与标题（Phoenix REST 扩展；
+                                          // 非 Phoenix 后端建议设为 false 以免产生 404 重试）
+  },
+  "wire": {
+    "enabled": false,                     // 将发往模型侧的原始请求体追加写入本地 JSONL
+    "maxFrameBytes": -1                   // 磁盘单帧字节上限：-1 = 全量，0 = 仅元数据，N > 0 = 前 N 字节
+  }
+}
+```
+
+### 环境变量
+
+标准 OpenTelemetry 环境变量优先于配置文件（**env > 配置文件 > 默认值**），便于团队或组织级统一注入：
+
+| 环境变量 | 映射字段 |
+|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（回退：`OTEL_EXPORTER_OTLP_ENDPOINT`） | `tracing.endpoint`（末尾的 `/v1/traces` 自动剥除） |
+| `OTEL_EXPORTER_OTLP_HEADERS` + `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `tracing.headers`（`k1=v1,k2=v2`，按 W3C Baggage 规范做 percent-decode；traces 专用优先） |
+| `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（`k1=v1,k2=v2`，支持 percent-decode） |
+
+## Wire 原始请求采集
+
+开启 `wire.enabled: true` 后，每次外发 LLM 请求体都会追加写入 `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`（文件权限 `0600`）：
 
 ```json
 {
@@ -104,32 +119,23 @@ OpenCode v2 plugin：GenAI-semconv OTLP tracing + LLM wire body 采集，输出�
   "agent": "build",
   "model": { "providerID": "example", "id": "example/model-x" },
   "kind": "primary",
-  "frame": "{\"model\":\"example/model-x\",\"messages\":[...],\"tools\":[...],\"temperature\":0.6,...}"
+  "frame": "{\"model\":\"example/model-x\",\"messages\":[...],\"tools\":[...],\"temperature\":0.6}"
 }
 ```
 
-- `hook`：从哪个 hook 拿到的（`ws.send` 是主路径，`http.request` 是兜底）
-- `kind`：`primary` | `compaction` | `title` | `generate`（opencode 自带的请求分类）
-- `frame`：完整 wire body（ws 是 frame 字符串，http 是 request body 文本；被 `maxFrameBytes` 截断时只留前 N 字节）
-- `seq`：进程级单调递增序号
-- `truncated` / `frameBytes`：被 `maxFrameBytes` 截断时出现；`frameBytes` 记录原始大小
+- `kind`：OpenCode 的请求分类（`primary` | `compaction` | `title` | `generate`）。仅 `primary` 帧会按 FIFO 被消费并注入 `chat` Span 的 `input.value`。
+- `wire.maxFrameBytes` 仅限制**磁盘 JSONL** 中的 `frame` 体积（Span 路径始终接收完整帧，由 `contentGates.wireBody` 与 `contentMaxLength` 独立控制）：
+  - `-1`（默认）：完整落盘
+  - `0`：仅记录元数据（`frame: ""`、`truncated: true`、`frameBytes: <原始字节数>`）
+  - `N > 0`：保留前 `N` 字节（按 UTF-8 字符边界安全回退切开，末尾追加 `[TRUNCATED]`，并记录 `truncated: true` 与 `frameBytes`）
 
-**隐私**：body 里有完整 system prompt + 历史 + tools。文件权限 0600，不入 git，不外传。不用了删文件即可。
+## 诊断与开发
 
-## 路线图
-
-见 [TODO.md](TODO.md)（英文，单一维护源）。
-
-## 开发
+- **插件日志**：`~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log`（保留 7 天，敏感凭据自动脱敏）。
+- **路线图**：[TODO.md](TODO.md)
 
 ```bash
 npm run build      # 编译 src/ → dist/
-npm run typecheck  # 类型检查
-npm test           # 编译并跑 node:test 测试套件（tests/ → dist-test/）
+npm run typecheck  # tsc --noEmit
+npm test           # 编译并运行 node:test 测试套件
 ```
-
-测试覆盖：span 状态机（确定性 id、内容门、malformed 事件守卫、session 清理）、
-OTLP 编码/POST（超时、非 200）、发送队列（重试、丢弃）、annotation 重试、
-wire 落盘/刷盘、配置校验、脱敏与日志（参考 oh-my-opencode-slim 的测试模式），
-插件公共合同（禁用不触 ctx、幂等 unload、reload 重建、hook 注销对称），
-以及依赖契约（运行时依赖闭包最小化 + src import 图不越界）。
