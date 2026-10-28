@@ -4,7 +4,7 @@
  * warn-log (tracing is the observability plane and never blocks the main path).
  */
 
-import { postSpans, type SpanRecord } from "./otlp.js"
+import { createTraceExporter, type SpanRecord } from "./otlp.js"
 
 export interface SenderOptions {
   readonly endpoint: string
@@ -19,7 +19,7 @@ export interface SenderOptions {
   readonly maxQueue?: number
   /** Base retry backoff in ms, default 1s */
   readonly retryDelayMs?: number
-  /** Per-POST timeout in ms (passed through to postSpans), default 30s */
+  /** Per-POST timeout in ms, default 30s */
   readonly timeoutMs?: number
 }
 
@@ -35,12 +35,15 @@ export interface Sender {
   readonly push: (span: SpanRecord) => void
   /** Wait for the queue to empty and stop the pump (called on plugin unload) */
   readonly drain: () => Promise<void>
+  /** Release the exporter (after drain) */
+  readonly close: () => Promise<void>
 }
 
 export function createSender(options: SenderOptions, log: (msg: string, data?: unknown) => void): Sender {
   const batchSize = options.batchSize ?? 32
   const maxQueue = options.maxQueue ?? 10_000
   const baseDelay = options.retryDelayMs ?? BASE_DELAY_MS
+  const exporter = createTraceExporter(options)
   const queue: Item[] = []
   let timer: ReturnType<typeof setTimeout> | undefined
   let pumping = false
@@ -61,7 +64,7 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
       while (queue.length > 0 && !disposed) {
         const batch = queue.slice(0, batchSize)
         try {
-          await postSpans(batch.map((item) => item.span), options.endpoint, options)
+          await exporter.exportBatch(batch.map((item) => item.span))
           queue.splice(0, batch.length)
         } catch (error) {
           for (const item of batch) item.attempts += 1
@@ -106,13 +109,16 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
       while (queue.length > 0) {
         const batch = queue.splice(0, batchSize)
         try {
-          await postSpans(batch.map((item) => item.span), options.endpoint, options)
+          await exporter.exportBatch(batch.map((item) => item.span))
         } catch {
           log("otlp drain flush failed, dropping remaining", { remaining: queue.length + batch.length })
           queue.length = 0
           break
         }
       }
+    },
+    async close() {
+      await exporter.close()
     },
   }
 }

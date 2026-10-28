@@ -1,9 +1,10 @@
 /**
  * Dependency-contract tests — pattern adapted from oh-my-opencode-slim src/dependency-contract.test.ts.
- * A core selling point of this project is the hand-rolled OTLP protobuf encoding with
- * zero heavyweight SDK dependencies; these tests lock that down: runtime dependencies
- * are jsonc-parser only, and the src/ import graph stays within bounds (node:* builtins,
- * relative paths, declared dependencies, and peer dependencies only).
+ * The OTLP protobuf encoding is delegated to the official @opentelemetry SDK; the runtime
+ * closure is pinned to the five @opentelemetry packages below (api/core/resources/
+ * sdk-trace-base/exporter-trace-otlp-proto) plus jsonc-parser, and the src/ import graph
+ * stays within bounds (node:* builtins, relative paths, declared dependencies, and peer
+ * dependencies only).
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -17,10 +18,17 @@ const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf-8")) a
   peerDependencies: Record<string, string>
 }
 
-test("minimal runtime dependency closure: dependencies are jsonc-parser only", () => {
+test("pinned runtime dependency closure", () => {
   assert.deepStrictEqual(
     Object.keys(manifest.dependencies).sort(),
-    ["jsonc-parser"],
+    [
+      "@opentelemetry/api",
+      "@opentelemetry/core",
+      "@opentelemetry/exporter-trace-otlp-proto",
+      "@opentelemetry/resources",
+      "@opentelemetry/sdk-trace-base",
+      "jsonc-parser",
+    ],
     "a new runtime dependency needs a README rationale and an update to this contract",
   )
 })

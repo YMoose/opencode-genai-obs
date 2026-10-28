@@ -1,11 +1,14 @@
 /**
- * otlp.ts encoder and POST tests:
- * - buildBody: builtin resource keys cannot be overridden by resourceAttributes
- * - postSpans: success / non-200 / timeout (Bug 2: no timeout would hang the pump and unload)
+ * otlp.ts tests (official OTLPTraceExporter-backed):
+ * - resource: builtin keys cannot be overridden by resourceAttributes; project rides
+ *   openinference.project.name on the resource (de-platforming: never a custom header)
+ * - exportBatch: success / failure (ExportResultCode.FAILED rejects for the retry queue)
+ * - Bug 2: a hung peer resolves by timeout instead of pending forever — the SDK swallows
+ *   failures into FAILED, so the sender's drain can never hang on a half-open backend
  */
 import test from "node:test"
 import assert from "node:assert/strict"
-import { buildBody, postSpans, type SpanRecord } from "../src/otlp.js"
+import { createTraceExporter, type SpanRecord } from "../src/otlp.js"
 import { startServer, type TestServer } from "./helpers.js"
 
 const span: SpanRecord = {
@@ -19,50 +22,68 @@ const span: SpanRecord = {
   status: { code: 1 },
 }
 
-test("buildBody: builtin resource keys win, custom attributes are merged in", () => {
-  const body = buildBody([span], {
-    project: "proj-x",
-    resourceAttributes: { "service.name": "evil-override", team: "core" },
-  })
-  assert.ok(body.includes(Buffer.from("opencode-genai-obs", "utf-8")), "the builtin service.name must be present")
-  assert.ok(!body.includes("evil-override"), "resourceAttributes must not override the builtin service.name")
-  assert.ok(body.includes(Buffer.from("proj-x", "utf-8")), "the project name must be present")
-  assert.ok(body.includes(Buffer.from("team", "utf-8")), "custom attribute keys must be present")
-})
-
-test("postSpans: success path sends the protobuf content type and no backend-specific headers", async (t) => {
+test("resource: builtin keys win, project + custom attributes land in the body", async (t) => {
   const server: TestServer = await startServer((_req, res) => {
     res.statusCode = 200
     res.end()
   })
   t.after(() => server.close())
-  await postSpans([span], server.url, { project: "p1", timeoutMs: 2_000 })
+  const exporter = createTraceExporter({
+    endpoint: server.url,
+    project: "proj-x",
+    resourceAttributes: { "service.name": "evil-override", "openinference.project.name": "evil-project", team: "core" },
+  })
+  await exporter.exportBatch([span])
+  await exporter.close()
+  assert.strictEqual(server.requests.length, 1)
+  const body = server.requests[0]!.body
+  assert.ok(body.includes("opencode-genai-obs"), "the builtin service.name must be present")
+  assert.ok(!body.includes("evil-override"), "resourceAttributes must not override the builtin service.name")
+  assert.ok(!body.includes("evil-project"), "resourceAttributes must not override the builtin project")
+  assert.ok(body.includes("proj-x"), "the project name must be present")
+  assert.ok(body.includes("team"), "custom attribute keys must be present")
+})
+
+test("exportBatch: success posts protobuf to /v1/traces with no backend-specific headers", async (t) => {
+  const server: TestServer = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+  const exporter = createTraceExporter({ endpoint: server.url, project: "p1" })
+  await exporter.exportBatch([span])
+  await exporter.close()
   assert.strictEqual(server.requests.length, 1)
   assert.strictEqual(server.requests[0]!.path, "/v1/traces")
   assert.strictEqual(server.requests[0]!.headers["content-type"], "application/x-protobuf")
   // De-platforming contract: the project semantic rides resource attributes only — no backend-specific headers like x-project-name
   assert.strictEqual(server.requests[0]!.headers["x-project-name"], undefined)
   assert.ok(server.requests[0]!.body.length > 0, "must send a protobuf body")
+  assert.ok(server.requests[0]!.body.includes("test span"), "the span must be in the body")
+  assert.ok(server.requests[0]!.body.includes("test.key"), "attributes must survive the adapter")
 })
 
-test("postSpans: non-200 throws (the caller owns retries)", async (t) => {
+test("exportBatch: non-200 rejects (the sender owns retries)", async (t) => {
   const server = await startServer((_req, res) => {
     res.statusCode = 500
     res.end("boom")
   })
   t.after(() => server.close())
-  await assert.rejects(postSpans([span], server.url, { timeoutMs: 2_000 }), /OTLP export failed: 500/)
+  const exporter = createTraceExporter({ endpoint: server.url, timeoutMs: 2_000 })
+  await assert.rejects(exporter.exportBatch([span]))
+  await exporter.close()
 })
 
-test("Bug 2: a hung peer aborts postSpans by timeout instead of pending forever", async (t) => {
+test("Bug 2: a hung peer resolves by timeout instead of pending forever", async (t) => {
   // accepts the request but never responds (simulates a half-open / SIGSTOPped backend)
   const server = await startServer(() => {})
   t.after(() => server.close())
+  const exporter = createTraceExporter({ endpoint: server.url, timeoutMs: 150 })
   const start = Date.now()
-  await assert.rejects(
-    postSpans([span], server.url, { timeoutMs: 150 }),
-    (error: Error) => /abort|timeout/i.test(error.name + error.message),
-  )
+  // The SDK resolves failures as ExportResultCode.FAILED (never throws) — either way the
+  // promise must settle promptly so the sender's drain cannot hang on unload
+  await exporter.exportBatch([span]).catch(() => {})
   const elapsed = Date.now() - start
-  assert.ok(elapsed < 3_000, `must reject promptly after the timeout (actual: ${elapsed}ms)`)
+  assert.ok(elapsed < 3_000, `must settle promptly after the timeout (actual: ${elapsed}ms)`)
+  await exporter.close()
 })

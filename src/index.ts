@@ -273,6 +273,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       await eventIterator.return?.()
       await spanBuilder.flushAll()
       await sender.drain()
+      await sender.close()
       await wire.dispose()
     },
     recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),

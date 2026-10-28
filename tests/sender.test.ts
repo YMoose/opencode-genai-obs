@@ -41,6 +41,7 @@ test("succeeds after two failures; the span is eventually delivered", async (t) 
   sender.push(makeSpan())
   await waitFor(() => server.requests.length >= 3, 5_000)
   await sender.drain()
+  await sender.close()
   assert.ok(server.requests[2]!.body.includes("span-1"), "the third request must carry that span")
 })
 
@@ -59,6 +60,7 @@ test("persistent peer failure: drain() finishes in bounded time and drops the re
   // drain makes a single flush attempt and drops the rest on failure — it must never hang
   const start = Date.now()
   await sender.drain()
+  await sender.close()
   assert.ok(Date.now() - start < 10_000, "drain must not hang")
   assert.ok(logs.some((line) => line.includes("dropping remaining")), "the drop must be logged")
 })
@@ -82,4 +84,5 @@ test("queue full drops the oldest span and logs it", async (t) => {
   await waitFor(() => server.requests.length >= 1, 5_000)
   assert.ok(logs.some((line) => line.includes("queue full") && line.includes("dropped oldest")), "the queue-full drop must be logged")
   await sender.drain()
+  await sender.close()
 })

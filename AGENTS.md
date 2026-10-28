@@ -6,8 +6,10 @@ Guidelines for agents working in this repository.
 
 opencode-genai-obs (`ocg-obs`): an OpenCode v2 plugin providing GenAI-semconv OTLP tracing
 (real-time lane) plus raw LLM wire-body capture, aligned with OTel GenAI semconv + OpenInference
-only — never bound to a specific observability platform. Runtime dependency closure is minimal
-(`jsonc-parser` only); zero new test dependencies (`node:test` + `node:assert`).
+only — never bound to a specific observability platform. The OTLP protobuf encoding is
+delegated to the official @opentelemetry SDK (pinned closure: api / core / resources /
+sdk-trace-base / exporter-trace-otlp-proto + jsonc-parser); zero new test dependencies
+(`node:test` + `node:assert`).
 
 ## Layout
 
@@ -18,7 +20,10 @@ only — never bound to a specific observability platform. Runtime dependency cl
 - `src/ids.ts` — the FROZEN deterministic-id contract (byte-identical to the internal
   offline replay lane; never change published formulas — tests/ids.test.ts pins exact
   outputs, and drift silently breaks offline-replay dedup)
-- `src/otlp.ts` — dependency-free OTLP/HTTP protobuf encoder
+- `src/otlp.ts` — OTLP/HTTP export via the official OTLPTraceExporter; adapts our
+  SpanRecord (deterministic ids) to ReadableSpan. The pipeline deliberately uses the
+  exporter alone (no BasicTracerProvider): the SDK IdGenerator takes no arguments and
+  cannot express the deterministic-id contract
 - `src/sender.ts` — send queue with retry/backoff and drain-on-dispose
 - `src/wire.ts` — wire-body JSONL capture (`experimental.ws.send` + `http.request` hooks)
 - `src/annotations.ts` — Phoenix-compatible session annotations (toggleable extension)
