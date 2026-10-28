@@ -1,5 +1,7 @@
 # opencode-genai-obs
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 
 OpenCode v2 plugin: GenAI-semconv OTLP tracing + LLM wire body capture, exporting to any OTLP/HTTP-compatible backend (OTel Collector / Phoenix / SigNoz / Jaeger …). It aligns with semantic conventions only (OTel GenAI semconv + OpenInference) and is not tied to any specific observability platform.
