@@ -647,6 +647,29 @@ test("Bug 13: duplicate step.ended delivery (opencode V2 multi-instance fan-out)
   assert.strictEqual(logEvents.filter((e) => e.event === "choice").length, 1, "duplicate step.ended must not emit a second choice event")
 })
 
+test("Bug 16: duplicate tool terminal delivery must not emit a degraded span, double the tool log, or inflate turn counts", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const { spans, builder } = makeHarness({ emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>) })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", name: "grep" }))
+  const success = event("session.tool.success", 1_200, { sessionID: "s1", id: "tc1", assistantMessageID: "a1", content: [{ type: "text", text: "hit" }] })
+  builder.handleEvent(success)
+  builder.handleEvent(success) // duplicate delivery of the same terminal event (V2 fan-out)
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }))
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s1" }))
+  await settle()
+
+  const toolSpans = spans.filter((s) => s.name.startsWith("execute_tool"))
+  assert.strictEqual(toolSpans.length, 1, "duplicate tool.success must not emit a second (degraded 'unknown') span")
+  assert.strictEqual(toolSpans[0].name, "execute_tool grep", "the surviving span keeps the recorded name, not the degraded fallback")
+  assert.strictEqual(logEvents.filter((e) => e.event === "tool").length, 1, "duplicate tool.success must not double the tool message log event (log record ids are SDK-generated — not backend-dedupable)")
+  const root = spans.find((s) => s.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "turn root flushed")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1], 2, "chat + one tool — the duplicate must not inflate the count")
+})
+
 test("text.ended: out-of-order ordinals are reassembled in ordinal order on the chat span", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))

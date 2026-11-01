@@ -219,9 +219,17 @@ export function createSpanBuilder(
    * step.ended/failed. opencode V2 may fan the same event out to multiple plugin
    * instances (see DEVtheOPS AGENTS.md) — without this, a duplicate step.ended would
    * re-emit the span and double-count metrics/logs (Bug 13). Nested by sessionID so
-   * session.deleted can purge it (the only registry that grows monotonically otherwise).
+   * session.deleted can purge it (terminal registries grow monotonically until purged).
    */
   const endedSteps = new Map<string, Set<string>>()
+  /**
+   * Terminal-tool registry: toolCallIds that already emitted their execute_tool span.
+   * The endedSteps twin (Bug 16): a redelivered tool.success/failed would emit a
+   * degraded second span (same deterministic id, name "unknown", zero duration) plus a
+   * non-dedupable log record (log record ids are SDK-generated). Nested by sessionID
+   * so session.deleted can purge it.
+   */
+  const endedTools = new Map<string, Set<string>>()
   /** Transient tool state: toolCallId → ToolState */
   const tools = new Map<string, ToolState>()
   /** Sub-agent attachment points: child sessionID → { toolSpanId, traceId, parentSid } */
@@ -258,6 +266,7 @@ export function createSpanBuilder(
     compactions.delete(sid)
     pendingRetries.delete(sid)
     endedSteps.delete(sid)
+    endedTools.delete(sid)
   }
 
   const isChild = (sid: string): boolean => {
@@ -534,6 +543,12 @@ export function createSpanBuilder(
       case "session.tool.failed": {
         const callId = typeof data.id === "string" ? data.id : ""
         if (!callId) return
+        // Idempotency (Bug 16): the bus is at-least-once — a redelivered terminal must be
+        // a no-op before any side effect (span, log event, spanCount, lastEndNano)
+        const seen = endedTools.get(sid) ?? new Set<string>()
+        if (seen.has(callId)) return
+        seen.add(callId)
+        endedTools.set(sid, seen)
         const tool = tools.get(callId)
         tools.delete(callId)
         const endNano = nano(event.created)
