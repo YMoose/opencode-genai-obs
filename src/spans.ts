@@ -144,10 +144,18 @@ interface StepState {
   /** text segments keyed by their protocol ordinal — reassembled in ordinal order, not arrival order */
   texts: Map<number, string>
   reasoning: string[]
+  /**
+   * Set when the execution round was interrupted mid-step: the step keeps its state
+   * (a late step.ended still emits its chat span) but must stop advertising propagation
+   * coordinates — its span id would otherwise be injected as a phantom traceparent
+   * under the NEXT turn's trace (Bug 19).
+   */
+  interrupted?: boolean
 }
 
 interface ToolState {
   readonly callId: string
+  readonly sessionID: string
   readonly assistantMessageID: string | undefined
   name?: string
   input?: Record<string, unknown>
@@ -255,6 +263,22 @@ export function createSpanBuilder(
   }
 
   /** session.deleted: flush any unfinished turn root, then drop all registry entries for the session (prevents unbounded growth) */
+  /**
+   * Round-over in-flight cleanup (Bug 19): tools can never attach after the round's
+   * flush (traceId lookup fails), so they are dropped. Steps are dropped on
+   * succeeded/failed (a step still in flight there is a missed terminal) but only
+   * MARKED on interrupted — the aborted step may still deliver a late step.ended,
+   * and that span must keep its real state instead of a degraded one.
+   */
+  const purgeInFlight = (sid: string, stepsAction: "purge" | "mark"): void => {
+    for (const [id, tool] of tools) if (tool.sessionID === sid) tools.delete(id)
+    if (stepsAction === "purge") {
+      for (const [id, step] of steps) if (step.sessionID === sid) steps.delete(id)
+    } else {
+      for (const step of steps.values()) if (step.sessionID === sid) step.interrupted = true
+    }
+  }
+
   const dropSession = (sid: string, nowNano: bigint): void => {
     void flushTurnRoot(sid, nowNano) // no-op when no turn is open
     openTurns.delete(sid)
@@ -267,6 +291,7 @@ export function createSpanBuilder(
     pendingRetries.delete(sid)
     endedSteps.delete(sid)
     endedTools.delete(sid)
+    purgeInFlight(sid, "purge")
   }
 
   const isChild = (sid: string): boolean => {
@@ -518,6 +543,7 @@ export function createSpanBuilder(
         if (!callId) return
         tools.set(callId, {
           callId,
+          sessionID: sid,
           assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
           name: data.name as string,
           startedNano: nano(event.created),
@@ -534,6 +560,7 @@ export function createSpanBuilder(
         } else {
           tools.set(callId, {
             callId,
+            sessionID: sid,
             assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
             input: data.input as Record<string, unknown>,
             startedNano: nano(event.created),
@@ -566,22 +593,23 @@ export function createSpanBuilder(
         return
       }
 
-      case "session.execution.succeeded": {
-        if (isChild(sid)) void flushContainer(sid, nano(event.created))
-        else void flushTurnRoot(sid, nano(event.created))
-        return
-      }
-
+      case "session.execution.succeeded":
       case "session.execution.failed": {
-        const error = data.error as { type?: string; message?: string } | undefined
+        const error = event.type === "session.execution.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
         if (isChild(sid)) void flushContainer(sid, nano(event.created), error)
         else void flushTurnRoot(sid, nano(event.created), error)
+        // Round over: tools can no longer attach anywhere (the turn/container is flushed),
+        // and a step still in flight at succeeded/failed is a missed terminal — purge both
+        purgeInFlight(sid, "purge")
         return
       }
 
       case "session.execution.interrupted": {
         if (isChild(sid)) void flushContainer(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "" })
         else void flushTurnRoot(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "" })
+        // The interrupted step stays answerable to a late step.ended (its chat span still
+        // emits), but its propagation coordinates die with the round (Bug 19)
+        purgeInFlight(sid, "mark")
         return
       }
 
@@ -937,6 +965,9 @@ export function createSpanBuilder(
       // (opencode serializes the step loop), so the first session match IS the active one
       for (const step of steps.values()) {
         if (step.sessionID !== sessionID) continue
+        // An interrupted round's leftover step must not advertise coordinates: its chat
+        // span id would be injected as a phantom traceparent under the next turn's trace
+        if (step.interrupted) continue
         const traceId = isChild(sessionID) ? childTrace(sessionID).traceId : openTurns.get(sessionID)?.traceId
         if (!traceId) return undefined
         return {

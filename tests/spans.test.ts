@@ -697,6 +697,28 @@ test("Bug 16: duplicate tool terminal delivery must not emit a degraded span, do
   assert.equal(root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1], 2, "chat + one tool — the duplicate must not inflate the count")
 })
 
+test("Bug 19: an interrupted step must not leak its propagation coordinates into the next turn", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.interrupted", 1_150, { sessionID: "s1", reason: "aborted" }))
+  assert.strictEqual(builder.activeChatContext("s1"), undefined, "no propagation coordinates right after the interrupt")
+
+  // next turn: the stale a1 step must not win the coordinates race (insertion order)
+  builder.handlePrompt("s1", "m2", "again")
+  builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  const ctx = builder.activeChatContext("s1")
+  assert.ok(ctx, "the new step advertises coordinates")
+  assert.strictEqual(ctx.spanId, hash("opencode-chat:a2", 8), "coordinates point at the new chat span, not the interrupted a1 (phantom traceparent)")
+  assert.strictEqual(ctx.traceId, hash("opencode-turn:s1:m2", 16), "under the new turn's trace")
+
+  // a late step.ended for the interrupted step still emits its chat span (no data loss)
+  builder.handleEvent(event("session.step.ended", 1_350, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }))
+  await settle()
+  assert.strictEqual(spans.filter((s) => s.spanId === hash("opencode-chat:a1", 8)).length, 1, "the interrupted step keeps its chat span on late step.ended")
+})
+
 test("text.ended: out-of-order ordinals are reassembled in ordinal order on the chat span", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
