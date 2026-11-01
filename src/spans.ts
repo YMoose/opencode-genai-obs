@@ -27,6 +27,8 @@
  * turn ids from sessionID × userMessageID; chat/tool ids from assistantMessageID ×
  * toolCallID; session ids from the child sessionID; compaction ids from sessionID ×
  * start timestamp. Exact outputs are pinned by tests/ids.test.ts.
+ *
+ * Standing semantic heuristics are labeled at their sites and indexed in TODO.md (AGENTS.md heuristic policy).
  */
 
 import { cutUtf8Bytes } from "./truncate.js"
@@ -174,7 +176,17 @@ interface ToolState {
 
 /** One open compaction run (session.compaction.started → ended/failed) */
 interface CompactionState {
-  /** started-event timestamp (ms) — deterministic discriminator of the run */
+  /**
+   * HEURISTIC(upstream-gap): invented run identity = the started event's ms
+   * timestamp (this key). Upstream gap: session.compaction.started/ended carry
+   * only {sessionID, reason} — ended never references its started, and no run id
+   * exists upstream, so this key is the only run discriminator. FROZEN: the key
+   * feeds the deterministic id formulas (opencode-compaction:<sid>:<created> /
+   * opencode-compaction-span:<sid>:<created>, ids.ts), so replacing it (e.g. with
+   * durable.seq) would change every future compaction span id — do not change
+   * without an explicit id-continuity decision. Migration: upstream adds a
+   * run/correlation id. Approved: user decision 2026-11-01.
+   */
   readonly key: string
   readonly reason: string
   readonly startedNano: bigint
@@ -288,6 +300,13 @@ export function createSpanBuilder(
    * succeeded/failed (a step still in flight there is a missed terminal) but only
    * MARKED on interrupted — the aborted step may still deliver a late step.ended,
    * and that span must keep its real state instead of a degraded one.
+   *
+   * HEURISTIC(upstream-gap): "an interrupted step may still deliver a late
+   * step.ended" is an UNVERIFIED guess about upstream delivery semantics, not a
+   * contract fact — the whole mark-not-delete design above rests on it. Risk
+   * profile: if the assumption is wrong the marking is harmless (the step simply
+   * never emits); if right it preserves real spans. Migration: confirm or refute
+   * from upstream source or a targeted probe. Approved: user decision 2026-11-01.
    */
   const purgeInFlight = (sid: string, stepsAction: "purge" | "mark"): void => {
     for (const [id, tool] of tools) if (tool.sessionID === sid) tools.delete(id)
@@ -483,8 +502,18 @@ export function createSpanBuilder(
             }
             openTurn(sid, pending.messageID, pending.text, event.created, data.agent as string | undefined)
           } else if (!openTurns.has(sid)) {
-            // No stashed prompt (synthetic request/command): fabricate a turn key from
-            // the event so spans have somewhere to attach
+            // HEURISTIC(upstream-gap): invented a turn root keyed `auto:<created>` plus
+            // a fabricated user message "(auto)" when a step.started arrives with no
+            // stashed prompt. Upstream gap: NO marker exists for "execution round
+            // opened without user input" — session.synthetic is a reserved event type
+            // that empirically NEVER fires in opencode 2.2.5 (live-probe verified
+            // 2026-11-01, /tmp/opencode/seq-probe.jsonl; even POSTing
+            // /api/session/{id}/synthetic only emits session.inbox.enqueued). Known
+            // leak: the "(auto)" pseudo-prompt flows into the logs lane as a
+            // gen_ai.user.message record (see TODO.md, Standing heuristics).
+            // Migration: upstream fires session.synthetic or documents a round-origin
+            // marker (opencode #47701 is the live thread for the lifecycle contract).
+            // Approved: user decision 2026-11-01.
             openTurn(sid, `auto:${event.created}`, "(auto)", event.created, data.agent as string | undefined)
           }
         }
@@ -712,6 +741,12 @@ export function createSpanBuilder(
     // part type. session.reasoning.ended carries no ordinal, so reasoning parts precede the
     // text parts — never a fabricated interleaving. Tool calls stay out of the parts array:
     // they are invisible at step level and already fully captured on execute_tool spans.
+    // HEURISTIC(upstream-gap): reasoning segments concatenate in ARRIVAL order (the
+    // reasoning: string[] on the step state, pushed at session.reasoning.ended) and we
+    // deliberately never fabricate an interleaving with the text parts. Upstream gap:
+    // text segments carry a protocol ordinal, reasoning events carry no ordinal/index
+    // at all — so the concatenation order has no contract guarantee. Migration:
+    // upstream adds an index to reasoning segments. Approved: user decision 2026-11-01.
     const outputParts = [
       ...reasoning.map((chunk) => ({ type: "reasoning", content: chunk })),
       ...texts.map((text) => ({ type: "text", content: text })),

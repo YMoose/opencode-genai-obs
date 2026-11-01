@@ -3,6 +3,20 @@
 Future directions, not commitments. Traces are the current focus — nothing here affects
 the tracing path.
 
+## Standing heuristics (labeled)
+
+Standing semantic heuristics approved per the AGENTS.md "Heuristic policy" (upstream
+contracts come first): each is labeled `HEURISTIC(upstream-gap)` where it lives in
+`src/spans.ts`. These are governing records, not roadmap items — a heuristic is retired
+only when its migration condition is met (and the compaction one is id-frozen, see below).
+
+| Site (path:line) | Invented semantics | Upstream gap | Upstream issue | Migration condition | Approved |
+| --- | --- | --- | --- | --- | --- |
+| `src/spans.ts:180` | Compaction run identity = the started event's ms timestamp (`CompactionState.key`) | `session.compaction.started/ended` carry only {sessionID, reason}; ended never references its started; no run id exists. Key is FROZEN — it feeds the `opencode-compaction:<sid>:<created>` id formulas, so changing it changes all future span ids | — | Upstream adds a run/correlation id (any key change before that needs an explicit id-continuity decision) | user decision 2026-11-01 |
+| `src/spans.ts:505` | Turn root keyed `auto:<created>` + fabricated user message "(auto)" when `step.started` arrives with no stashed prompt; known leak: "(auto)" flows into the logs lane as a `gen_ai.user.message` record | No marker for "execution round opened without user input"; `session.synthetic` is reserved but empirically NEVER fires in opencode 2.2.5 (live-probe 2026-11-01, `/tmp/opencode/seq-probe.jsonl`; POSTing `/api/session/{id}/synthetic` only emits `session.inbox.enqueued`) | [#47701](https://github.com/anomalyco/opencode/issues/47701) | Upstream fires `session.synthetic` or documents a round-origin marker | user decision 2026-11-01 |
+| `src/spans.ts:304` | "An interrupted step may still deliver a late `step.ended`" — unverified delivery-semantics assumption; the mark-not-delete design (`interrupted` flag) rests on it. If wrong: harmless (step never emits); if right: preserves real spans | No documented delivery contract for step terminals after `session.execution.interrupted` | — | Confirm or refute from upstream source or a targeted probe | user decision 2026-11-01 |
+| `src/spans.ts:744` | Reasoning segments concatenate in ARRIVAL order; never a fabricated interleaving with text parts | Text segments carry a protocol ordinal; reasoning events carry no ordinal/index — concatenation order has no contract guarantee | — | Upstream adds an index to reasoning segments | user decision 2026-11-01 |
+
 ## Offline session replay lane (promised, not yet implemented)
 
 `src/ids.ts` declares a FROZEN deterministic-id contract whose counterpart is "an
