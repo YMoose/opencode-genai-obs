@@ -22,6 +22,8 @@ const PENDING_CAP = 8
 // Handle cap for long-lived processes: past the cap close the oldest stream (reopened
 // in append mode on that session's next write — no data lost)
 const MAX_OPEN_STREAMS = 64
+// A body read that never settles (half-open stream) must not stall every later frame
+const READ_TIMEOUT_MS = 10_000
 
 export interface WireRecorder {
   /** Handle a ws.send event (frame: string) */
@@ -81,6 +83,24 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   /** One append stream per session (cached by file name), plus a process-wide seq counter */
   const streams = new Map<string, WriteStream>()
   let seq = 0
+
+  /**
+   * Single-writer chain for http bodies (Bug 18): reads resolve in completion order, but
+   * stash/FIFO/JSONL must follow hook (seq) order — serialize the continuations so seq
+   * order = stash order = line order, and consumePending stays FIFO of issue order even
+   * when a body resolves late. Every link swallows its own errors, so the chain never
+   * rejects; a read that never settles is raced with a timeout and dropped instead.
+   */
+  let readChain: Promise<void> = Promise.resolve()
+
+  const withTimeout = (promise: Promise<string>): Promise<string | "timeout"> =>
+    Promise.race([
+      promise,
+      new Promise<"timeout">((resolve) => {
+        const timer = setTimeout(() => resolve("timeout"), READ_TIMEOUT_MS)
+        timer.unref()
+      }),
+    ])
 
   const streamFor = (sessionID: string): WriteStream => {
     let stream = streams.get(sessionID)
@@ -164,9 +184,15 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
         log(`http.request clone failed (${error}); frame skipped`)
         return
       }
-      cloned
-        .text()
+      // Queue behind earlier reads (single writer, Bug 18): completion order must not
+      // become stash/line order
+      readChain = readChain
+        .then(() => withTimeout(cloned.text()))
         .then((body) => {
+          if (body === "timeout") {
+            log("http.request body read timed out; frame dropped", { sessionID: event.sessionID, seq: recordSeq })
+            return
+          }
           stash(event.sessionID, event.kind, body, recordSeq)
           write({
             v: 1,
@@ -193,15 +219,18 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
       return frame ?? undefined
     },
 
-    dispose() {
+    async dispose() {
+      // In-flight reads must land before the streams close (a write after the clear
+      // would reopen a stream nobody ends — truncated last line, the Bug 8 class)
+      await readChain
       const closing = [...streams.values()]
       streams.clear()
       pending.clear()
       if (closing.length === 0) return
       // Wait for real flush of every stream (process exit could otherwise truncate the last JSONL line)
-      return Promise.all(
+      await Promise.all(
         closing.map((stream) => new Promise<void>((resolve) => stream.end(() => resolve()))),
-      ).then(() => undefined)
+      )
     },
   }
 }

@@ -162,3 +162,44 @@ test("Bug 15: an http.request body that cannot be cloned is skipped, never throw
   assert.ok(logs.some((msg) => msg.includes("clone failed")), "the skipped frame warns")
   recorder.dispose()
 })
+
+test("Bug 18: http.request frames land in seq order even when body reads complete out of order", async () => {
+  const dir = tempDir("ocg-wire-seq-")
+  const recorder = createWireRecorder({ enabled: true, directory: dir, maxFrameBytes: -1 }, () => {})
+  const deferred = () => {
+    let resolve!: (body: string) => void
+    const promise = new Promise<string>((r) => { resolve = r })
+    return { promise, resolve }
+  }
+  const httpEvent = (request: unknown) =>
+    ({ ...hookEvent("s1", ""), request: request as Request }) as never
+
+  // request 1: body resolves LATE; request 2: body resolves immediately
+  const first = deferred()
+  recorder.recordHttpRequest(httpEvent({ clone: () => ({ text: () => first.promise }) }))
+  recorder.recordHttpRequest(httpEvent({ clone: () => ({ text: () => Promise.resolve("BBBB-frame") }) }))
+  await new Promise((r) => setTimeout(r, 25))
+  assert.strictEqual(recorder.consumePending("s1"), undefined, "frame 2 must not overtake frame 1 while frame 1 is still in flight (seq = issue order)")
+
+  first.resolve("AAAA-frame")
+  await new Promise((r) => setTimeout(r, 25))
+  assert.strictEqual(recorder.consumePending("s1")?.frame, "AAAA-frame", "FIFO follows issue order, not completion order")
+  assert.strictEqual(recorder.consumePending("s1")?.frame, "BBBB-frame")
+
+  // dispose must let an in-flight read land before the streams close
+  const third = deferred()
+  recorder.recordHttpRequest(httpEvent({ clone: () => ({ text: () => third.promise }) }))
+  const disposed = recorder.dispose()
+  third.resolve("CCCC-frame")
+  await disposed
+  const lines = readFileSync(join(dir, "s1.jsonl"), "utf-8").trim().split("\n")
+  assert.deepEqual(
+    lines.map((line) => ({ seq: JSON.parse(line).seq, frame: JSON.parse(line).frame })),
+    [
+      { seq: 1, frame: "AAAA-frame" },
+      { seq: 2, frame: "BBBB-frame" },
+      { seq: 3, frame: "CCCC-frame" },
+    ],
+    "JSONL lines land in seq order and the in-flight frame flushes before dispose resolves",
+  )
+})
