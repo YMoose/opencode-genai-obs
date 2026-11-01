@@ -233,14 +233,19 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       while (!stopped) {
         const next = await eventIterator.next()
         if (next.done) break
-        const event = next.value as { type?: string; created?: number; data?: Record<string, unknown> }
+        const event = next.value as { type?: string; created?: number; data?: Record<string, unknown>; durable?: { seq?: unknown } }
         try {
           if (typeof event.type === "string" && event.type.startsWith("session.")) {
             const data = event.data ?? {}
+            // durable.seq = per-aggregate durable-log position, carried by every
+            // state-transition session.* event in the @opencode/client envelope;
+            // ephemeral events lack it — the typeof guard keeps the no-seq fallback explicit (Bug 23)
+            const seq = event.durable?.seq
             spanBuilder.handleEvent({
               type: event.type,
               created: event.created ?? Date.now(),
               data,
+              seq: typeof seq === "number" ? seq : undefined,
             })
             if (
               (event.type === "session.created" || event.type === "session.renamed") &&

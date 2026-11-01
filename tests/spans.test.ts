@@ -41,7 +41,8 @@ function makeHarness(overrides?: Partial<SpanBuilderOptions>): Harness {
 /** Wait for async flushes (the void flushTurnRoot of execution.* / session.deleted) to land */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25))
 
-const event = (type: string, created: number, data: Record<string, unknown>) => ({ type, created, data })
+/** `seq` mirrors the envelope's durable.seq (state-transition events only); omit it for ephemeral/no-seq variants */
+const event = (type: string, created: number, data: Record<string, unknown>, seq?: number) => ({ type, created, data, seq })
 
 test("happy path: turn root + chat span; deterministic ids match the hash formulas", async () => {
   const { spans, builder } = makeHarness()
@@ -717,6 +718,65 @@ test("Bug 19: an interrupted step must not leak its propagation coordinates into
   builder.handleEvent(event("session.step.ended", 1_350, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }))
   await settle()
   assert.strictEqual(spans.filter((s) => s.spanId === hash("opencode-chat:a1", 8)).length, 1, "the interrupted step keeps its chat span on late step.ended")
+})
+
+test("Bug 23: a late terminal from a superseded round (durable.seq below the open round) must not flush the current turn", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }, 0))
+  builder.handlePrompt("s1", "m1", "hello")
+  // round 1 opens turn m1
+  builder.handleEvent(event("session.execution.started", 1_050, { sessionID: "s1" }, 2))
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }, 5))
+  // round 1's terminal is missed/delayed; the user takes over with a new prompt
+  builder.handlePrompt("s1", "m2", "again")
+  // round 2 opens turn m2 (takeover flush of m1's turn — existing behavior)
+  builder.handleEvent(event("session.execution.started", 1_500, { sessionID: "s1" }, 14))
+  builder.handleEvent(event("session.step.started", 1_600, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }, 16))
+  // round 1's terminal arrives NOW (late delivery): its seq (12) predates round 2's
+  // opening events, so it belongs to a superseded round — it must not flush m2's
+  // turn nor purge round 2's in-flight step
+  builder.handleEvent(event("session.execution.succeeded", 1_200, { sessionID: "s1" }, 12))
+  builder.handleEvent(
+    event("session.step.ended", 2_000, { sessionID: "s1", assistantMessageID: "a2", tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } } }, 20),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 2_100, { sessionID: "s1" }, 21))
+  await settle()
+
+  const chat = spans.find((s) => s.spanId === hash("opencode-chat:a2", 8))
+  assert.ok(chat, "the current round's chat span must survive the stale terminal (used to be dropped after the wrongful flush purged the turn)")
+
+  const root = spans.find((s) => s.spanId === hash("opencode-turn-span:s1:m2", 8))
+  assert.ok(root, "the current turn root must be emitted")
+  assert.strictEqual(root.status.code, 1, "the turn must close OK under its own round's terminal, not be flushed early by the stale one")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1], 1, "the chat span must count on the turn root")
+  assert.strictEqual(root.endTimeUnixNano, 2_100_000_000n, "the turn must end at round 2's terminal (2_100ms), not at the stale terminal's degraded early flush")
+})
+
+test("Bug 23 fallback: without durable.seq a late terminal still flushes the new turn early (pre-Bug-23 behavior)", async () => {
+  // Fallback = pre-Bug-23 behavior: when the envelope carries no durable.seq
+  // (ephemeral variants, older hosts) the upstream contract offers no round
+  // discriminator, so the stale terminal wins: the new turn is flushed early and
+  // its chat span is lost. Pins the degrade path — must pass before AND after the fix.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.execution.started", 1_050, { sessionID: "s1" }))
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handlePrompt("s1", "m2", "again")
+  builder.handleEvent(event("session.execution.started", 1_500, { sessionID: "s1" }))
+  builder.handleEvent(event("session.step.started", 1_600, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.succeeded", 1_200, { sessionID: "s1" })) // late old-round terminal, no seq
+  builder.handleEvent(
+    event("session.step.ended", 2_000, { sessionID: "s1", assistantMessageID: "a2", tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } } }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 2_100, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((s) => s.spanId === hash("opencode-turn-span:s1:m2", 8))
+  assert.ok(root, "the turn root is still emitted (early, by the stale terminal)")
+  assert.strictEqual(root.status.code, 1, "a late succeeded carries no error object — the early flush closes OK, merely degraded")
+  assert.strictEqual(root.endTimeUnixNano, 1_600_000_000n, "degraded end time: the stale flush predates the turn's own lastEndNano")
+  assert.ok(!spans.some((s) => s.spanId === hash("opencode-chat:a2", 8)), "the new round's chat span is dropped — no seq, no discriminator (documented data loss)")
 })
 
 test("text.ended: out-of-order ordinals are reassembled in ordinal order on the chat span", async () => {

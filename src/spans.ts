@@ -113,6 +113,14 @@ interface EventBase {
   readonly type: string
   readonly created: number // epoch ms
   readonly data?: Record<string, unknown>
+  /**
+   * Durable-log position of this event within its aggregate (the envelope's
+   * durable.seq): present on every state-transition session.* event, absent on
+   * ephemeral ones (text.delta, usage.updated, tool.progress). It is a log
+   * position, not a delivery order — round discrimination via seq comparison
+   * stays correct under late/out-of-order delivery (Bug 23).
+   */
+  readonly seq?: number
 }
 
 interface SessionInfoLite {
@@ -128,6 +136,8 @@ interface TurnState {
   readonly spanId: string
   readonly startedNano: bigint
   readonly inputText: string
+  /** Durable high-water at turn open — the round identity this turn belongs to (Bug 23) */
+  readonly roundSeq?: number
   index: number
   agent?: string
   lastAnswer?: string
@@ -242,14 +252,23 @@ export function createSpanBuilder(
   const tools = new Map<string, ToolState>()
   /** Sub-agent attachment points: child sessionID → { toolSpanId, traceId, parentSid } */
   const links = new Map<string, { toolSpanId: string; traceId: string; parentSid: string }>()
-  /** Container-span bookkeeping per sub-agent session (emitted only at close) */
-  const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint }>()
+  /** Container-span bookkeeping per sub-agent session (emitted only at close); roundSeq = durable high-water at creation (Bug 23) */
+  const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint; roundSeq?: number }>()
   /** Turn counters per root session */
   const turnCounters = new Map<string, number>()
   /** Open compaction runs per session */
   const compactions = new Map<string, CompactionState>()
   /** Retry stamps per session: applied to the next chat span (step.failed emits before retry.scheduled arrives) */
   const pendingRetries = new Map<string, { attempt: number; error?: { type?: string; message?: string } }>()
+  /**
+   * Per-session durable high-water (Bug 23): the newest durable.seq seen for the
+   * aggregate. Turns/containers capture it at creation as their round identity; a
+   * terminal below it belongs to a superseded round. Tracking the high-water (not
+   * just the last execution.started's seq) subsumes started-tracking AND survives
+   * a missed execution.started (subscribe gap) — the turn-opening event's own seq
+   * is already included.
+   */
+  const seqHighWater = new Map<string, number>()
 
   const registerSession = (sid: string, info: SessionInfoLite): void => {
     sessions.set(sid, info)
@@ -291,6 +310,7 @@ export function createSpanBuilder(
     pendingRetries.delete(sid)
     endedSteps.delete(sid)
     endedTools.delete(sid)
+    seqHighWater.delete(sid)
     purgeInFlight(sid, "purge")
   }
 
@@ -317,7 +337,7 @@ export function createSpanBuilder(
   const ensureContainer = (sid: string, nowNano: bigint) => {
     let c = containers.get(sid)
     if (!c) {
-      c = { startedNano: nowNano, lastEndNano: nowNano }
+      c = { startedNano: nowNano, lastEndNano: nowNano, roundSeq: seqHighWater.get(sid) }
       containers.set(sid, c)
     }
     return c
@@ -382,6 +402,7 @@ export function createSpanBuilder(
       spanId,
       startedNano: nano(nowMs),
       inputText: text,
+      roundSeq: seqHighWater.get(sid),
       index,
       agent,
       lastEndNano: nano(nowMs),
@@ -393,10 +414,33 @@ export function createSpanBuilder(
 
   // ------------------------------------------------------------------ events
 
+  /**
+   * Bug 23 guard: a terminal whose durable.seq predates the open turn's (root
+   * sessions) / open container's (sub-agent sessions) round is a superseded
+   * round's late delivery — it must not flush the current round's state. A
+   * same-round terminal always carries a higher seq than the opening event (the
+   * durable log is strictly monotonic per aggregate and the terminal is the
+   * round's last entry), so a legitimate terminal is never masked. Comparing log
+   * positions makes the decision independent of delivery order.
+   *
+   * Graceful degradation: when either side lacks a seq (ephemeral envelope
+   * variants, older hosts) the guard is inactive and the pre-Bug-23 behavior
+   * applies — durable.seq IS the upstream round-discrimination mechanism, so
+   * this fallback is mechanism-aligned, not a semantic heuristic.
+   */
+  const staleTerminal = (sid: string, seq: number | undefined): boolean => {
+    if (seq === undefined) return false
+    const roundSeq = openTurns.get(sid)?.roundSeq ?? containers.get(sid)?.roundSeq
+    return roundSeq !== undefined && seq < roundSeq
+  }
+
   const handleEvent = (event: EventBase) => {
     const data = (event.data ?? {}) as Record<string, unknown>
     const sid = data.sessionID as string | undefined
     if (!sid) return
+    // High-water first, before the switch: the turn/container opened by this very
+    // event must capture a high-water that already includes the event's own seq
+    if (event.seq !== undefined) seqHighWater.set(sid, Math.max(seqHighWater.get(sid) ?? event.seq, event.seq))
 
     switch (event.type) {
       case "session.created": {
@@ -595,6 +639,12 @@ export function createSpanBuilder(
 
       case "session.execution.succeeded":
       case "session.execution.failed": {
+        // Superseded round's late terminal (Bug 23): no flush, no purge, no state
+        // mutation — the current round keeps its turn/container and in-flight steps
+        if (staleTerminal(sid, event.seq)) {
+          log("stale round terminal ignored", { sessionID: sid, type: event.type, seq: event.seq })
+          return
+        }
         const error = event.type === "session.execution.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
         if (isChild(sid)) void flushContainer(sid, nano(event.created), error)
         else void flushTurnRoot(sid, nano(event.created), error)
@@ -605,6 +655,11 @@ export function createSpanBuilder(
       }
 
       case "session.execution.interrupted": {
+        // Superseded round's late terminal (Bug 23): same early return as above
+        if (staleTerminal(sid, event.seq)) {
+          log("stale round terminal ignored", { sessionID: sid, type: event.type, seq: event.seq })
+          return
+        }
         if (isChild(sid)) void flushContainer(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "" })
         else void flushTurnRoot(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "" })
         // The interrupted step stays answerable to a late step.ended (its chat span still
