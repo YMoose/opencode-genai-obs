@@ -607,10 +607,19 @@ export function createSpanBuilder(
     const outputText = texts.length ? texts.join("\n\n") : undefined
     const wireTrunc = options.gates.wireBody && wire ? truncate(wire.frame, limit) : undefined
     const outputTrunc = options.gates.assistantResponses && outputText ? truncate(outputText, limit) : undefined
+    // gen_ai.output.messages follows the semconv ChatMessage schema: reasoning is a standard
+    // part type. session.reasoning.ended carries no ordinal, so reasoning parts precede the
+    // text parts — never a fabricated interleaving. Tool calls stay out of the parts array:
+    // they are invisible at step level and already fully captured on execute_tool spans.
+    const outputParts = [
+      ...reasoning.map((chunk) => ({ type: "reasoning", content: chunk })),
+      ...texts.map((text) => ({ type: "text", content: text })),
+    ]
     const outputMessages =
-      options.gates.assistantResponses && texts.length
-        ? truncate(JSON.stringify([{ role: "assistant", parts: texts.map((t) => ({ type: "text", content: t })) }]), limit).value
+      options.gates.assistantResponses && outputParts.length
+        ? truncate(JSON.stringify([{ role: "assistant", parts: outputParts }]), limit).value
         : undefined
+    // flat mirror of the reasoning parts — one searchable string for attribute-table UIs
     const reasoningText =
       options.gates.assistantResponses && reasoning.length ? truncate(reasoning.join("\n\n"), limit).value : undefined
 

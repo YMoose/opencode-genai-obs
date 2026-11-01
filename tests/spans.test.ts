@@ -429,6 +429,50 @@ test("contentMaxLength is a byte budget: CJK content cuts at the character bound
   assert.equal(root.attributes.find(([key]) => key === "input.value_original_length")?.[1], 30, "original_length is in bytes, not chars")
 })
 
+test("chat span emits reasoning as standard gen_ai.output.messages parts (semconv ChatMessage schema)", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.reasoning.ended", 1_120, { sessionID: "s1", assistantMessageID: "a1", text: "thinking hard" }))
+  builder.handleEvent(event("session.reasoning.ended", 1_130, { sessionID: "s1", assistantMessageID: "a1", text: "still thinking" }))
+  builder.handleEvent(event("session.text.ended", 1_140, { sessionID: "s1", assistantMessageID: "a1", ordinal: 0, text: "the answer" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 2, reasoning: 1, cache: { read: 0, write: 0 } } }))
+
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat, "chat span emitted")
+  const raw = chat!.attributes.find(([key]) => key === "gen_ai.output.messages")?.[1]
+  assert.ok(typeof raw === "string", "output messages recorded")
+  // reasoning.ended carries no ordinal, so reasoning parts precede text parts — never a fabricated interleaving
+  assert.deepEqual(JSON.parse(raw as string), [
+    {
+      role: "assistant",
+      parts: [
+        { type: "reasoning", content: "thinking hard" },
+        { type: "reasoning", content: "still thinking" },
+        { type: "text", content: "the answer" },
+      ],
+    },
+  ])
+  // the flat mirror stays for attribute-table UIs
+  assert.equal(chat!.attributes.find(([key]) => key === "opencode.reasoning")?.[1], "thinking hard\n\nstill thinking")
+})
+
+test("a reasoning-only step still records gen_ai.output.messages (thinking is model output)", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.reasoning.ended", 1_120, { sessionID: "s1", assistantMessageID: "a1", text: "deciding which tool to call" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 3, cache: { read: 0, write: 0 } } }))
+
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat, "chat span emitted")
+  const raw = chat!.attributes.find(([key]) => key === "gen_ai.output.messages")?.[1]
+  assert.ok(typeof raw === "string", "reasoning alone is output — messages must still be recorded")
+  assert.deepEqual(JSON.parse(raw as string), [{ role: "assistant", parts: [{ type: "reasoning", content: "deciding which tool to call" }] }])
+})
+
 test("propagation: activeChatContext exposes the deterministic chat span coordinates while a step is in flight", async () => {
   const { builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))

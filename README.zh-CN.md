@@ -42,7 +42,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 | Span | `gen_ai.operation.name` | 内容 |
 |---|---|---|
 | 轮根（用户提问预览） | `invoke_agent` | 用户输入预览、最终回答、会话标题/目录、token 与消息总数、成本 |
-| `chat <model>` | `chat` | 厂商/模型、输入/输出/推理/缓存 token、成本、输出消息、wire 帧 `input.value` |
+| `chat <model>` | `chat` | 厂商/模型、输入/输出/推理/缓存 token、成本、输出消息（text + reasoning parts）、wire 帧 `input.value` |
 | `execute_tool <name>` | `execute_tool` | 工具名/调用 ID、参数、结果、耗时、子代理挂载 |
 | `invoke_agent <agent>` | `invoke_agent` | 子会话容器 span，直接挂在父级工具 span 下 |
 | `compaction` | —（独立 trace） | 模型、token、成本、摘要、触发原因 |

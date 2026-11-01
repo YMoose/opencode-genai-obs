@@ -42,9 +42,9 @@ Citations are `path:line` pointers.
 |---|---|---|---|---|
 | `<40-char prompt preview>` (fall back to session title, then the turn's `userMessageID`, then `"(empty)"`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`spans.ts:294`) |
 | `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`spans.ts:577`) |
-| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`spans.ts:711`) |
-| `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`spans.ts:865`) |
-| `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`spans.ts:811`) |
+| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`spans.ts:720`) |
+| `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`spans.ts:874`) |
+| `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`spans.ts:820`) |
 
 Span status: every span closes `code 1` (unset/ok) on success and `code 2` (error) on
 failure, with `status.message = "<error.type>: <error.message>"` from the triggering
@@ -98,9 +98,9 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `gen_ai.usage.reasoning.output_tokens` | `tokens.reasoning` | |
 | `gen_ai.usage.cache_read.input_tokens` | `tokens.cache.read` | |
 | `gen_ai.usage.cache_write.input_tokens` | `tokens.cache.write` | |
-| `gen_ai.output.messages` | `[{role:'assistant', parts:[{type:'text', content}]}]` JSON | **Gate: `assistantResponses`** |
+| `gen_ai.output.messages` | `[{role:'assistant', parts:[{type:'reasoning', content}…, {type:'text', content}…]}]` JSON | **Gate: `assistantResponses`**; reasoning parts precede text (`reasoning.ended` has no ordinal — no fabricated interleaving); tool calls stay on `execute_tool` spans, never `tool_call` parts |
 | `opencode.cost.usd` | `data.cost` | USD per step |
-| `opencode.reasoning` | concatenated reasoning chunks | **Gate: `assistantResponses`** |
+| `opencode.reasoning` | concatenated reasoning chunks | **Gate: `assistantResponses`**; flat mirror of the reasoning parts for attribute-table UIs |
 | `openinference.span.kind` | `"LLM"` | |
 | `llm.model_name` | `step.model.id` | mirror |
 | `llm.token_count.prompt` | `input_tokens` above | mirror |
@@ -119,7 +119,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
 | `opencode.wire.seq` | `wire.seq` of the consumed frame | correlation back to the on-disk JSONL |
 
-### 3.3 Tool call (`execute_tool <name>`) — `spans.ts:711`
+### 3.3 Tool call (`execute_tool <name>`) — `spans.ts:720`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -137,7 +137,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `output.value` | same as `gen_ai.tool.call.result` | |
 | `output.value_original_length` | truncation marker | |
 
-### 3.4 Sub-agent container (`invoke_agent <agent>`) — `spans.ts:865`
+### 3.4 Sub-agent container (`invoke_agent <agent>`) — `spans.ts:874`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -151,9 +151,9 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `openinference.span.kind` | `"AGENT"` | |
 
 The container's parent is the `execute_tool {subagent,task}` span that registered the attachment
-(`spans.ts:745`); the child session's own `chat` / `execute_tool` spans hang under this container.
+(`spans.ts:754`); the child session's own `chat` / `execute_tool` spans hang under this container.
 
-### 3.5 Compaction — `spans.ts:811`
+### 3.5 Compaction — `spans.ts:820`
 
 | Attribute | Source | Notes |
 |---|---|---|

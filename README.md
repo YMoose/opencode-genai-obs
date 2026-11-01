@@ -42,7 +42,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 | Span | `gen_ai.operation.name` | Contents |
 |---|---|---|
 | Turn root | `invoke_agent` | User prompt preview, final answer, session title/directory, token & message totals, cost |
-| `chat <model>` | `chat` | Provider/model, input/output/reasoning/cache token counts, cost, output messages, wire-body `input.value` |
+| `chat <model>` | `chat` | Provider/model, input/output/reasoning/cache token counts, cost, output messages (text + reasoning parts), wire-body `input.value` |
 | `execute_tool <name>` | `execute_tool` | Tool name/call id, arguments, result, duration, sub-agent attachment |
 | `invoke_agent <agent>` | `invoke_agent` | Child-session container span, linked under the parent tool span |
 | `compaction` | — (standalone trace) | Model, tokens, cost, summary, reason |
