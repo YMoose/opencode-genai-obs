@@ -461,8 +461,11 @@ export function createSpanBuilder(
         }
         const previous = compactions.get(sid)
         compactions.set(sid, state)
-        // Unterminated predecessor (started without ended/failed): flush it bare so the span is not lost
-        if (previous) emitCompactionSpan(sid, previous, {}, nano(event.created), false)
+        // Unterminated predecessor (started without ended/failed): flush it bare so the span is not lost.
+        // A redelivered started is NOT a predecessor — same created timestamp → same run key; a bare
+        // flush would emit a premature span with the same deterministic id, and first-write-wins
+        // backends would keep the bare one (Bug 17)
+        if (previous && previous.key !== state.key) emitCompactionSpan(sid, previous, {}, nano(event.created), false)
         return
       }
 

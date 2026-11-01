@@ -263,6 +263,33 @@ test("compaction: started→ended becomes its own trace with model/usage/cost/su
   assert.equal(compaction.status.code, 1)
 })
 
+test("Bug 17: duplicate compaction.started delivery must not shadow the real span with a bare flush", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  const started = event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" })
+  builder.handleEvent(started)
+  builder.handleEvent(started) // duplicate delivery: same created timestamp → same run key
+  builder.handleEvent(
+    event("session.compaction.ended", 3_000, {
+      sessionID: "s1",
+      reason: "auto",
+      model: { id: "model-x", providerID: "example" },
+      native: false,
+      text: "summary of the conversation",
+      cost: 0.02,
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 10, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const compactions = spans.filter((span) => span.name === "compaction")
+  assert.strictEqual(compactions.length, 1, "a redelivered started must not flush a premature bare span (identical spanId — first write wins on DO_NOTHING backends)")
+  assert.equal(compactions[0].attributes.find(([key]) => key === "gen_ai.request.model")?.[1], "model-x", "the surviving span keeps the real run data")
+})
+
 test("compaction failed: status=2 with the error message", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
