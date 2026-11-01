@@ -58,3 +58,8 @@ test("collectProbeTargets: signals sharing an endpoint probe once; distinct endp
     { label: "logs", endpoint: "http://collector:4318" },
   ])
 })
+
+test("Bug 22: IPv6 literal endpoints probe the bare address (URL keeps the brackets)", () => {
+  assert.deepStrictEqual(parseEndpoint("http://[::1]:4318/"), { host: "::1", port: 4318 })
+  assert.deepStrictEqual(parseEndpoint("https://[2001:db8::1]"), { host: "2001:db8::1", port: 443 })
+})

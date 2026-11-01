@@ -129,7 +129,7 @@ export interface MetricsConfig {
   readonly intervalMs: number
   /** Metrics endpoint override; defaults to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint */
   readonly endpoint?: string
-  /** Resolved headers: tracing.headers < OTEL_EXPORTER_OTLP_HEADERS < OTEL_EXPORTER_OTLP_METRICS_HEADERS */
+  /** Resolved headers: tracing.headers < metrics.headers (file) < OTEL_EXPORTER_OTLP_HEADERS < OTEL_EXPORTER_OTLP_METRICS_HEADERS */
   readonly headers?: Record<string, string>
 }
 
@@ -146,19 +146,19 @@ export interface LogsConfig {
   readonly intervalMs: number
   /** Logs endpoint override; defaults to OTEL_EXPORTER_OTLP_LOGS_ENDPOINT > OTEL_EXPORTER_OTLP_ENDPOINT > tracing.endpoint */
   readonly endpoint?: string
-  /** Resolved headers: tracing.headers < OTEL_EXPORTER_OTLP_HEADERS < OTEL_EXPORTER_OTLP_LOGS_HEADERS */
+  /** Resolved headers: tracing.headers < logs.headers (file) < OTEL_EXPORTER_OTLP_HEADERS < OTEL_EXPORTER_OTLP_LOGS_HEADERS */
   readonly headers?: Record<string, string>
 }
 
 export interface ConfigWarning {
-  readonly kind: "invalid-json" | "read-error" | "unknown-key" | "bad-env" | "bad-type"
+  readonly kind: "invalid-json" | "read-error" | "unknown-key" | "bad-env" | "bad-type" | "invalid-value"
   readonly message: string
 }
 
 const ROOT_KEYS = new Set(["enabled", "wire", "tracing", "metrics", "logs"])
 const WIRE_KEYS = new Set(["enabled", "directory", "maxFrameBytes"])
-const METRICS_KEYS = new Set(["enabled", "intervalMs", "endpoint"])
-const LOGS_KEYS = new Set(["enabled", "endpoint", "intervalMs"])
+const METRICS_KEYS = new Set(["enabled", "intervalMs", "endpoint", "headers"])
+const LOGS_KEYS = new Set(["enabled", "endpoint", "intervalMs", "headers"])
 const TRACING_KEYS = new Set([
   "enabled",
   "endpoint",
@@ -301,6 +301,9 @@ function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/\/+$/, "").replace(/\/v1\/(traces|metrics|logs)$/, "")
 }
 
+/** The OTLP/HTTP default every blank endpoint source falls back to (Bug 20) */
+const DEFAULT_TRACING_ENDPOINT = "http://localhost:4318"
+
 function resolveGates(content: boolean, raw: Record<string, unknown>, warnings: ConfigWarning[]): ContentGates {
   return {
     userPrompts: boolField(raw.userPrompts, "tracing.contentGates.userPrompts", true, warnings),
@@ -324,7 +327,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
     },
     tracing: {
       enabled: true,
-      endpoint: "http://localhost:4318",
+      endpoint: DEFAULT_TRACING_ENDPOINT,
       project: "opencode",
       headers: {},
       content: true,
@@ -407,11 +410,13 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
             enabled: boolField(metricsRaw.enabled, "metrics.enabled", defaults.metrics.enabled, warnings),
             intervalMs: intField(metricsRaw.intervalMs, "metrics.intervalMs", defaults.metrics.intervalMs, warnings, 1_000),
             endpoint: metricsRaw.endpoint === undefined ? undefined : stringField(metricsRaw.endpoint, "metrics.endpoint", "", warnings),
+            headers: recordField(metricsRaw.headers, "metrics.headers", warnings),
           },
           logs: {
             enabled: boolField(logsRaw.enabled, "logs.enabled", defaults.logs.enabled, warnings),
             intervalMs: intField(logsRaw.intervalMs, "logs.intervalMs", defaults.logs.intervalMs, warnings, 500),
             endpoint: logsRaw.endpoint === undefined ? undefined : stringField(logsRaw.endpoint, "logs.endpoint", "", warnings),
+            headers: recordField(logsRaw.headers, "logs.headers", warnings),
           },
         }
         log("loaded config", { path: configPath, wireEnabled: fileConfig.wire.enabled })
@@ -437,36 +442,56 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
   const envServiceName = process.env.OTEL_SERVICE_NAME
   if (envServiceName) resourceAttributes["service.name"] = envServiceName
 
+  /**
+   * An endpoint set to blank is a misconfiguration, not a choice: kept as-is, the sender
+   * would request a relative URL, fail every batch, and silently drop all spans with zero
+   * warnings. Treat blank as unset and name the ignored source (Bug 20).
+   */
+  const endpointOr = (value: string | undefined, label: string): string | undefined => {
+    if (value === undefined) return undefined
+    if (value.trim() === "") {
+      warnings.push({ kind: "invalid-value", message: `${label} is empty; ignored, falling back to the next source` })
+      return undefined
+    }
+    return value
+  }
+
+  const tracingEndpoint = normalizeEndpoint(
+    endpointOr(envEndpoint, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT") ??
+      endpointOr(fileConfig.tracing.endpoint, "tracing.endpoint") ??
+      DEFAULT_TRACING_ENDPOINT,
+  )
+
   const config: Config = {
     ...fileConfig,
     tracing: {
       ...fileConfig.tracing,
-      endpoint: normalizeEndpoint(envEndpoint ?? fileConfig.tracing.endpoint),
+      endpoint: tracingEndpoint,
       headers: { ...fileConfig.tracing.headers, ...genericEnvHeaders, ...tracesEnvHeaders },
       resourceAttributes,
     },
     metrics: {
       ...fileConfig.metrics,
-      // Endpoint: metrics-specific env > generic env > metrics.endpoint file field > tracing.endpoint
+      // Endpoint: metrics-specific env > generic env > metrics.endpoint file field > tracing endpoint
       endpoint: normalizeEndpoint(
-        process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT ??
-          process.env.OTEL_EXPORTER_OTLP_ENDPOINT ??
-          (fileConfig.metrics.endpoint || undefined) ??
-          fileConfig.tracing.endpoint,
+        endpointOr(process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") ??
+          endpointOr(process.env.OTEL_EXPORTER_OTLP_ENDPOINT, "OTEL_EXPORTER_OTLP_ENDPOINT") ??
+          endpointOr(fileConfig.metrics.endpoint, "metrics.endpoint") ??
+          tracingEndpoint,
       ),
-      headers: { ...fileConfig.tracing.headers, ...genericEnvHeaders, ...metricsEnvHeaders },
+      headers: { ...fileConfig.tracing.headers, ...fileConfig.metrics.headers, ...genericEnvHeaders, ...metricsEnvHeaders },
       // Wire-only mode must not leak: metrics are a network signal too
       enabled: fileConfig.metrics.enabled && fileConfig.tracing.enabled,
     },
     logs: {
       ...fileConfig.logs,
       endpoint: normalizeEndpoint(
-        process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ??
-          process.env.OTEL_EXPORTER_OTLP_ENDPOINT ??
-          (fileConfig.logs.endpoint || undefined) ??
-          fileConfig.tracing.endpoint,
+        endpointOr(process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") ??
+          endpointOr(process.env.OTEL_EXPORTER_OTLP_ENDPOINT, "OTEL_EXPORTER_OTLP_ENDPOINT") ??
+          endpointOr(fileConfig.logs.endpoint, "logs.endpoint") ??
+          tracingEndpoint,
       ),
-      headers: { ...fileConfig.tracing.headers, ...genericEnvHeaders, ...logsEnvHeaders },
+      headers: { ...fileConfig.tracing.headers, ...fileConfig.logs.headers, ...genericEnvHeaders, ...logsEnvHeaders },
       enabled: fileConfig.logs.enabled && fileConfig.tracing.enabled,
     },
   }

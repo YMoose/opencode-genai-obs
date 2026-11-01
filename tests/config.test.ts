@@ -307,3 +307,28 @@ test("parseKvList edge cases: first '=' splits, empty values kept, malformed pai
   assert.strictEqual(config.tracing.headers["novalue"], undefined, "a pair without '=' is skipped")
   assert.strictEqual(config.tracing.headers[""], undefined, "a pair without a key is skipped")
 })
+
+test("Bug 20: a blank endpoint (env or file) is ignored with a warning instead of silently disabling export", () => {
+  const { config, warnings } = loadFrom(`{ "tracing": { "endpoint": "" } }`, {
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "",
+  })
+  assert.strictEqual(config.tracing.endpoint, "http://localhost:4318", "blank file endpoint falls back to the default")
+  assert.ok(warnings.some((w) => w.message.includes("tracing.endpoint is empty")), "the ignored file source is named")
+  assert.ok(
+    warnings.some((w) => w.message.includes("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is empty")),
+    "the ignored env source is named",
+  )
+  assert.strictEqual(config.metrics.endpoint, "http://localhost:4318", "a blank env cannot leak a relative URL into the sender")
+})
+
+test("Bug 21: file-level metrics/logs headers are accepted and merged (no unknown-key warning)", () => {
+  const { config, warnings } = loadFrom(`{
+    "tracing": { "headers": { "authorization": "t" } },
+    "metrics": { "headers": { "x-m": "1" } },
+    "logs": { "headers": { "x-l": "2" } },
+  }`)
+  assert.ok(!warnings.some((w) => w.message.includes("unknown key")), "headers are documented fields, not unknown keys")
+  assert.equal(config.metrics.headers["x-m"], "1", "the metrics file headers apply")
+  assert.equal(config.metrics.headers["authorization"], "t", "tracing headers still inherit")
+  assert.equal(config.logs.headers["x-l"], "2", "the logs file headers apply")
+})

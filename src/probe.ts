@@ -28,7 +28,10 @@ export function parseEndpoint(endpoint: string): { host: string; port: number } 
   }
   if (!url.hostname) return null
   if (url.protocol !== "http:" && url.protocol !== "https:") return null
-  return { host: url.hostname, port: url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80 }
+  // WHATWG URL keeps the brackets on IPv6 literals ("[::1]"), and net.connect resolves the
+  // bracketed form as a hostname (ENOTFOUND) — strip to the bare address (Bug 22)
+  const host = url.hostname.startsWith("[") && url.hostname.endsWith("]") ? url.hostname.slice(1, -1) : url.hostname
+  return { host, port: url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80 }
 }
 
 /** Single TCP connect against the endpoint's host:port. Never rejects. */
