@@ -95,6 +95,30 @@ idea, the rules are:
 - Credit the source in the commit message body (`Inspired by …`, `Adapted from …`) so
   the lineage stays traceable and their contribution is acknowledged.
 
+## Heuristic policy: upstream contracts come first
+
+This plugin projects two upstream contracts: the opencode event stream and the OTel
+GenAI semconv. When a contract is silent or ambiguous about something we need, the
+temptation is to invent the missing semantics locally (identity from timestamps,
+ordering policies, attribution rules, fabricated lifecycle markers). Don't — a local
+heuristic that papers over an upstream gap diverges from it silently and tends to
+become the root cause of the next bug class (late-terminal misattribution is the
+canonical example).
+
+- Prefer the upstream mechanism that exists (an explicit lifecycle event, an explicit
+  id) over inferring the same fact from side channels — and verify what the contract
+  actually publishes before concluding it is silent.
+- Semantic heuristics — anything that invents identity, ordering, or attribution the
+  upstream contract does not carry — require an explicit user decision. When granted,
+  label the heuristic where it lives and record the upstream gap it papers over in
+  TODO.md (and in the upstream issue when one exists).
+- Mechanical safeguards (timeouts, size caps, idempotency guards against documented
+  at-least-once delivery) are a different class: land them with a comment naming the
+  bound and the blast radius. A safeguard that decides attribution or identity
+  questions is NOT in this class — ask first.
+- A heuristic that already exists must be labeled as such where it lives; never
+  silently extend one to a new call site.
+
 ## Commits
 
 Short imperative English subjects with a conventional prefix (`fix:` / `feat:` / `test:` /
