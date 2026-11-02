@@ -291,6 +291,55 @@ test("Bug 17: duplicate compaction.started delivery must not shadow the real spa
   assert.equal(compactions[0].attributes.find(([key]) => key === "gen_ai.request.model")?.[1], "model-x", "the surviving span keeps the real run data")
 })
 
+test("Bug 24: a stale compaction.started/ended (durable.seq below high-water) must not bare-flush a newer open run or reopen a finished one", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }, 0))
+  // run 1 completes normally
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }, 10))
+  builder.handleEvent(
+    event("session.compaction.ended", 3_000, {
+      sessionID: "s1",
+      reason: "auto",
+      model: { id: "m1", providerID: "example" },
+      native: false,
+      text: "summary-1",
+      cost: 0.01,
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 10, write: 0 } },
+    }, 11),
+  )
+  // stale duplicate of run 1's started arrives AFTER run 1 ended: the map is empty and
+  // the high-water is 11 — it must NOT reopen the finished run
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }, 10))
+  // run 2 opens
+  builder.handleEvent(event("session.compaction.started", 5_000, { sessionID: "s1", reason: "manual" }, 20))
+  // another stale started from run 1 while run 2 is open: it must NOT bare-flush run 2
+  // under run 2's deterministic id nor overwrite the open state with run 1's
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }, 10))
+  // stale terminal from a superseded run (seq 12 < run 2's started seq 20): it must
+  // NOT pop and flush the newer open run
+  builder.handleEvent(event("session.compaction.ended", 2_500, { sessionID: "s1", reason: "auto" }, 12))
+  // run 2 finishes
+  builder.handleEvent(
+    event("session.compaction.ended", 6_000, {
+      sessionID: "s1",
+      reason: "manual",
+      model: { id: "m2", providerID: "example" },
+      native: false,
+      text: "summary-2",
+      cost: 0.02,
+      tokens: { input: 200, output: 80, reasoning: 0, cache: { read: 0, write: 0 } },
+    }, 25),
+  )
+  await settle()
+
+  const compactionSpans = spans.filter((s) => s.name === "compaction")
+  assert.strictEqual(compactionSpans.length, 2, "exactly the two real runs must emit (pre-fix: 4, including bare flushes from the stale started events)")
+  const run2 = compactionSpans.filter((s) => s.spanId === hash("opencode-compaction-span:s1:5000", 8))
+  assert.strictEqual(run2.length, 1, "run 2's span must exist exactly once")
+  assert.equal(run2[0].attributes.find(([key]) => key === "gen_ai.request.model")?.[1], "m2", "run 2's span must carry the real run data, not a bare flush (pre-fix: the stale started bare-flushed run 2's deterministic id first)")
+  assert.equal(run2[0].attributes.find(([key]) => key === "output.value")?.[1], "summary-2", "run 2's summary must land in output.value")
+})
+
 test("compaction failed: status=2 with the error message", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))

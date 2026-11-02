@@ -12,13 +12,13 @@ Citations are `path:line` pointers.
 
 | Source | What it carries | Where it goes |
 |---|---|---|
-| `ctx.session.hook("prompt")` | `sessionID`, `messageID`, `prompt.text` | Stashed in `pendingPrompts`; the first `step.started` consumes it and opens the turn root (`spans.ts:484`) |
+| `ctx.session.hook("prompt")` | `sessionID`, `messageID`, `prompt.text` | Stashed in `pendingPrompts`; the first `step.started` consumes it and opens the turn root (`spans.ts:505`) |
 | `ctx.session.hook("experimental.ws.send")` | `sessionID`, `agent`, `model.{providerID,id}`, `kind`, `frame` | Written to per-session JSONL; also stashed per-session FIFO and consumed by the next `chat` span for `input.value` (`wire.ts:139`) |
 | `ctx.session.hook("http.request")` | Same as `ws.send`, body is a cloned `ReadableStream` | Same path as above (`wire.ts:155`) |
 | `ctx.event.subscribe()` → `session.*` SSE | All events listed in §2 | Drives the span state machine (`index.ts:240`) |
 | `ctx.session.get({ sessionID })` | `parentID`, `agent`, `title`, `location.directory` | Lazily merged at turn/container close to fill `opencode.session.title/directory` (`index.ts:166`) |
 
-`session.*` events handled (`spans.ts:445`):
+`session.*` events handled (`spans.ts:466`):
 
 | Event | Effect |
 |---|---|
@@ -40,11 +40,11 @@ Citations are `path:line` pointers.
 
 | Span name | `kind` | Semconv `gen_ai.operation.name` | OpenInference `openinference.span.kind` | Trigger |
 |---|---|---|---|---|
-| `<40-char prompt preview>` (fall back to session title, then the turn's `userMessageID`, then `"(empty)"`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`spans.ts:348`) |
-| `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`spans.ts:678`) |
-| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`spans.ts:821`) |
-| `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`spans.ts:975`) |
-| `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`spans.ts:921`) |
+| `<40-char prompt preview>` (fall back to session title, then the turn's `userMessageID`, then `"(empty)"`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`spans.ts:369`) |
+| `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`spans.ts:723`) |
+| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`spans.ts:872`) |
+| `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`spans.ts:1026`) |
+| `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`spans.ts:972`) |
 
 Span status: every span closes `code 1` (unset/ok) on success and `code 2` (error) on
 failure, with `status.message = "<error.type>: <error.message>"` from the triggering
@@ -61,9 +61,9 @@ provide one), `N > 0` = first N UTF-8 bytes (character-boundary safe) with a
 just under the 64 KB single-attribute limit enforced by common backends so one oversized tool result
 cannot reject the whole span at intake; the budget is in bytes (not chars), so the cap holds for
 CJK-heavy content too.
-All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.ts:82`).
+All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.ts:84`).
 
-### 3.1 Turn root (`invoke_agent` on a root session) — `spans.ts:348`
+### 3.1 Turn root (`invoke_agent` on a root session) — `spans.ts:369`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -84,7 +84,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `output.value` | last `text.ended` aggregated across the turn, truncated | **Gate: `assistantResponses`** |
 | `output.value_original_length` | truncation marker | |
 
-### 3.2 Chat step (`chat ...`) — `spans.ts:678`
+### 3.2 Chat step (`chat ...`) — `spans.ts:723`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -119,7 +119,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
 | `opencode.wire.seq` | `wire.seq` of the consumed frame | correlation back to the on-disk JSONL |
 
-### 3.3 Tool call (`execute_tool <name>`) — `spans.ts:821`
+### 3.3 Tool call (`execute_tool <name>`) — `spans.ts:872`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -137,7 +137,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `output.value` | same as `gen_ai.tool.call.result` | |
 | `output.value_original_length` | truncation marker | |
 
-### 3.4 Sub-agent container (`invoke_agent <agent>`) — `spans.ts:975`
+### 3.4 Sub-agent container (`invoke_agent <agent>`) — `spans.ts:1026`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -151,9 +151,9 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `openinference.span.kind` | `"AGENT"` | |
 
 The container's parent is the `execute_tool {subagent,task}` span that registered the attachment
-(`spans.ts:855`); the child session's own `chat` / `execute_tool` spans hang under this container.
+(`spans.ts:906`); the child session's own `chat` / `execute_tool` spans hang under this container.
 
-### 3.5 Compaction — `spans.ts:921`
+### 3.5 Compaction — `spans.ts:972`
 
 | Attribute | Source | Notes |
 |---|---|---|

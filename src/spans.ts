@@ -190,6 +190,8 @@ interface CompactionState {
   readonly key: string
   readonly reason: string
   readonly startedNano: bigint
+  /** durable.seq of the started event: an older started/terminal below it belongs to a superseded run (Bug 24); undefined = seq-less envelope */
+  readonly seq?: number
 }
 
 export interface SpanBuilderOptions {
@@ -552,10 +554,18 @@ export function createSpanBuilder(
 
       case "session.compaction.started": {
         // One compaction = one trace: a self-contained LLM summarization job outside any turn
+        // Stale redelivery (Bug 24): a started below the session's durable high-water belongs
+        // to an already-superseded run — it must neither bare-flush a newer open run nor
+        // reopen a finished one
+        if (event.seq !== undefined && event.seq < (seqHighWater.get(sid) ?? event.seq)) {
+          log("stale compaction.started ignored", { sessionID: sid, seq: event.seq })
+          return
+        }
         const state: CompactionState = {
           key: String(event.created),
           reason: typeof data.reason === "string" ? data.reason : "unknown",
           startedNano: nano(event.created),
+          seq: event.seq,
         }
         const previous = compactions.get(sid)
         compactions.set(sid, state)
@@ -571,6 +581,12 @@ export function createSpanBuilder(
       case "session.compaction.failed": {
         const state = compactions.get(sid)
         if (!state) return // ended/failed without a recorded start (e.g. plugin loaded mid-run)
+        // Stale terminal (Bug 24): an ended/failed below the open run's started seq belongs
+        // to a superseded run — it must not pop and flush the newer state
+        if (state.seq !== undefined && event.seq !== undefined && event.seq < state.seq) {
+          log("stale compaction terminal ignored", { sessionID: sid, seq: event.seq })
+          return
+        }
         compactions.delete(sid)
         emitCompactionSpan(sid, state, data, nano(event.created), event.type === "session.compaction.failed")
         return
