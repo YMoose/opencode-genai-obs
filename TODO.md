@@ -12,10 +12,20 @@ only when its migration condition is met (and the compaction one is id-frozen, s
 
 | Site (path:line) | Invented semantics | Upstream gap | Upstream issue | Migration condition | Approved |
 | --- | --- | --- | --- | --- | --- |
-| `src/spans.ts:180` | Compaction run identity = the started event's ms timestamp (`CompactionState.key`) | `session.compaction.started/ended` carry only {sessionID, reason}; ended never references its started; no run id exists. Key is FROZEN — it feeds the `opencode-compaction:<sid>:<created>` id formulas, so changing it changes all future span ids | — | Upstream adds a run/correlation id (any key change before that needs an explicit id-continuity decision) | user decision 2026-11-01 |
+| `src/spans.ts:180` | Compaction run identity = the started event's ms timestamp (`CompactionState.key`) | `session.compaction.started/ended` carry only {sessionID, reason}; ended never references its started; no run id exists. Key is FROZEN — it feeds the `opencode-compaction:<sid>:<created>` id formulas, so changing it changes all future span ids | — | Upstream adds a run/correlation id (any key change before that needs an explicit id-continuity decision) | user decision 2026-11-01; adjudicated keep — user decision 2026-11-02 |
 | `src/spans.ts:505` | Turn root keyed `auto:<created>` + fabricated user message "(auto)" when `step.started` arrives with no stashed prompt; known leak: "(auto)" flows into the logs lane as a `gen_ai.user.message` record | No marker for "execution round opened without user input"; `session.synthetic` is reserved but empirically NEVER fires in opencode 2.2.5 (live-probe 2026-11-01, `/tmp/opencode/seq-probe.jsonl`; POSTing `/api/session/{id}/synthetic` only emits `session.inbox.enqueued`) | [#47701](https://github.com/anomalyco/opencode/issues/47701) | Upstream fires `session.synthetic` or documents a round-origin marker | user decision 2026-11-01 |
 | `src/spans.ts:304` | "An interrupted step may still deliver a late `step.ended`" — unverified delivery-semantics assumption; the mark-not-delete design (`interrupted` flag) rests on it. If wrong: harmless (step never emits); if right: preserves real spans | No documented delivery contract for step terminals after `session.execution.interrupted` | — | Confirm or refute from upstream source or a targeted probe | user decision 2026-11-01 |
 | `src/spans.ts:744` | Reasoning segments concatenate in ARRIVAL order; never a fabricated interleaving with text parts | Text segments carry a protocol ordinal; reasoning events carry no ordinal/index — concatenation order has no contract guarantee | — | Upstream adds an index to reasoning segments | user decision 2026-11-01 |
+
+Known limitation (heuristic #1, verified 2026-11-02): the compaction run registry is
+in-memory single-open-run state, so a plugin restart between `session.compaction.started`
+and `session.compaction.ended/failed` finds no run to pair with — the terminal handler
+returns before emitting (`src/spans.ts:573`), dropping the span entirely, not degraded:
+the ended event's model/tokens/cost/text reach no span (a bare reason+start-time span
+only ever comes from a recorded start, via predecessor flush or graceful `flushAll`).
+Upstream ask: compaction started/ended carry no run id and ended does not reference its
+started — candidate [#47701](https://github.com/anomalyco/opencode/issues/47701)
+follow-up material (external post requires user approval).
 
 ## Offline session replay lane (promised, not yet implemented)
 
