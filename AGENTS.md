@@ -118,6 +118,10 @@ canonical example).
   questions is NOT in this class — ask first.
 - A heuristic that already exists must be labeled as such where it lives; never
   silently extend one to a new call site.
+- Live capture is the primary requirement; offline transcript replay / historical import
+  is secondary. Do not add branching or state-machine complexity to the live path to
+  accommodate replay-only anomalies (such as out-of-order historical streams) that the
+  live bus cannot produce — normalize or sort in the replay feeder instead.
 
 ## Commits
 
