@@ -27,6 +27,16 @@ Upstream ask: compaction started/ended carry no run id and ended does not refere
 started — candidate [#47701](https://github.com/anomalyco/opencode/issues/47701)
 follow-up material (external post requires user approval).
 
+Known limitation (Bug 23 guard boundaries, accepted 2026-11-03): two behaviors of the
+durable.seq stale-terminal guard are accepted as-is — both upstream gaps (no round id in
+the event envelope). First, a stale old-round terminal's error payload is discarded by
+design: the guard (`src/spans.ts:486`) mutates nothing, so the superseded round's failure
+reason never lands on any span; surfacing it would require an upstream round
+discriminator. Second, the no-seq degrade path: when `durable.seq` is absent (older
+hosts), a late terminal still flushes the current turn early and the new round's chat span
+is lost — pinned by the Bug 23 fallback test (`tests/spans.test.ts:804`) as the documented
+pre-Bug-23 behavior.
+
 ## Governance log
 
 - 2026-11-01: Full-project review surfaced 10 bugs (Bugs 16-22 fixed red-first) and a
