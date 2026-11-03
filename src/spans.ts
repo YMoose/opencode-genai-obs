@@ -309,18 +309,18 @@ export function createSpanBuilder(
 
   /** session.deleted: flush any unfinished turn root, then drop all registry entries for the session (prevents unbounded growth) */
   /**
-   * Round-over in-flight cleanup (Bug 19): tools can never attach after the round's
-   * flush (traceId lookup fails), so they are dropped. Steps are dropped on
-   * succeeded/failed (a step still in flight there is a missed terminal) but only
-   * MARKED on interrupted — the aborted step may still deliver a late step.ended,
-   * and that span must keep its real state instead of a degraded one.
+   * Round-over in-flight cleanup (Bug 19): tools can never attach after the round's flush
+   * (traceId lookup fails), so they are dropped. Steps are dropped on succeeded/failed (a
+   * still-open step missed its terminal) but only MARKED on interrupted — see the label.
    *
-   * HEURISTIC(upstream-gap): "an interrupted step may still deliver a late
-   * step.ended" is an UNVERIFIED guess about upstream delivery semantics, not a
-   * contract fact — the whole mark-not-delete design above rests on it. Risk
-   * profile: if the assumption is wrong the marking is harmless (the step simply
-   * never emits); if right it preserves real spans. Migration: confirm or refute
-   * from upstream source or a targeted probe. Approved: user decision 2026-11-01.
+   * HEURISTIC(upstream-gap): an UNVERIFIED guess at approval (2026-11-01) — refuted for live ordering by
+   * upstream verification (2026-11-03): step terminals publish inside an uninterruptible block
+   * (runner/step.ts:140-149, Step.Ended at :247-258); execution.interrupted publishes only afterwards, from
+   * the settled hook (execution.ts:128-132, run-coordinator.ts:96-99) — in live delivery step.ended ALWAYS
+   * precedes interrupted; sole no-terminal path: cancellation before the assistant started (step.ts:147-148),
+   * so the mark branch never fires live. RETAINED by explicit user decision (2026-11-03) as cheap gap/replay
+   * defense (bounded: ~20 lines, tested, no live-path branching cost beyond this dual-mode purge) — a
+   * consciously-accepted exception to AGENTS.md "live capture first": defense, not a live-path requirement.
    */
   const purgeInFlight = (sid: string, stepsAction: "purge" | "mark"): void => {
     for (const [id, tool] of tools) if (tool.sessionID === sid) tools.delete(id)
@@ -818,12 +818,12 @@ export function createSpanBuilder(
     // part type. session.reasoning.ended carries no ordinal, so reasoning parts precede the
     // text parts — never a fabricated interleaving. Tool calls stay out of the parts array:
     // they are invisible at step level and already fully captured on execute_tool spans.
-    // HEURISTIC(upstream-gap): reasoning segments concatenate in ARRIVAL order (the
-    // reasoning: string[] on the step state, pushed at session.reasoning.ended) and we
-    // deliberately never fabricate an interleaving with the text parts. Upstream gap:
-    // text segments carry a protocol ordinal, reasoning events carry no ordinal/index
-    // at all — so the concatenation order has no contract guarantee. Migration:
-    // upstream adds an index to reasoning segments. Approved: user decision 2026-11-01.
+    // HEURISTIC(upstream-gap): reasoning segments concatenate in ARRIVAL order (the reasoning: string[] on the step
+    // state, pushed at session.reasoning.ended) and we never fabricate an interleaving with the text parts.
+    // Upstream gap: text segments carry a protocol ordinal, reasoning events carry no ordinal/index — the
+    // concatenation order has no contract guarantee. VERIFIED (2026-11-03): the bus preserves per-subscription
+    // publish order (bus.ts:751-782), so live arrival order equals generation order; the no-ordinal gap is
+    // replay-only. Migration: upstream adds an index to reasoning segments. Approved: user decision 2026-11-01.
     const outputParts = [
       ...reasoning.map((chunk) => ({ type: "reasoning", content: chunk })),
       ...texts.map((text) => ({ type: "text", content: text })),
