@@ -129,8 +129,24 @@ export function createLogs(options: LogsOptions): Logs {
   const logger = provider.getLogger("opencode-genai-obs", PLUGIN_VERSION)
 
   const limit = options.contentMaxLength
-  const clip = (text: string | undefined): string | undefined =>
-    text === undefined ? undefined : limit === 0 ? undefined : limit < 0 ? text : cutUtf8Bytes(text, limit)
+  /**
+   * Clip one content string per the contentMaxLength budget (same three states as
+   * tracing.contentMaxLength). `content` comes back undefined when the gate is off (no text
+   * passed in) or the budget is 0 — callers then omit the key entirely, because a
+   * `{ content: undefined }` spread survives Object.keys() and serializes as a
+   * present-but-empty kvlist entry (Bug 28). `truncated` says non-empty content was
+   * withheld or shortened by the budget → the record gets opencode.content.truncated.
+   */
+  const clipForLog = (text: string | undefined): { content?: string; truncated: boolean } => {
+    if (text === undefined) return { truncated: false }
+    if (limit === 0) return { truncated: text.length > 0 }
+    if (limit < 0) return { content: text, truncated: false }
+    return { content: cutUtf8Bytes(text, limit), truncated: Buffer.byteLength(text, "utf-8") > limit }
+  }
+
+  /** Envelope cover for contentMaxLength (log-record attributes, not the gen_ai.* body) */
+  const truncatedAttr = (truncated: boolean): Record<string, boolean> =>
+    truncated ? { "opencode.content.truncated": true } : {}
 
   const emitRecord = (obs: LogObservation, eventName: string, body: Record<string, unknown>, attributes: Record<string, string | number | boolean>) => {
     logger.emit({
@@ -147,35 +163,52 @@ export function createLogs(options: LogsOptions): Logs {
   return {
     emit(obs) {
       switch (obs.event) {
-        case "user":
-          emitRecord(obs, "gen_ai.user.message", { role: "user", ...(obs.content !== undefined ? { content: clip(obs.content) } : {}) }, {})
+        case "user": {
+          const { content, truncated } = clipForLog(obs.content)
+          emitRecord(
+            obs,
+            "gen_ai.user.message",
+            { role: "user", ...(content !== undefined ? { content } : {}) },
+            truncatedAttr(truncated),
+          )
           return
+        }
         case "system": {
           const text = extractSystemText(obs.frame)
           if (text === undefined) return
-          emitRecord(obs, "gen_ai.system.message", { role: "system", ...(obs.gated ? {} : { content: clip(text) }) }, {})
+          const { content, truncated } = clipForLog(obs.gated ? undefined : text)
+          emitRecord(
+            obs,
+            "gen_ai.system.message",
+            { role: "system", ...(content !== undefined ? { content } : {}) },
+            truncatedAttr(truncated),
+          )
           return
         }
-        case "tool":
+        case "tool": {
+          const { content, truncated } = clipForLog(obs.content)
           emitRecord(
             obs,
             "gen_ai.tool.message",
-            { role: "tool", id: obs.callId, name: obs.tool, ...(obs.content !== undefined ? { content: clip(obs.content) } : {}) },
-            obs.failed ? { "error.type": "tool_error" } : {},
+            { role: "tool", id: obs.callId, name: obs.tool, ...(content !== undefined ? { content } : {}) },
+            { ...(obs.failed ? { "error.type": "tool_error" } : {}), ...truncatedAttr(truncated) },
           )
           return
-        case "choice":
+        }
+        case "choice": {
+          const { content, truncated } = clipForLog(obs.content)
           emitRecord(
             obs,
             "gen_ai.choice",
             {
               finish_reason: obs.finishReason ?? "unknown",
               index: 0,
-              message: { role: "assistant", ...(obs.content !== undefined ? { content: clip(obs.content) } : {}) },
+              message: { role: "assistant", ...(content !== undefined ? { content } : {}) },
             },
-            { "gen_ai.provider.name": obs.provider, "gen_ai.request.model": obs.model },
+            { "gen_ai.provider.name": obs.provider, "gen_ai.request.model": obs.model, ...truncatedAttr(truncated) },
           )
           return
+        }
       }
     },
     async shutdown() {

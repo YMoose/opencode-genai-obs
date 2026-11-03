@@ -210,7 +210,12 @@ and make duplicate SSE deliveries harmless (Phoenix-style backends upsert on
 - Logs (`log_body` on OpenInference) — the `log_body` convention is not used; message
   content ships via the opt-in OTLP logs lane (`src/logs.ts`). Plugin diagnostics go
   only to the local file sink (`~/.local/share/opencode/log/ocg-obs.*.log`), never to
-  OTLP.
+  OTLP. The logs lane shares the `tracing.contentMaxLength` budget: at `0` the record
+  body omits the `content` key entirely (an undefined-valued key would serialize as a
+  present-but-empty kvlist entry — Bug 28), and every record whose non-empty content was
+  withheld or shortened by the budget carries the log-record attribute
+  `opencode.content.truncated = true` (envelope-level marker; spans use the
+  `*_original_length` markers above instead).
 
 ## 7. Cross-references
 

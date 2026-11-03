@@ -4,6 +4,7 @@
  * - gated content (undefined) still emits the event, metadata-only
  * - system extraction is best-effort across OpenAI/Anthropic wire shapes
  * - a failing backend never crashes emit/shutdown
+ * - contentMaxLength=0 omits the body content key and stamps opencode.content.truncated (Bug 28)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -11,6 +12,12 @@ import { createLogs } from "../src/logs.js"
 import { startServer, waitFor } from "./helpers.js"
 
 const CTX = { traceId: "ab".repeat(16), spanId: "cd".repeat(8) }
+
+// OTLP protobuf byte signatures (the raw export body is asserted as a utf-8 string, like the
+// tests below): a body kvlist key "content" holding an EMPTY AnyValue — the exact shape
+// `{ content: undefined }` serializes to (Bug 28) — vs. a boolean-true attribute entry.
+const EMPTY_CONTENT_ENTRY = "content\u0012\u0000"
+const TRUNCATED_TRUE = "opencode.content.truncated\u0012\u0002\u0010\u0001"
 
 test("the four message events land in /v1/logs with span context and gated content", async (t) => {
   const server = await startServer((_req, res) => {
@@ -76,4 +83,81 @@ test("a failing logs backend never crashes emit() or shutdown()", async (t) => {
   logs.emit({ event: "user", sessionID: "s1", timeMs: 1_000, ...CTX, content: "x" })
   await waitFor(() => server.requests.length >= 1, 8_000)
   await logs.shutdown() // must resolve despite the 500s
+})
+
+// ---------------------------------------------------------------- Bug 28 (contentMaxLength envelope)
+
+test("Bug 28: contentMaxLength=0 omits the body content key entirely and stamps opencode.content.truncated on all four events", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const logs = createLogs({ endpoint: server.url, contentMaxLength: 0, intervalMs: 50 })
+  logs.emit({ event: "user", sessionID: "s1", timeMs: 1_000, ...CTX, content: "user prompt" })
+  logs.emit({ event: "system", sessionID: "s1", timeMs: 1_100, ...CTX, frame: JSON.stringify({ messages: [{ role: "system", content: "system prompt" }] }), gated: false })
+  logs.emit({ event: "tool", sessionID: "s1", timeMs: 1_200, ...CTX, callId: "tc1", tool: "grep", content: "tool result", failed: false })
+  logs.emit({ event: "choice", sessionID: "s1", timeMs: 1_300, ...CTX, provider: "aliyun", model: "kimi-k3", finishReason: "stop", content: "the answer" })
+
+  const allBodies = () => server.requests.map((r) => r.body).join("")
+  // All four records land in one batch (synchronous emits before the 50 ms timer); the choice
+  // record is the last one, so its event name means the whole batch has arrived.
+  await waitFor(() => allBodies().includes("gen_ai.choice"), 8_000)
+  const body = allBodies()
+
+  assert.ok(!body.includes("user prompt"), "user content withheld at limit 0")
+  assert.ok(!body.includes("system prompt"), "system content withheld at limit 0")
+  assert.ok(!body.includes("tool result"), "tool content withheld at limit 0")
+  assert.ok(!body.includes("the answer"), "choice content withheld at limit 0")
+  assert.ok(!body.includes(EMPTY_CONTENT_ENTRY), "no present-but-empty content kvlist entry ({ content: undefined } survives Object.keys and serializes as an empty AnyValue)")
+  assert.strictEqual(body.split(TRUNCATED_TRUE).length - 1, 4, "every withheld record carries opencode.content.truncated=true on its attributes")
+
+  await logs.shutdown()
+})
+
+test("Bug 28: contentMaxLength=5 clips a longer content and stamps opencode.content.truncated=true", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const logs = createLogs({ endpoint: server.url, contentMaxLength: 5, intervalMs: 50 })
+  logs.emit({ event: "user", sessionID: "s1", timeMs: 1_000, ...CTX, content: "0123456789" })
+
+  const allBodies = () => server.requests.map((r) => r.body).join("")
+  await waitFor(() => allBodies().includes("gen_ai.user.message"), 8_000)
+  const body = allBodies()
+
+  assert.ok(body.includes("01234"), "content clipped to the byte budget")
+  assert.ok(!body.includes("56789"), "tail beyond the budget is dropped")
+  assert.strictEqual(body.split(TRUNCATED_TRUE).length - 1, 1, "truncation stamped on the record attributes")
+
+  await logs.shutdown()
+})
+
+test("Bug 28: no opencode.content.truncated when content fits, is empty, is gated off, or the limit is unlimited", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const capped = createLogs({ endpoint: server.url, contentMaxLength: 100, intervalMs: 50 })
+  capped.emit({ event: "user", sessionID: "s1", timeMs: 1_000, ...CTX, content: "hello" }) // fits the budget
+  capped.emit({ event: "user", sessionID: "s1", timeMs: 1_050, ...CTX, content: undefined }) // gate off → metadata-only
+  capped.emit({ event: "system", sessionID: "s1", timeMs: 1_100, ...CTX, frame: JSON.stringify({ system: "sys prompt" }), gated: true }) // gate off
+  capped.emit({ event: "tool", sessionID: "s1", timeMs: 1_200, ...CTX, callId: "tc1", tool: "grep", content: "", failed: false }) // empty: nothing to lose
+  const unlimited = createLogs({ endpoint: server.url, contentMaxLength: -1, intervalMs: 50 })
+  unlimited.emit({ event: "choice", sessionID: "s1", timeMs: 1_300, ...CTX, provider: "aliyun", model: "kimi-k3", finishReason: "stop", content: "unlimited marker text" })
+
+  await waitFor(() => server.requests.some((r) => r.body.includes("unlimited marker text")), 8_000)
+  const body = server.requests.map((r) => r.body).join("")
+
+  assert.ok(!body.includes("opencode.content.truncated"), "no stamp when nothing was withheld or shortened")
+  assert.ok(!body.includes(EMPTY_CONTENT_ENTRY), "no empty content kvlist entry either")
+
+  await capped.shutdown()
+  await unlimited.shutdown()
 })
