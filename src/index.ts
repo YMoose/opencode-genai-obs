@@ -211,18 +211,31 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   // The first terminal execution event of a session is the earliest moment its spans exist:
   // schedule one delayed annotation so the Phoenix ProjectSession row is created first
   let stopped = false
+  // One delayed annotation per session (Bug 11); the guard and any pending timer are
+  // purged on session.deleted so deleted ids pin no memory and a later terminal for the
+  // same id (redelivery, recreated session) schedules a fresh annotation (Bug 29)
   const postSpanAnnotated = new Set<string>()
-  const postSpanTimers = new Set<ReturnType<typeof setTimeout>>()
+  const postSpanTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const schedulePostSpanAnnotate = (sessionID: string): void => {
     if (!annotator || postSpanAnnotated.has(sessionID)) return
     postSpanAnnotated.add(sessionID)
     const timer = setTimeout(() => {
-      postSpanTimers.delete(timer)
+      postSpanTimers.delete(sessionID)
       if (stopped) return
       annotateFromEvent(sessionID, {})
     }, POST_SPAN_ANNOTATE_DELAY_MS)
     timer.unref()
-    postSpanTimers.add(timer)
+    postSpanTimers.set(sessionID, timer)
+  }
+
+  /** session.deleted: drop the annotation guard and cancel a still-pending timer (Bug 29) */
+  const cancelPostSpanAnnotate = (sessionID: string): void => {
+    postSpanAnnotated.delete(sessionID)
+    const timer = postSpanTimers.get(sessionID)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      postSpanTimers.delete(sessionID)
+    }
   }
 
   // SSE event pump (standalone background loop)
@@ -260,6 +273,9 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
               typeof data.sessionID === "string"
             ) {
               schedulePostSpanAnnotate(data.sessionID)
+            }
+            if (event.type === "session.deleted" && typeof data.sessionID === "string") {
+              cancelPostSpanAnnotate(data.sessionID)
             }
           }
         } catch (error) {
@@ -332,8 +348,9 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     generation: pipelineGlobal.nextGeneration(),
     async dispose() {
       stopped = true
-      for (const timer of postSpanTimers) clearTimeout(timer)
+      for (const timer of postSpanTimers.values()) clearTimeout(timer)
       postSpanTimers.clear()
+      postSpanAnnotated.clear()
       await eventIterator.return?.()
       await spanBuilder.flushAll()
       await sender.drain()

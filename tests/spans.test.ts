@@ -203,6 +203,40 @@ test("opencode.session.parent_id: child-agent chat span carries the parent sessi
   assert.ok(!rootChat.attributes.some(([key]) => key === "opencode.session.parent_id"), "root session must not carry parent_session_id")
 })
 
+test("Bug 29: the session cap evicts idle roots before the child, keeping sub-agent lineage intact", async () => {
+  const { spans, builder } = makeHarness()
+  // The link-less child (parentID only, no task-tool link) is registered FIRST, so the
+  // naive oldest-first eviction would drop exactly this one when the cap trips
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "c1", parentID: "p1", agent: "task" }))
+  // 2048 root registrations push the registry past MAX_SESSIONS (2048): one idle root
+  // must be evicted instead of the child
+  for (let i = 0; i < 2048; i++) {
+    builder.handleEvent(event("session.created", 1_100 + i, { sessionID: `s_${i}`, agent: "build" }))
+  }
+  // A later round on the child must still classify as a sub-agent, not as a root
+  builder.handleEvent(event("session.step.started", 9_000, { sessionID: "c1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.text.ended", 9_100, { sessionID: "c1", assistantMessageID: "a1", text: "done" }))
+  builder.handleEvent(event("session.step.ended", 9_200, { sessionID: "c1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 9_300, { sessionID: "c1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
+  assert.ok(chat, "must emit the child chat span")
+  assert.equal(
+    chat.attributes.find(([key]) => key === "opencode.session.parent_id")?.[1],
+    "p1",
+    "the child's registry entry (parentID) must survive the cap eviction",
+  )
+  assert.ok(
+    spans.some((span) => span.spanId === hash("opencode-session:c1", 8)),
+    "the child round must close as an invoke_agent container span",
+  )
+  assert.ok(
+    !spans.some((span) => span.spanId === hash("opencode-turn-span:c1:auto:9000", 8)),
+    "an evicted child must not be misclassified as a root session and emit a turn root",
+  )
+})
+
 test("content gate: content=false turns toolDetails/toolContent off by default", async () => {
   const { spans, builder } = makeHarness({
     gates: { ...GATES, toolDetails: false, toolContent: false },

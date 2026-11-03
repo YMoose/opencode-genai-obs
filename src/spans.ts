@@ -298,12 +298,30 @@ export function createSpanBuilder(
 
   const registerSession = (sid: string, info: SessionInfoLite): void => {
     sessions.set(sid, info)
-    if (sessions.size > MAX_SESSIONS) {
-      const oldest = sessions.keys().next().value
-      if (oldest !== undefined && oldest !== sid) {
-        sessions.delete(oldest)
-        log("session registry cap reached, evicted oldest", { sessionID: oldest })
+    if (sessions.size <= MAX_SESSIONS) return
+    // 3-tier victim rule (Bug 29), oldest-first within each tier: (1) an idle root —
+    // never a session with an open round, and children last among the idle because
+    // their registry entry carries the parentID that anchors sub-agent lineage across
+    // rounds; (2) any idle entry — the fallback that keeps MAX_SESSIONS a hard cap when
+    // no idle root exists (e.g. 2048 finished-but-undeleted child sessions); (3) any
+    // entry at all — degenerate (everything has an open round), the cap still wins.
+    // Blast radius of a wrong victim: an in-flight session loses its turn/container, an
+    // idle child loses its lineage and degrades to a root session on its next round.
+    const hasOpenRound = (k: string): boolean => openTurns.has(k) || containers.has(k) || compactions.has(k)
+    const childAnchored = (k: string): boolean => sessions.get(k)?.parentID !== undefined || links.has(k)
+    const pickVictim = (skipBusy: boolean, skipChildren: boolean): string | undefined => {
+      for (const k of sessions.keys()) {
+        if (k === sid) continue
+        if (skipBusy && hasOpenRound(k)) continue
+        if (skipChildren && childAnchored(k)) continue
+        return k
       }
+      return undefined
+    }
+    const victim = pickVictim(true, true) ?? pickVictim(true, false) ?? pickVictim(false, false)
+    if (victim !== undefined) {
+      sessions.delete(victim)
+      log("session registry cap reached, evicted session", { sessionID: victim })
     }
   }
 

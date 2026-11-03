@@ -269,6 +269,52 @@ test("Bug 11: the first terminal execution event re-annotates the session after 
   assert.deepStrictEqual(labels, ["early title", "test-title"], "the post-span annotation refreshes from session.get")
 })
 
+test("Bug 29: session.deleted cancels the pending post-span annotation and purges the one-shot guard", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-purge-")
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(
+    configPath,
+    JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }),
+    "utf-8",
+  )
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  const feed = mock.feeds[0]!
+  const now = Date.now()
+  feed.push({ type: "session.created", created: now, data: { sessionID: "s1", title: "early title" } })
+  await waitFor(() => annotationRequests(server).length === 1, 5_000)
+  feed.push({ type: "session.execution.succeeded", created: now + 1, data: { sessionID: "s1" } }) // schedules the delayed annotation
+  feed.push({ type: "session.deleted", created: now + 2, data: { sessionID: "s1" } }) // must cancel it
+
+  // The post-span delay is 3s: after it passes, the cancelled annotation must NOT have fired
+  await new Promise((resolve) => setTimeout(resolve, 3_500))
+  assert.strictEqual(
+    annotationRequests(server).length,
+    1,
+    "session.deleted must cancel the still-pending post-span annotation",
+  )
+
+  // The one-shot guard was purged as well: a later terminal for the same id (redelivered
+  // event or recreated session) schedules a fresh annotation instead of being suppressed forever
+  feed.push({ type: "session.execution.succeeded", created: now + 3, data: { sessionID: "s1" } })
+  await waitFor(() => annotationRequests(server).length === 2, 8_000)
+  await new Promise((resolve) => setTimeout(resolve, 300)) // leave a window for an unexpected third POST
+  assert.strictEqual(annotationRequests(server).length, 2, "exactly one fresh post-span annotation after the purge")
+})
+
 test("Bug 12: startup backfill annotates every existing session across list pages", async (t) => {
   const snapshot = snapshotEnv()
   t.after(() => restoreEnv(snapshot))
