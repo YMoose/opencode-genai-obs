@@ -225,8 +225,8 @@ export interface SpanBuilder {
   readonly handleEvent: (event: EventBase) => void
   /** Handle a prompt hook (user message submitted; stashed only, opens no turn) */
   readonly handlePrompt: (sessionID: string, messageID: string, text: string) => void
-  /** Finish: flush every in-flight turn/container (called on plugin unload) */
-  readonly flushAll: () => Promise<void>
+  /** Finish: flush every in-flight turn/container (called on plugin unload; teardown marks them interrupted) */
+  readonly flushAll: (reason?: string) => Promise<void>
   /**
    * W3C trace-context coordinates of the session's in-flight chat step (the span that
    * the current LLM request will become). Undefined between steps — callers must not
@@ -1143,10 +1143,14 @@ export function createSpanBuilder(
     handlePrompt(sessionID, messageID, text) {
       pendingPrompts.set(sessionID, { messageID, text })
     },
-    async flushAll() {
+    async flushAll(reason = "plugin_unload") {
       const now = nano(Date.now())
-      for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now)
-      for (const sid of [...containers.keys()]) await flushContainer(sid, now)
+      // In-flight rounds never reached a terminal: reporting them OK (the pre-fix
+      // default) is a false success on the ledger. Mark them interrupted with the
+      // teardown cause, distinct from a real execution.interrupted.
+      const teardown = { type: "interrupted", message: `interrupted: ${reason}`, interruptReason: reason }
+      for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now, teardown)
+      for (const sid of [...containers.keys()]) await flushContainer(sid, now, teardown)
       for (const [sid, state] of [...compactions]) emitCompactionSpan(sid, state, {}, now, false)
     },
     activeChatContext(sessionID) {
