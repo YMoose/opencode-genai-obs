@@ -52,6 +52,13 @@ const KIND_CLIENT = 3
 // Session registry cap: sessions are unbounded in long-lived processes; evict the
 // oldest past the cap (Map iteration order = insertion order)
 const MAX_SESSIONS = 2048
+// In-flight tool registry cap (mechanical safeguard, Bug 32): tool state is retained
+// across round close so late terminals can still emit, which also means sessions that
+// never deliver terminals would grow the registry unbounded. Bound: 1024 entries,
+// oldest-first eviction. Blast radius: the evicted call's eventual terminal degrades
+// to name "unknown" with zero duration and may find no trace — the pre-Bug-32
+// behavior, bounded to that single call; no fabricated span is ever emitted.
+const MAX_IN_FLIGHT_TOOLS = 1024
 
 function nano(ms: number): bigint {
   return BigInt(Math.floor(ms)) * 1_000_000n
@@ -176,6 +183,12 @@ interface ToolState {
   readonly assistantMessageID: string | undefined
   name?: string
   input?: Record<string, unknown>
+  /**
+   * The trace of the round this tool ran in (Bug 32): frozen at creation (or
+   * backfilled at round close) so a terminal arriving after the round's flush —
+   * which deletes the live trace source — still emits under its own round.
+   */
+  traceId?: string
   readonly startedNano: bigint
 }
 
@@ -321,15 +334,22 @@ export function createSpanBuilder(
     const victim = pickVictim(true, true) ?? pickVictim(true, false) ?? pickVictim(false, false)
     if (victim !== undefined) {
       sessions.delete(victim)
+      // Retained tool state (Bug 32) must not outlive its session's registry entry:
+      // the victim's tools die here too, else they linger until MAX_IN_FLIGHT_TOOLS
+      for (const [id, tool] of tools) if (tool.sessionID === victim) tools.delete(id)
       log("session registry cap reached, evicted session", { sessionID: victim })
     }
   }
 
-  /** session.deleted: flush any unfinished turn root, then drop all registry entries for the session (prevents unbounded growth) */
   /**
-   * Round-over in-flight cleanup (Bug 19): tools can never attach after the round's flush
-   * (traceId lookup fails), so they are dropped. Steps are dropped on succeeded/failed (a
-   * still-open step missed its terminal) but only MARKED on interrupted — see the label.
+   * Round-over in-flight cleanup (Bug 19): steps are dropped on succeeded/failed (a
+   * still-open step missed its terminal) but only MARKED on interrupted — see the
+   * label. Tool state is NOT touched (Bug 32): every in-flight tool carries its
+   * round's traceId (stamped at creation or backfilled at round close), so a late
+   * terminal still emits with its original name and duration under the round it ran
+   * in — dropping the state here was what turned late tool terminals into lost or
+   * degraded spans. Tools are removed by their own terminal, session deletion, or
+   * the registry cap instead.
    *
    * HEURISTIC(upstream-gap): an UNVERIFIED guess at approval (2026-11-01) — refuted for live ordering by
    * upstream verification (2026-11-03): step terminals publish inside an uninterruptible block
@@ -341,7 +361,6 @@ export function createSpanBuilder(
    * consciously-accepted exception to AGENTS.md "live capture first": defense, not a live-path requirement.
    */
   const purgeInFlight = (sid: string, stepsAction: "purge" | "mark"): void => {
-    for (const [id, tool] of tools) if (tool.sessionID === sid) tools.delete(id)
     if (stepsAction === "purge") {
       for (const [id, step] of steps) if (step.sessionID === sid) steps.delete(id)
     } else {
@@ -349,6 +368,7 @@ export function createSpanBuilder(
     }
   }
 
+  /** session.deleted: flush any unfinished turn root, then drop all registry entries for the session (prevents unbounded growth) */
   const dropSession = (sid: string, nowNano: bigint): void => {
     void flushTurnRoot(sid, nowNano) // no-op when no turn is open
     openTurns.delete(sid)
@@ -363,6 +383,9 @@ export function createSpanBuilder(
     endedSteps.delete(sid)
     endedTools.delete(sid)
     seqHighWater.delete(sid)
+    // Tool state dies with its session (Bug 32 retention is per-session, not global):
+    // a deleted session's tools can never settle into a live trace again
+    for (const [id, tool] of tools) if (tool.sessionID === sid) tools.delete(id)
     purgeInFlight(sid, "purge")
   }
 
@@ -384,6 +407,35 @@ export function createSpanBuilder(
     // Fallback: parent turn already closed and no link registered (abnormal ordering) —
     // open our own trace with the container as root
     return { traceId: orphanTraceId(sid), containerId }
+  }
+
+  /**
+   * The trace a new in-flight item belongs to: the sub-agent lineage for children,
+   * the root's open turn otherwise. Frozen onto ToolState at creation (Bug 32) so the
+   * binding survives the round's flush deleting the live source.
+   */
+  const resolveTraceId = (sid: string): string | undefined =>
+    isChild(sid) ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
+
+  /**
+   * Backfill the round trace onto this session's still-unstamped in-flight tools
+   * BEFORE the round's flush (flushTurnRoot deletes the open turn — the trace source
+   * for root sessions): a tool whose creation raced ahead of the turn opening (or
+   * whose input.started was never seen) still gets the round binding (Bug 32).
+   */
+  const stampInFlightTools = (sid: string): void => {
+    const roundTraceId = resolveTraceId(sid)
+    if (roundTraceId === undefined) return
+    for (const tool of tools.values()) if (tool.sessionID === sid && !tool.traceId) tool.traceId = roundTraceId
+  }
+
+  /** Oldest-first eviction at the registry cap (bound and blast radius: MAX_IN_FLIGHT_TOOLS) */
+  const evictOldestTool = (): void => {
+    const oldest = tools.keys().next().value
+    if (oldest === undefined) return
+    const victim = tools.get(oldest)
+    tools.delete(oldest)
+    log("in-flight tool state evicted at cap", { callId: oldest, sessionID: victim?.sessionID })
   }
 
   const ensureContainer = (sid: string, nowNano: bigint) => {
@@ -712,11 +764,16 @@ export function createSpanBuilder(
       case "session.tool.input.started": {
         const callId = typeof data.id === "string" ? data.id : ""
         if (!callId) return
+        if (!tools.has(callId) && tools.size >= MAX_IN_FLIGHT_TOOLS) evictOldestTool()
+        // A redelivered input.started must not re-bind the tool to a NEWER round: keep
+        // the original stamp (undefined only when creation raced ahead of the turn)
+        const prior = tools.get(callId)
         tools.set(callId, {
           callId,
           sessionID: sid,
           assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
           name: data.name as string,
+          traceId: prior?.traceId ?? resolveTraceId(sid),
           startedNano: nano(event.created),
         })
         return
@@ -728,12 +785,17 @@ export function createSpanBuilder(
         const existing = tools.get(callId)
         if (existing) {
           existing.input = data.input as Record<string, unknown>
+          // Backfill (Bug 32): input.started may have raced ahead of the round's turn —
+          // stamp now that the round is identifiable
+          if (!existing.traceId) existing.traceId = resolveTraceId(sid)
         } else {
+          if (tools.size >= MAX_IN_FLIGHT_TOOLS) evictOldestTool()
           tools.set(callId, {
             callId,
             sessionID: sid,
             assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
             input: data.input as Record<string, unknown>,
+            traceId: resolveTraceId(sid),
             startedNano: nano(event.created),
           })
         }
@@ -753,9 +815,12 @@ export function createSpanBuilder(
         const tool = tools.get(callId)
         tools.delete(callId)
         const endNano = nano(event.created)
-        emitToolSpan(sid, callId, tool, data, endNano, event.type === "session.tool.failed")
+        const emittedTraceId = emitToolSpan(sid, callId, tool, data, endNano, event.type === "session.tool.failed")
+        // Round accounting (Bug 32): only a tool that emitted under THIS turn's trace
+        // counts on it — a late Round 1 terminal must not inflate the current round's
+        // message count or end time
         const turn = openTurns.get(sid)
-        if (turn) {
+        if (turn && emittedTraceId === turn.traceId) {
           if (endNano > turn.lastEndNano) turn.lastEndNano = endNano
           turn.spanCount += 1
         }
@@ -772,11 +837,14 @@ export function createSpanBuilder(
           log("stale round terminal ignored", { sessionID: sid, type: event.type, seq: event.seq })
           return
         }
+        // Bind the round's in-flight tools to its trace BEFORE the flush deletes the
+        // live trace source — their late terminals still emit under this round (Bug 32)
+        stampInFlightTools(sid)
         const error = event.type === "session.execution.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
         if (isChild(sid)) void flushContainer(sid, nano(event.created), error)
         else void flushTurnRoot(sid, nano(event.created), error)
-        // Round over: tools can no longer attach anywhere (the turn/container is flushed),
-        // and a step still in flight at succeeded/failed is a missed terminal — purge both
+        // Round over: a step still in flight at succeeded/failed is a missed terminal —
+        // purge it (tools stay: their terminals can still land on the stamped trace)
         purgeInFlight(sid, "purge")
         return
       }
@@ -787,10 +855,13 @@ export function createSpanBuilder(
           log("stale round terminal ignored", { sessionID: sid, type: event.type, seq: event.seq })
           return
         }
+        // Bind the round's in-flight tools to its trace BEFORE the flush (Bug 32)
+        stampInFlightTools(sid)
         if (isChild(sid)) void flushContainer(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
         else void flushTurnRoot(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
         // The interrupted step stays answerable to a late step.ended (its chat span still
-        // emits), but its propagation coordinates die with the round (Bug 19)
+        // emits), but its propagation coordinates die with the round (Bug 19); its tools
+        // stay answerable to their own late terminals (Bug 32)
         purgeInFlight(sid, "mark")
         return
       }
@@ -951,6 +1022,11 @@ export function createSpanBuilder(
     }
   }
 
+  /**
+   * Emit the execute_tool span; returns the traceId it emitted under (undefined when
+   * nothing emitted — no trace source, or no assistant id). Callers use the return
+   * for round accounting (Bug 32): the span may land on a round other than the open one.
+   */
   const emitToolSpan = (
     sid: string,
     callId: string,
@@ -958,15 +1034,17 @@ export function createSpanBuilder(
     data: Record<string, unknown>,
     endNano: bigint,
     failed: boolean,
-  ) => {
+  ): string | undefined => {
     const child = isChild(sid)
-    const traceId = child ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
-    if (!traceId) return
+    // The tool's own round binding (Bug 32) — stamped at creation or round close —
+    // wins over the live lookup, which only covers never-stamped state
+    const traceId = tool?.traceId ?? (child ? childTrace(sid).traceId : openTurns.get(sid)?.traceId)
+    if (!traceId) return undefined
     const assistantMessageID =
       tool?.assistantMessageID ?? (typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined)
     // Without assistantMessageID the parent chat-span hash degrades to "undefined" —
     // skip entirely (including sub-agent attachment registration)
-    if (!assistantMessageID) return
+    if (!assistantMessageID) return undefined
     // The tool span's parent is the chat span that issued it (deterministic id, so emit order does not matter)
     const parentId = chatSpanId(assistantMessageID)
     const name = tool?.name ?? "unknown"
@@ -1044,6 +1122,8 @@ export function createSpanBuilder(
       content: options.gates.toolContent ? result : undefined,
       failed,
     })
+
+    return traceId
   }
 
   /**
@@ -1145,6 +1225,29 @@ export function createSpanBuilder(
     },
     async flushAll(reason = "plugin_unload") {
       const now = nano(Date.now())
+      // In-flight TOOLS first (Bug 32): pre-fix they were silently dropped here — the
+      // pump stops at dispose before the host's final settlement sweep delivers their
+      // terminals, so this is the only place they can still emit. Emit them as
+      // interrupted under their own round's traceId BEFORE the turn/container flush
+      // consumes the live trace sources, and count each on its own turn's root.
+      for (const tool of [...tools.values()]) {
+        // Idempotency (Bug 16 twin): mark before emitting so a post-flush redelivery
+        // of the same terminal cannot double-emit
+        const seen = endedTools.get(tool.sessionID) ?? new Set<string>()
+        seen.add(tool.callId)
+        endedTools.set(tool.sessionID, seen)
+        tools.delete(tool.callId)
+        const emittedTraceId = emitToolSpan(
+          tool.sessionID,
+          tool.callId,
+          tool,
+          { assistantMessageID: tool.assistantMessageID, error: { type: "interrupted", message: `interrupted: ${reason}` } },
+          now,
+          true,
+        )
+        const turn = openTurns.get(tool.sessionID)
+        if (turn && emittedTraceId === turn.traceId) turn.spanCount += 1
+      }
       // In-flight rounds never reached a terminal: reporting them OK (the pre-fix
       // default) is a false success on the ledger. Mark them interrupted with the
       // teardown cause, distinct from a real execution.interrupted.

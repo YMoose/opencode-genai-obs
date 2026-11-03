@@ -1102,3 +1102,114 @@ test("Bug 31: a completed turn stays OK when flushAll runs later", async () => {
   assert.ok(root, "the turn root flushes")
   assert.strictEqual(root.status.code, 1, "a turn that completed before unload stays OK")
 })
+
+// ------------------------------------------------- Bug 32 (late / unload-race tool terminals)
+
+test("Bug 32: a tool terminal arriving after execution.interrupted still emits with its original name, duration, and Round 1 traceId", async () => {
+  // Pre-fix, the interrupted round's flush deleted the open turn (the tool's trace
+  // source) and purgeInFlight dropped the tool state: the late terminal found
+  // neither, so its span vanished entirely.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "read" }))
+  // host kill / user cancel sweeps the round while the tool is still in flight
+  builder.handleEvent(event("session.execution.interrupted", 1_300, { sessionID: "s1", reason: "shutdown" }))
+  // the tool terminal arrives after the round closed (settlement sweep / redelivery)
+  builder.handleEvent(
+    event("session.tool.failed", 1_350, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      id: "t1",
+      error: { type: "interrupted", message: "Tool execution interrupted (sessionID: s1)" },
+    }),
+  )
+  await settle()
+
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.ok(tool, "the late tool terminal must still emit its span (pre-fix: no trace source left, dropped)")
+  assert.strictEqual(tool.name, "execute_tool read", "the recorded name must survive the round close (pre-fix: 'unknown' from purged state)")
+  assert.strictEqual(tool.traceId, hash("opencode-turn:s1:m1", 16), "the tool stays on its own round's trace, not on whatever is open now")
+  assert.strictEqual(tool.startTimeUnixNano, 1_150_000_000n, "the tool's real start (input.started) must be preserved")
+  assert.strictEqual(tool.endTimeUnixNano, 1_350_000_000n, "the tool's duration reflects its own terminal, not the round's")
+  assert.strictEqual(tool.status.code, 2, "a failed tool terminal keeps its error status")
+})
+
+test("Bug 32: a late Round 1 tool terminal arriving after Round 2 started attaches to Round 1's traceId and does not inflate Round 2's opencode.turn.messages", async () => {
+  // Pre-fix, the purged tool state made the late terminal emit as a nameless
+  // zero-duration span under whichever turn was open — Round 2 — and count on it.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "read" }))
+  builder.handleEvent(event("session.execution.interrupted", 1_300, { sessionID: "s1", reason: "user" }))
+  // Round 2 takes over with a fresh prompt while Round 1's tool has not settled
+  builder.handlePrompt("s1", "m2", "again")
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  // Round 1's tool terminal arrives NOW, after Round 2 opened
+  builder.handleEvent(
+    event("session.tool.failed", 2_150, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      id: "t1",
+      error: { type: "interrupted", message: "Tool execution interrupted (sessionID: s1)" },
+    }),
+  )
+  builder.handleEvent(
+    event("session.step.ended", 2_200, {
+      sessionID: "s1",
+      assistantMessageID: "a2",
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "s1" }))
+  await settle()
+
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.ok(tool, "the late Round 1 tool terminal must emit")
+  assert.strictEqual(tool.traceId, hash("opencode-turn:s1:m1", 16), "attribution stays on Round 1's trace (pre-fix: Round 2's open turn)")
+  assert.strictEqual(tool.name, "execute_tool read", "the Round 1 tool keeps its recorded name (pre-fix: 'unknown', state purged)")
+  assert.strictEqual(tool.startTimeUnixNano, 1_150_000_000n, "the Round 1 tool keeps its real start time")
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m2", 8))
+  assert.ok(root, "Round 2's turn root must emit")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1],
+    1,
+    "Round 2 counts its own chat span only — the late Round 1 tool must not inflate it (pre-fix: 2)",
+  )
+  assert.strictEqual(root.endTimeUnixNano, 2_300_000_000n, "Round 2's end time stays at its own terminal")
+})
+
+test("Bug 32: unload flushAll emits in-flight tools as interrupted: plugin_unload instead of silently dropping them", async () => {
+  // The measured unload race (host restart): the SSE pump stops at dispose before
+  // the host's final settlement sweep delivers the tool terminals, so flushAll is
+  // the only place those tools can still emit — pre-fix they were silently dropped.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "read" }))
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { path: "src/" } }))
+  // unload mid-tool: no tool terminal, no round terminal
+  await builder.flushAll()
+
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.ok(tool, "the in-flight tool must emit at unload (pre-fix: silently dropped)")
+  assert.strictEqual(tool.name, "execute_tool read", "the recorded name survives teardown")
+  assert.strictEqual(tool.traceId, hash("opencode-turn:s1:m1", 16), "the tool lands on its round's trace")
+  assert.strictEqual(tool.startTimeUnixNano, 1_150_000_000n, "the real start time survives teardown")
+  assert.strictEqual(tool.status.code, 2, "an interrupted-at-unload tool must not report OK")
+  assert.ok(
+    tool.status.message!.includes("interrupted: plugin_unload"),
+    "the status names the teardown cause — queryable, distinct from a real tool error or user cancel",
+  )
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the in-flight turn root must still flush at unload")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1],
+    1,
+    "the emitted tool counts on its own turn root",
+  )
+})
