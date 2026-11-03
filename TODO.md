@@ -27,6 +27,31 @@ Upstream ask: compaction started/ended carry no run id and ended does not refere
 started — candidate [#47701](https://github.com/anomalyco/opencode/issues/47701)
 follow-up material (external post requires user approval).
 
+## Governance log
+
+- 2026-11-01: Full-project review surfaced 10 bugs (Bugs 16-22 fixed red-first) and a
+  governance gap → heuristic policy adopted in AGENTS.md (`2be1436`): no invented
+  identity/ordering/attribution without an explicit user decision; standing heuristics
+  must be labeled. Four standing heuristics labeled in code (`HEURISTIC(upstream-gap)`
+  ×4, `6203b46`) and indexed here.
+- Bug 23 (`0bd2f48`) set the pattern: a proposed heuristic fix (timestamp guard /
+  superseded-reason routing) was retracted in favor of the upstream mechanism
+  (durable.seq) once the contract was verified.
+- 2026-11-03: "Live capture first" principle — live capture is primary; no live-path
+  complexity for replay-only anomalies (AGENTS.md, `3776970`).
+- One-by-one adjudication of all four standing heuristics, each grounded in upstream
+  source verification (`~/yzh/code/temp/opencode`) and live probes:
+  - #1 compaction timestamp identity — KEEP; restart limitation recorded (`4e2737e`);
+    adjacent hazard fixed as Bug 24 (`3420b7c`, durable.seq guard).
+  - #2 auto-turn fabricated attribution — REMOVED; real wakeup events consumed
+    (`opencode.turn.wakeup`, Bug 25 `51875d8`) + stale-wake hardening (Bug 26
+    `e221669`); S2 closed.
+  - #3 interrupted-step marking — KEEP, zero code change; assumption verified against
+    upstream ordering, retained as an accepted gap/replay exception (`ba89f60`).
+  - #4 reasoning arrival-order — KEEP, zero change; live ordering verified (`ba89f60`).
+- Closing pattern: policy → labels → per-item adjudication → every outcome is either a
+  mechanism-aligned fix or a verified archive entry; nothing stays a guess.
+
 ## Offline session replay lane (promised, not yet implemented)
 
 `src/ids.ts` declares a FROZEN deterministic-id contract whose counterpart is "an
