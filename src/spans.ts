@@ -132,12 +132,17 @@ interface SessionInfoLite {
   directory?: string
 }
 
+/** Turn origin: a real prompt hook ("user"), a consumed wakeup event ("synthetic"), or neither ("unknown") */
+type TurnOrigin = "user" | "synthetic" | "unknown"
+
 interface TurnState {
   readonly key: string // userMessageID
   readonly traceId: string
   readonly spanId: string
   readonly startedNano: bigint
   readonly inputText: string
+  /** Where inputText came from — decides user attribution (gen_ai.user.message, prompt length) */
+  readonly origin: TurnOrigin
   /** Durable high-water at turn open — the round identity this turn belongs to (Bug 23) */
   readonly roundSeq?: number
   index: number
@@ -244,6 +249,13 @@ export function createSpanBuilder(
   const openTurns = new Map<string, TurnState>()
   /** Prompt-hook stash: held until step.started decides open-a-turn vs ignore (sub-agents) */
   const pendingPrompts = new Map<string, { messageID: string; text: string }>()
+  /**
+   * Wakeup stash (Bug 25): text of the last synthetic wakeup for a session — from
+   * `session.synthetic` or a synthetic `session.inbox.enqueued` item — held until
+   * step.started opens the round it woke. Last-write-wins; consumed (deleted) by the
+   * first turn it opens, and a stashed user prompt wins the round instead.
+   */
+  const pendingWakes = new Map<string, { text: string }>()
   /** Transient step state: assistantMessageID → StepState */
   const steps = new Map<string, StepState>()
   /**
@@ -327,6 +339,7 @@ export function createSpanBuilder(
     containers.delete(sid)
     turnCounters.delete(sid)
     pendingPrompts.delete(sid)
+    pendingWakes.delete(sid)
     compactions.delete(sid)
     pendingRetries.delete(sid)
     endedSteps.delete(sid)
@@ -397,10 +410,15 @@ export function createSpanBuilder(
         ["opencode.session.directory", merged.directory],
         ["opencode.turn.index", turn.index],
         ["opencode.turn.messages", turn.spanCount],
+        // Wakeup origin marker — present only on non-user rounds: the wakeup text is
+        // real upstream data (session.synthetic / synthetic session.inbox.enqueued),
+        // surfacing the origin on the turn root makes wakeup rounds queryable (Bug 25)
+        ["opencode.turn.wakeup", turn.origin === "user" ? undefined : turn.origin],
         // Ungated size signal (UTF-8 bytes, same unit as the truncation budget): lets us
         // reason about prompt growth even when the userPrompts content gate is off
-        // (mirrors Claude's interaction.user_prompt_length)
-        ["opencode.user_prompt.length", Buffer.byteLength(turn.inputText, "utf-8")],
+        // (mirrors Claude's interaction.user_prompt_length). User rounds only — a
+        // synthetic/unknown round has no user prompt to measure (Bug 25)
+        ["opencode.user_prompt.length", turn.origin === "user" ? Buffer.byteLength(turn.inputText, "utf-8") : undefined],
         ["openinference.span.kind", "AGENT"],
         ["input.value", inputTrunc?.value],
         ["input.value_original_length", inputTrunc?.originalLength],
@@ -412,7 +430,7 @@ export function createSpanBuilder(
     emit(span)
   }
 
-  const openTurn = (sid: string, messageID: string, text: string, nowMs: number, agent?: string) => {
+  const openTurn = (sid: string, messageID: string, text: string, nowMs: number, origin: TurnOrigin, agent?: string) => {
     const index = (turnCounters.get(sid) ?? 0)
     turnCounters.set(sid, index + 1)
     const traceId = turnTraceId(sid, messageID)
@@ -423,14 +441,20 @@ export function createSpanBuilder(
       spanId,
       startedNano: nano(nowMs),
       inputText: text,
+      origin,
       roundSeq: seqHighWater.get(sid),
       index,
       agent,
       lastEndNano: nano(nowMs),
       spanCount: 0,
     })
-    // gen_ai.user.message — gated by userPrompts (undefined content = metadata-only event)
-    options.emitLogEvent?.({ event: "user", sessionID: sid, timeMs: nowMs, traceId, spanId, content: options.gates.userPrompts ? text : undefined })
+    // gen_ai.user.message — ONLY a real prompt hook is user attribution; synthetic
+    // wakeups and unknown-origin rounds never emit one (Bug 25 removed the fabricated
+    // "(auto)" pseudo-prompt that used to leak here). Gated by userPrompts
+    // (undefined content = metadata-only event).
+    if (origin === "user") {
+      options.emitLogEvent?.({ event: "user", sessionID: sid, timeMs: nowMs, traceId, spanId, content: options.gates.userPrompts ? text : undefined })
+    }
   }
 
   // ------------------------------------------------------------------ events
@@ -484,6 +508,25 @@ export function createSpanBuilder(
         return
       }
 
+      case "session.synthetic": {
+        // Wakeup stash (Bug 25): a synthetic round opener (external Session.synthetic
+        // route, restart continuation, instruction injection, stream continuation) —
+        // the text is the real wakeup message the round will run on
+        if (typeof data.text === "string") pendingWakes.set(sid, { text: data.text })
+        return
+      }
+
+      case "session.inbox.enqueued": {
+        // Wakeup stash (Bug 25): subagent-completion wakeups enqueue a synthetic inbox
+        // item instead of firing any prompt; non-synthetic items are real user input
+        // captured by the prompt hook — not stashed here
+        const item = data.item as { type?: string; payload?: { text?: unknown } } | undefined
+        if (item?.type === "synthetic" && typeof item.payload?.text === "string") {
+          pendingWakes.set(sid, { text: item.payload.text })
+        }
+        return
+      }
+
       case "session.step.started": {
         // Open the turn from the stashed prompt on the first step (session.created is
         // known by now, so root/sub-agent classification is reliable)
@@ -496,27 +539,35 @@ export function createSpanBuilder(
           const pending = pendingPrompts.get(sid)
           if (pending) {
             pendingPrompts.delete(sid)
+            pendingWakes.delete(sid) // the user prompt wins the round; the wake is stale
             const existing = openTurns.get(sid)
             if (existing && existing.key !== pending.messageID) {
               // Previous execution stream never reached succeeded before the new prompt
               // took over: flush that turn root now
               void flushTurnRoot(sid, nano(event.created))
             }
-            openTurn(sid, pending.messageID, pending.text, event.created, data.agent as string | undefined)
+            openTurn(sid, pending.messageID, pending.text, event.created, "user", data.agent as string | undefined)
           } else if (!openTurns.has(sid)) {
-            // HEURISTIC(upstream-gap): invented a turn root keyed `auto:<created>` plus
-            // a fabricated user message "(auto)" when a step.started arrives with no
-            // stashed prompt. Upstream gap: NO marker exists for "execution round
-            // opened without user input" — session.synthetic is a reserved event type
-            // that empirically NEVER fires in opencode 2.2.5 (live-probe verified
-            // 2026-11-01, /tmp/opencode/seq-probe.jsonl; even POSTing
-            // /api/session/{id}/synthetic only emits session.inbox.enqueued). Known
-            // leak: the "(auto)" pseudo-prompt flows into the logs lane as a
-            // gen_ai.user.message record (see TODO.md, Standing heuristics).
-            // Migration: upstream fires session.synthetic or documents a round-origin
-            // marker (opencode #47701 is the live thread for the lifecycle contract).
+            // HEURISTIC(upstream-gap): invented semantics = the turn identity only:
+            // this branch keys a turn root `auto:<created>` when a step.started arrives
+            // with no stashed prompt. Everything the round WAS attributed to is now
+            // real upstream data (Bug 25): the fabricated user message "(auto)" was
+            // removed, and the wakeup text is consumed from the events that actually
+            // fire — `session.synthetic` and `session.inbox.enqueued` with a synthetic
+            // item (subagent-completion wakeup, `Session.synthetic` external route,
+            // restart continuation ("Continuing after server restart", restart.ts:92),
+            // instruction injection (instructions.ts:75), stream continuation
+            // (llm.ts:309,340)). The earlier "session.synthetic empirically NEVER
+            // fires" claim (live-probe 2026-11-01) was wrong — the probe just didn't
+            // exercise those paths; a follow-up probe verified the firing contexts
+            // (/tmp/opencode/syn-probe.jsonl). Remaining gap: no upstream marker ties
+            // a round to its wakeup event, so `auto:<created>` stays the turn key.
+            // Migration: upstream documents a round-origin marker (opencode #47701 is
+            // the live thread for the lifecycle contract).
             // Approved: user decision 2026-11-01.
-            openTurn(sid, `auto:${event.created}`, "(auto)", event.created, data.agent as string | undefined)
+            const wake = pendingWakes.get(sid)
+            pendingWakes.delete(sid)
+            openTurn(sid, `auto:${event.created}`, wake?.text ?? "", event.created, wake ? "synthetic" : "unknown", data.agent as string | undefined)
           }
         }
         const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""

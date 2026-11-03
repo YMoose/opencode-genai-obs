@@ -858,3 +858,104 @@ test("tool span timing: starts at input.started (end-to-end audit view), not too
   assert.strictEqual(tool.startTimeUnixNano, 1_200_000_000n, "tool span starts at input.started")
   assert.strictEqual(tool.endTimeUnixNano, 5_300_000_000n)
 })
+
+// ------------------------------------------------------------------ Bug 25 (synthetic wakeups)
+
+/**
+ * Shared assertion block for a wakeup round: the turn root must exist under the
+ * auto-identity, carry the real wakeup text, and carry NO user attribution.
+ */
+async function assertWakeupRound(
+  harness: Harness,
+  logEvents: Array<Record<string, unknown>>,
+  expectedText: string,
+): Promise<void> {
+  await settle()
+  const root = harness.spans.find((span) => span.spanId === hash("opencode-turn-span:s1:auto:1100", 8))
+  assert.ok(root, "must emit the auto turn root")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.turn.wakeup")?.[1],
+    "synthetic",
+    "the turn root must carry the wakeup origin",
+  )
+  assert.equal(root.attributes.find(([key]) => key === "input.value")?.[1], expectedText, "the real wakeup text must land in input.value")
+  assert.ok(
+    !root.attributes.some(([key]) => key === "opencode.user_prompt.length"),
+    "a synthetic round is not a user prompt — no length attribute",
+  )
+  assert.strictEqual(root.name, expectedText, "the name previews the wakeup text")
+  assert.ok(
+    !logEvents.some((e) => e.event === "user"),
+    "a synthetic wakeup must never be attributed to the user (no gen_ai.user.message)",
+  )
+}
+
+test("Bug 25a: synthetic wakeup (session.inbox.enqueued synthetic item) opens a turn with the real text, no fabricated user attribution", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const harness = makeHarness({ emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>) })
+  harness.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }, 0))
+  // subagent-completion wakeup: a synthetic inbox item enqueued without any prompt hook
+  harness.builder.handleEvent(
+    event("session.inbox.enqueued", 1_050, { sessionID: "s1", item: { type: "synthetic", payload: { text: "subagent finished: report ready", description: "wake" } } }, 5),
+  )
+  harness.builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }, 6))
+  harness.builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }, 7))
+  harness.builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }, 8))
+  await assertWakeupRound(harness, logEvents, "subagent finished: report ready")
+})
+
+test("Bug 25b: unknown-origin round (cold attach, no wakeup event) keeps graceful empty behavior with no user attribution", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const harness = makeHarness({ emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>) })
+  harness.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  harness.builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  harness.builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  harness.builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = harness.spans.find((span) => span.spanId === hash("opencode-turn-span:s1:auto:1100", 8))
+  assert.ok(root, "must emit the auto turn root")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.turn.wakeup")?.[1],
+    "unknown",
+    "a round with neither prompt nor wakeup must be marked unknown",
+  )
+  assert.ok(!logEvents.some((e) => e.event === "user"), "no stashed prompt and no wakeup — no gen_ai.user.message may be fabricated")
+  assert.ok(
+    !root.attributes.some(([key]) => key === "opencode.user_prompt.length"),
+    "the fake length-6 signal (\"(auto)\" bytes) must be gone",
+  )
+  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "nothing to attribute — no input.value")
+  // Bug 3 chain: empty input falls back to the session title
+  assert.strictEqual(root.name, "T", "empty input must fall back to the session title")
+})
+
+test("Bug 25c: session.synthetic event stashes the wakeup text for the same round", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const harness = makeHarness({ emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>) })
+  harness.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }, 0))
+  harness.builder.handleEvent(event("session.synthetic", 1_050, { sessionID: "s1", text: "subagent finished: report ready" }, 5))
+  harness.builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }, 6))
+  harness.builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }, 7))
+  harness.builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }, 8))
+  await assertWakeupRound(harness, logEvents, "subagent finished: report ready")
+})
+
+test("Bug 25 regression: a normal user round keeps the real user message, prompt length, and no wakeup attribute", async () => {
+  const logEvents: Array<Record<string, unknown>> = []
+  const harness = makeHarness({ emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>) })
+  harness.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  harness.builder.handlePrompt("s1", "m1", "hello world")
+  harness.builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  harness.builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  harness.builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = harness.spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "must emit the user turn root")
+  const user = logEvents.find((e) => e.event === "user")
+  assert.ok(user, "a real user prompt must still emit gen_ai.user.message")
+  assert.strictEqual(user!.content, "hello world")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 11, "the real prompt length must survive")
+  assert.ok(!root.attributes.some(([key]) => key === "opencode.turn.wakeup"), "user rounds carry no wakeup attribute")
+})
