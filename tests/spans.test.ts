@@ -959,3 +959,35 @@ test("Bug 25 regression: a normal user round keeps the real user message, prompt
   assert.equal(root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1], 11, "the real prompt length must survive")
   assert.ok(!root.attributes.some(([key]) => key === "opencode.turn.wakeup"), "user rounds carry no wakeup attribute")
 })
+
+test("Bug 26: a mid-turn synthetic continuation (stream continuation) must not label the NEXT round", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello world")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  // Mid-turn continuation (llm.ts:309,340): session.synthetic fires WHILE the turn is
+  // open — that text belongs to THIS round, never to the next one
+  builder.handleEvent(event("session.synthetic", 1_200, { sessionID: "s1", text: "continuing after stream break" }))
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s1" }))
+  // Cold attach: the next round opens with no prompt hook and no new wakeup event —
+  // the lingering mid-turn wake must not be consumed for it
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 2_200, { sessionID: "s1", assistantMessageID: "a2" }))
+  builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "s1" }))
+  await settle()
+
+  const first = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(first, "the user round's turn root must still emit")
+  const second = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:auto:2100", 8))
+  assert.ok(second, "must emit the second turn root")
+  assert.equal(
+    second.attributes.find(([key]) => key === "opencode.turn.wakeup")?.[1],
+    "unknown",
+    "the stale mid-turn continuation wake must not label the next round (pre-fix: 'synthetic')",
+  )
+  assert.ok(
+    !second.attributes.some(([key]) => key === "input.value"),
+    "the previous round's continuation text must not leak into the next round's input.value",
+  )
+})

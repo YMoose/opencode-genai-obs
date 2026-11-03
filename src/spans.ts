@@ -383,6 +383,16 @@ export function createSpanBuilder(
     const turn = openTurns.get(sid)
     if (!turn) return
     openTurns.delete(sid)
+    // Bug 26: a wake stashed while THIS turn was open was a mid-turn continuation of
+    // this round (incomplete-stream / output-limit continuation, llm.ts:309,340) — it
+    // must not survive into the next round. Live producers of a NEXT-round wake
+    // (subagent-completion, restart continuation) only ever fire while the parent is
+    // idle (no open turn), so deleting at turn close never discards a legitimate wake
+    // under live ordering (AGENTS.md live-first: no replay-only complexity). flushAll
+    // reaching here is unload teardown — the builder state dies with the instance, so
+    // the delete is inert there. Child sessions need no twin in flushContainer: their
+    // step.started opens containers, never a turn, so they never consume wakes.
+    pendingWakes.delete(sid)
 
     // Refresh title/directory at close (the title may have just been generated)
     const info = options.getSessionInfo ? await options.getSessionInfo(sid) : undefined
