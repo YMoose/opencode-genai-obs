@@ -84,6 +84,17 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   const streams = new Map<string, WriteStream>()
   let seq = 0
 
+  // Bug 27: the host hooks can still fire after dispose() — a synchronous ws.send racing
+  // plugin unload, or an http.request queued once dispose's chain await is done. Writing
+  // then would reopen a stream nobody ever .end()s, whose tail can truncate at process
+  // exit (the Bug 8 class), so post-dispose frames are dropped with a log instead
+  // (explicit user decision 2026-11-03: drop loudly over silently possible truncation; on
+  // hot-reload a fresh recorder instance takes over, so only the handoff instant is lost).
+  // Blast radius: wire JSONL only — no span/metric impact. Set synchronously as dispose()'s
+  // first statement so arrivals during the chain await are blocked too, while reads queued
+  // before dispose still land (awaited-chain semantics, Bug 18).
+  let disposed = false
+
   /**
    * Single-writer chain for http bodies (Bug 18): reads resolve in completion order, but
    * stash/FIFO/JSONL must follow hook (seq) order — serialize the continuations so seq
@@ -157,6 +168,10 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
 
   return {
     recordWsSend(event) {
+      if (disposed) {
+        log("wire frame dropped after dispose", { hook: "ws.send", sessionID: event.sessionID })
+        return
+      }
       const recordSeq = ++seq
       stash(event.sessionID, event.kind, event.frame, recordSeq)
       write({
@@ -173,6 +188,10 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     },
 
     recordHttpRequest(event) {
+      if (disposed) {
+        log("wire frame dropped after dispose", { hook: "http.request", sessionID: event.sessionID })
+        return
+      }
       const recordSeq = ++seq
       // The body is a ReadableStream; clone before reading so the original is never
       // consumed. A disturbed body makes clone() throw — skip the frame instead of
@@ -220,6 +239,9 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     },
 
     async dispose() {
+      // Must be the first statement (synchronous): a frame arriving during the chain
+      // await below is blocked at the record* guards, not written mid-close
+      disposed = true
       // In-flight reads must land before the streams close (a write after the clear
       // would reopen a stream nobody ends — truncated last line, the Bug 8 class)
       await readChain

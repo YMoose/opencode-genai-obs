@@ -13,8 +13,8 @@ Citations are `path:line` pointers.
 | Source | What it carries | Where it goes |
 |---|---|---|
 | `ctx.session.hook("prompt")` | `sessionID`, `messageID`, `prompt.text` | Stashed in `pendingPrompts`; the first `step.started` consumes it and opens the turn root (`spans.ts:559`) |
-| `ctx.session.hook("experimental.ws.send")` | `sessionID`, `agent`, `model.{providerID,id}`, `kind`, `frame` | Written to per-session JSONL; also stashed per-session FIFO and consumed by the next `chat` span for `input.value` (`wire.ts:139`) |
-| `ctx.session.hook("http.request")` | Same as `ws.send`, body is a cloned `ReadableStream` | Same path as above (`wire.ts:155`) |
+| `ctx.session.hook("experimental.ws.send")` | `sessionID`, `agent`, `model.{providerID,id}`, `kind`, `frame` | Written to per-session JSONL; also stashed per-session FIFO and consumed by the next `chat` span for `input.value` (`wire.ts:170`) |
+| `ctx.session.hook("http.request")` | Same as `ws.send`, body is a cloned `ReadableStream` | Same path as above (`wire.ts:190`) |
 | `ctx.event.subscribe()` → `session.*` SSE | All events listed in §2 | Drives the span state machine (`index.ts:240`) |
 | `ctx.session.get({ sessionID })` | `parentID`, `agent`, `title`, `location.directory` | Lazily merged at turn/container close to fill `opencode.session.title/directory` (`index.ts:166`) |
 

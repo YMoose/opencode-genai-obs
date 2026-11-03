@@ -3,10 +3,11 @@
  * - dispose returns a promise and waits for the flush (Bug 8: fire-and-forget used to truncate the last line)
  * - Pending slots are cleaned up after consumption (Bug 4 follow-up: prevents map leaks in long-lived processes)
  * - PENDING_CAP drops-oldest behavior
+ * - Post-dispose frames are dropped with a log, never appended via a zombie stream (Bug 27)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createWireRecorder } from "../src/wire.js"
 import { tempDir } from "./helpers.js"
@@ -202,4 +203,58 @@ test("Bug 18: http.request frames land in seq order even when body reads complet
     ],
     "JSONL lines land in seq order and the in-flight frame flushes before dispose resolves",
   )
+})
+
+// ------------------------------------------------------- post-dispose drops (Bug 27)
+
+test("Bug 27: a ws.send arriving after dispose is dropped with a log, never a zombie append", async () => {
+  const dir = tempDir("ocg-wire-postdispose-ws-")
+  const logs: Array<{ msg: string; data?: unknown }> = []
+  const recorder = createWireRecorder(
+    { enabled: true, directory: dir, maxFrameBytes: -1 },
+    (msg, data) => logs.push({ msg, data }),
+  )
+  recorder.recordWsSend(hookEvent("s1", JSON.stringify({ n: 1 })) as never)
+  await recorder.dispose()
+  const baseline = readFileSync(join(dir, "s1.jsonl"), "utf-8")
+
+  // The ws.send hook path is synchronous: the host can still call it after unload began.
+  // The old behavior reopened a stream nobody .end()s (zombie append).
+  recorder.recordWsSend(hookEvent("s1", JSON.stringify({ late: true })) as never)
+  await new Promise((r) => setTimeout(r, 25))
+
+  assert.equal(
+    readFileSync(join(dir, "s1.jsonl"), "utf-8"),
+    baseline,
+    "no new JSONL line may be appended after dispose",
+  )
+  const dropped = logs.filter((e) => e.msg.includes("dropped after dispose"))
+  assert.equal(dropped.length, 1, "exactly one drop log fires (dropped loudly, not silently truncated)")
+  assert.equal((dropped[0]?.data as { hook?: string })?.hook, "ws.send", "the drop log names the hook kind")
+  assert.equal((dropped[0]?.data as { sessionID?: string })?.sessionID, "s1", "the drop log names the session")
+  assert.equal(recorder.consumePending("s1"), undefined, "pending is not re-populated after dispose")
+})
+
+test("Bug 27: an http.request tail landing after dispose is dropped with a log, never a zombie append", async () => {
+  const dir = tempDir("ocg-wire-postdispose-http-")
+  const logs: Array<{ msg: string; data?: unknown }> = []
+  const recorder = createWireRecorder(
+    { enabled: true, directory: dir, maxFrameBytes: -1 },
+    (msg, data) => logs.push({ msg, data }),
+  )
+  await recorder.dispose()
+
+  // The cloned body resolves immediately, but dispose's chain await has already finished:
+  // queuing this read now would reassign readChain past dispose and write via a zombie stream.
+  recorder.recordHttpRequest({
+    ...hookEvent("s1", ""),
+    request: { clone: () => ({ text: () => Promise.resolve("late-http-frame") }) } as unknown as Request,
+  } as never)
+  await new Promise((r) => setTimeout(r, 25))
+
+  assert.ok(!existsSync(join(dir, "s1.jsonl")), "no JSONL line (not even the file) is written after dispose")
+  const dropped = logs.filter((e) => e.msg.includes("dropped after dispose"))
+  assert.equal(dropped.length, 1, "exactly one drop log fires (dropped loudly, not silently truncated)")
+  assert.equal((dropped[0]?.data as { hook?: string })?.hook, "http.request", "the drop log names the hook kind")
+  assert.equal((dropped[0]?.data as { sessionID?: string })?.sessionID, "s1", "the drop log names the session")
 })
