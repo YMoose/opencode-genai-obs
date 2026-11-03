@@ -4,7 +4,7 @@
 
 <a href="README.md">English</a> | <b>简体中文</b>
 
-**面向 OpenCode v2 的审计级 GenAI 可观测插件——标准 OTLP traces 与 metrics，外加全量原始请求落盘。**
+**面向 OpenCode v2 的审计级 GenAI 可观测插件——标准 OTLP traces 与 metrics，外加传输钩子处的请求采集。**
 
 `opencode-genai-obs` 挂载于 OpenCode v2 的会话事件流与传输层钩子，通过标准 OTLP/HTTP（protobuf）将 Agent 执行链路实时导出至任意兼容后端（Arize Phoenix、Jaeger、SigNoz、OTel Collector 等），并支持将发往模型侧的原始请求体（wire body）落盘为本地 JSONL。
 
@@ -16,7 +16,7 @@
 
 - **Traces** —— `gen_ai.*` 属性 + OpenInference 镜像，主信号
 - **Metrics** —— `gen_ai.client.token.usage` 与 `gen_ai.client.operation.duration`；不做 infra/运行时指标，也不做应用运营指标（会话计数、commit 计数等——那是运营监控类插件的定位）
-- **Events/Logs** —— 可选开启：`gen_ai.*` 消息事件（`system` / `user` / `tool` / `choice`；assistant 消息由 `choice` 覆盖）。内容遵循 contentGates——被门控的事件仍会上报，但仅含元数据
+- **Events/Logs** —— 可选开启：旧版 `gen_ai.*` 消息事件（`system` / `user` / `tool` / `choice`；这些名称在核查的 OTel 约定中已弃用）。内容遵循 contentGates——被门控的事件仍会上报，但仅含元数据
 
 `opencode.*` 自定义 span 属性不受此限——范围约束的是"做哪些信号域"，不是 span 上的自有属性。
 
@@ -29,11 +29,11 @@
 ```text
 <user prompt preview>                                    [AGENT · invoke_agent · 4.2s]
 ├── chat claude-sonnet-4-5           1,840 → 312 tok · $0.009  [LLM · chat]
-├── execute_tool grep                "timeout" in src/         [TOOL · execute_tool · 80ms]
-├── execute_tool subagent (explorer)                           [TOOL · execute_tool]
-│   └── invoke_agent explorer                                  [AGENT · child session]
-│       ├── chat gemini-flash        920 → 180 tok             [LLM · chat]
-│       └── execute_tool read        src/auth/client.ts        [TOOL · execute_tool]
+│   ├── execute_tool grep            "timeout" in src/          [TOOL · execute_tool · 80ms]
+│   └── execute_tool subagent (explorer)                       [TOOL · execute_tool]
+│       └── invoke_agent explorer                              [AGENT · child session]
+│           └── chat gemini-flash    920 → 180 tok             [LLM · chat]
+│               └── execute_tool read src/auth/client.ts      [TOOL · execute_tool]
 └── chat claude-sonnet-4-5           2,310 → 490 tok · $0.014  [LLM · chat]
 
 compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standalone trace]
@@ -41,11 +41,11 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 | Span | `gen_ai.operation.name` | 内容 |
 |---|---|---|
-| 轮根（用户提问预览） | `invoke_agent` | 用户输入预览、最终回答、会话标题/目录、token 与消息总数、成本 |
+| 轮根（用户提问预览） | `invoke_agent` | 用户输入预览、最终回答、会话标题/目录、已发出的模型步与工具 span 数；token 与成本位于 chat/compaction span |
 | `chat <model>` | `chat` | 厂商/模型、输入/输出/推理/缓存 token、成本、输出消息（text + reasoning parts）、wire 帧 `input.value` |
 | `execute_tool <name>` | `execute_tool` | 工具名/调用 ID、参数、结果、耗时、子代理挂载 |
 | `invoke_agent <agent>` | `invoke_agent` | 子会话容器 span，直接挂在父级工具 span 下 |
-| `compaction` | —（独立 trace） | 模型、token、成本、摘要、触发原因 |
+| `compaction` | `compaction`（插件自定义操作；独立 trace） | 模型、token、成本、摘要、触发原因 |
 
 发生重试时，随后的 chat span 会打标 `opencode.retry.attempt` / `opencode.retry.error`。
 
@@ -60,12 +60,12 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 | 事件 | 时机 | 内容门 |
 |---|---|---|
-| `gen_ai.user.message` | 每个 turn 开启 | `userPrompts` |
+| `gen_ai.user.message` | 从捕获的 prompt 开启根 turn；synthetic/unknown 来源不发出用户事件 | `userPrompts` |
 | `gen_ai.system.message` | chat span 消费到含可解析 system prompt 的 wire 帧（OpenAI `messages[0]` 或 Anthropic 顶层 `system`） | `wireBody` |
 | `gen_ai.tool.message` | 每次工具调用结束 | `toolContent` |
 | `gen_ai.choice` | 每个 LLM 步结束（finish reason + 补全内容） | `assistantResponses` |
 
-`gen_ai.assistant.message` 有意并入 `gen_ai.choice`（步骤文本即补全内容）。每个事件都携带其来源 span 的确定性 trace/span 上下文，后端可将日志与 trace 关联。被门控的事件仍会上报，但仅含元数据。
+`gen_ai.assistant.message` 表示请求历史中的 assistant 消息，`gen_ai.choice` 表示响应，两者不是别名。本插件用 `choice` 记录响应文本，不单独记录历史 assistant 输入事件。这些事件名称已弃用，现行约定使用消息属性或 `gen_ai.client.inference.operation.details`。每个事件都携带其来源 span 的确定性 trace/span 上下文，后端可将日志与 trace 关联。被门控的事件仍会上报，但仅含元数据。
 
 ### Wire 采集（本地磁盘）
 
@@ -75,11 +75,11 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 ## 特性一览
 
-- **确定性 Trace / Span ID** —— 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID）：多模块实例（realm）间幂等去重。离线补灌链路（崩溃修复、历史回填）为规划中的后续工作，将复用同一套字节一致的 ID——见 [TODO.md](TODO.md)。
-- **LLM 原始请求体采集** —— 发往厂商的序列化 JSON（完整 system prompt、消息历史、tools schema、采样参数）落盘为按会话切分的 JSONL，并可按需注入 chat span 的 `input.value`。详见 [Wire 原始请求采集](#wire-原始请求采集)。
+- **确定性 Trace / Span ID** —— 由会话、消息与工具调用 ID 经 SHA-256 派生（而非随机 UUID）：多模块实例（realm）可复算相同标识。共享管线和终态事件守卫负责抑制重复处理；ID 本身不保证不重复发送，也不保证后端执行 upsert。离线补灌链路（崩溃修复、历史回填）为规划中的后续工作，将复用同一套字节一致的 ID——见 [TODO.md](TODO.md)。
+- **LLM 原始请求体采集** —— 传输钩子处观察到的请求文本（system prompt、消息历史、tools schema、采样参数）落盘为按会话切分的 JSONL，并可按需注入 chat span 的 `input.value`。详见 [Wire 原始请求采集](#wire-原始请求采集)。
 - **W3C trace-context 传播** —— 可选地向白名单厂商的请求注入 `traceparent`,OTel 插桩网关（LiteLLM、vLLM 等）可将自身 span 挂到我们的 trace 下：端到端一棵树，而非两条孤链。
 - **会话标注** —— 实时向 Phoenix 兼容的 `/v1/session_annotations` REST API 推送项目名/标题（可开关；非 Phoenix 后端关闭即可，无副作用）。
-- **OTel GenAI semconv + OpenInference 双语义约定** —— 标准 `gen_ai.*` 属性与 OpenInference 镜像（`openinference.span.kind`、`llm.token_count.*`、`llm.total_cost`、`input.value`、`output.value`）同时写入，零平台绑定。
+- **OTel GenAI semconv + OpenInference 双语义约定** —— 标准 `gen_ai.*` 属性与 OpenInference 镜像（`openinference.span.kind`、`llm.token_count.*`、`llm.total_cost`、`input.value`、`output.value`）同时写入；已知的标准偏差见[源码核查记录](docs/source-audit.md)。
 - **细粒度隐私门控与日志脱敏** —— 对齐 Claude Code `OTEL_LOG_*` 语义的内容开关、字节级三态截断、插件日志自动脱敏凭证。
 - **线格式交给官方 OTel SDK** —— OTLP protobuf 编码委托给 `@opentelemetry/exporter-trace-otlp-proto` / `-metrics-`；其上的管线（span 状态机、确定性 ID、重试/排空队列）为自研。
 
@@ -108,7 +108,8 @@ cd opencode-genai-obs && npm install && npm run build
 {
   "tracing": {
     "endpoint": "http://localhost:6006"
-  }
+  },
+  "metrics": { "enabled": false }
 }
 ```
 
@@ -125,13 +126,15 @@ cd opencode-genai-obs && npm install && npm run build
 }
 ```
 
-**OTel Collector / Jaeger**(4318 即默认值，无需额外配置）:
+**OTel Collector**（4318 为默认端口；需为启用的信号配置 receiver 和 pipeline）：
 
 ```jsonc
 {
-  "tracing": { "endpoint": "http://localhost:4318" }
+  "tracing": { "endpoint": "http://localhost:4318", "annotations": { "enabled": false } }
 }
 ```
+
+**Jaeger**：使用其 OTLP trace receiver，关闭 Phoenix 会话标注，并关闭或分流 metrics/logs。支持 trace 接收不等于支持全部信号。
 
 **SigNoz Cloud**（单端点 + ingestion key 请求头，含 metrics）:
 
@@ -139,7 +142,8 @@ cd opencode-genai-obs && npm install && npm run build
 {
   "tracing": {
     "endpoint": "https://ingest.us.signoz.cloud:443",
-    "headers": { "signoz-ingestion-key": "<SIGNOZ_INGESTION_KEY>" }
+    "headers": { "signoz-ingestion-key": "<SIGNOZ_INGESTION_KEY>" },
+    "annotations": { "enabled": false }
   }
 }
 ```
@@ -148,7 +152,7 @@ cd opencode-genai-obs && npm install && npm run build
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:6006"
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 ```
 
 ## 配置
@@ -162,7 +166,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
     "enabled": true,                      // false + wire.enabled = wire-only 模式（仅写本地 JSONL，零网络外发）
     "endpoint": "http://localhost:4318",  // OTLP/HTTP 基础地址（4318 = 标准 OTLP；6006 = Phoenix）
     "project": "opencode",                // 写入 openinference.project.name resource 属性
-    "headers": {},                        // 附加请求头（/v1/traces 与 /v1/session_annotations 共用）
+    "headers": {},                        // 所有信号和会话标注的请求头基础值；各信号专用配置可覆盖
     "content": true,                      // 粗粒度隐私门：false 时 toolDetails 与 toolContent 默认关闭
     "contentGates": {                     // 细粒度隐私门（均可单独覆盖 content）
       "userPrompts": true,                //   轮根 Span 的 input.value（用户提问）
@@ -171,7 +175,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
       "toolContent": true,                //   gen_ai.tool.call.result 与工具 output.value
       "wireBody": true                    //   将采集到的 wire 帧注入 chat Span input.value（需开启 wire.enabled）
     },
-    "contentMaxLength": 61440,            // 内容属性的最大 UTF-8 字节数（默认 60 KB，对齐后端 64 KB 单 attr 上限）：
+    "contentMaxLength": 61440,            // 保留内容的 UTF-8 字节预算（默认 60 KiB，截断标记另计；OTel 无统一 64 KB 上限）：
                                           //   -1 = 不截断，0 = 仅元数据（值省略，保留 *_original_length），
                                           //   N > 0 = 截到 N 字节（字符边界安全）并追加 [TRUNCATED]
     "resourceAttributes": {},             // 并入 OTLP Resource 块（内置键优先，不被覆盖）
@@ -186,18 +190,18 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration，
                                           // OTLP/HTTP protobuf 导出。Phoenix 不收 metrics——请用
                                           // OTEL_EXPORTER_OTLP_METRICS_ENDPOINT 指向指标后端（或关闭此项）
-    "intervalMs": 60_000                  // 导出间隔
+    "intervalMs": 60000                  // 导出间隔
   },
   "wire": {
     "enabled": false,                     // 将发往模型侧的原始请求体追加写入本地 JSONL
     "directory": "~/.local/share/opencode/raw-requests",  // 按会话切分的 JSONL 输出目录
-    "maxFrameBytes": -1                   // 磁盘单帧字节上限：-1 = 全量，0 = 仅元数据，N > 0 = 前 N 字节
+    "maxFrameBytes": -1                   // 磁盘 frame 字符串的保留字节预算；截断标记、元数据和 JSON 转义另计
   },
   "logs": {
     "enabled": false,                     // 可选开启：gen_ai.* 消息事件（system/user/tool/choice），OTLP/HTTP protobuf。
                                           // 内容与 span 属性有重叠——后端对日志事件的索引优于 span 时再开启。
                                           // 被门控的内容仍会上报事件，但仅含元数据
-    "intervalMs": 2_000                   // 批量导出延迟（BatchLogRecordProcessor scheduledDelayMillis）
+    "intervalMs": 2000                   // 批量导出延迟（BatchLogRecordProcessor scheduledDelayMillis）
   }
 }
 ```
@@ -215,7 +219,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 
 ### 环境变量
 
-标准 OpenTelemetry 环境变量优先于配置文件（**env > 配置文件 > 默认值**），便于团队或组织级统一注入：
+本插件让下列环境变量优先于配置文件（**env > 配置文件 > 默认值**）。端点处理是插件自有逻辑：先剥除末尾 `/v1/<signal>`，再由 exporter 追加信号路径。SDK 原生行为则是直接使用信号专用 URL，仅为通用端点追加路径；本插件不能原样保留任意自定义信号路径。
 
 | 环境变量 | 映射字段 |
 |---|---|
@@ -225,11 +229,14 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 | `OTEL_EXPORTER_OTLP_HEADERS` + 各信号 `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS` | 各信号独立 headers（`k1=v1,k2=v2`，支持 percent-decode；每信号按 通用 < 信号专用 合并，无跨信号串扰） |
 | `OTEL_RESOURCE_ATTRIBUTES` | `tracing.resourceAttributes`（`k1=v1,k2=v2`，支持 percent-decode） |
 | `OTEL_SERVICE_NAME` | 全部信号的 resource `service.name`（优先于 `OTEL_RESOURCE_ATTRIBUTES`；默认 `opencode-genai-obs`） |
-| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`、`OTEL_EXPORTER_OTLP_COMPRESSION`、`OTEL_EXPORTER_OTLP_TIMEOUT` | 由我们委托的官方 OTel SDK exporter 原生处理 |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`、`OTEL_EXPORTER_OTLP_COMPRESSION` | 由官方 OTel SDK exporter 处理 |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` 及各信号专用超时变量 | metrics/logs 由 SDK 处理；trace exporter 默认显式设置 `timeoutMillis: 30000`，覆盖环境变量超时 |
 
 ## Wire 原始请求采集
 
-开启 `wire.enabled: true` 后，每次外发 LLM 请求体都会追加写入 `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`（文件权限 `0600`）：
+采集内容是本插件钩子处的 WebSocket 帧字符串，或克隆 HTTP Request 经 `text()` 解码后的文本。后续钩子仍可修改请求；观察到请求不证明发送成功，HTTP 文本采集也不等于任意原始字节保真。读取失败、超时、卸载或磁盘错误均可能造成缺口。
+
+开启 `wire.enabled: true` 后，观察到的请求体追加写入 `~/.local/share/opencode/raw-requests/<sessionID>.jsonl`（文件权限 `0600`）：
 
 ```json
 {
@@ -246,7 +253,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 ```
 
 - `kind`：OpenCode 的请求分类（`primary` | `compaction` | `title` | `generate`）。仅 `primary` 帧会按 FIFO 被消费并注入 `chat` Span 的 `input.value`。
-- `wire.maxFrameBytes` 仅限制**磁盘 JSONL** 中的 `frame` 体积（Span 路径始终接收完整帧，由 `contentGates.wireBody` 与 `contentMaxLength` 独立控制）：
+- `wire.maxFrameBytes` 仅限制**磁盘 JSONL** 中 `frame` 的保留文本字节数，截断标记、JSON 转义和元数据另计（Span 路径始终接收完整帧，由 `contentGates.wireBody` 与 `contentMaxLength` 独立控制）：
   - `-1`（默认）：完整落盘
   - `0`：仅记录元数据（`frame: ""`、`truncated: true`、`frameBytes: <原始字节数>`）
   - `N > 0`：保留前 `N` 字节（按 UTF-8 字符边界安全回退切开，末尾追加 `[TRUNCATED]`，并记录 `truncated: true` 与 `frameBytes`）
@@ -256,6 +263,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318"
 - **插件日志**：`~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log`（保留 7 天，敏感凭据自动脱敏）。
 - **启动探测**：tracing 开启时，启动阶段对每个去重后的已配置 OTLP 端点（traces/metrics/logs）做一次 TCP 连接，记录 `otlp endpoint reachable` 或 `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` —— 纯诊断日志，导出行为由 sender 的重试/退避负责。wire-only 模式永不探测（零网络出流量）。
 - **属性映射**：[docs/semconv-mapping.md](docs/semconv-mapping.md) —— 从 OpenCode 采集到的数据如何一一对应到 GenAI semconv / OpenInference。
+- **源码核查**：[docs/source-audit.md](docs/source-audit.md)——相对源码路径、核查版本和实现限制。
 - **路线图**：[TODO.md](TODO.md)
 
 ```bash

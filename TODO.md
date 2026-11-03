@@ -3,6 +3,24 @@
 Future directions, not commitments. Traces are the current focus — nothing here affects
 the tracing path.
 
+## Semconv gaps confirmed by source audit
+
+See `docs/source-audit.md` for checked versions and relative source paths. These are runtime
+follow-ups; the documentation correction does not change emitted data or frozen ID formulas.
+
+- Cache writes currently emit `gen_ai.usage.cache_write.input_tokens`; the checked standard
+  name is `gen_ai.usage.cache_creation.input_tokens`. Review compatibility before migrating.
+- `gen_ai.response.finish_reasons` is currently a JSON string. Standard typing is `string[]`,
+  which requires widening `AttrValue` and verifying actual OTLP encoding with a regression test.
+- `gen_ai.response.model` duplicates the requested model; use independently observed response
+  identity when available rather than implying that the duplicate is a provider observation.
+- Chat duration includes step settlement. Evaluate `session.step.streamed` and request-start
+  timing before presenting this as model-request latency.
+- Truncating JSON-valued attributes can break their JSON/schema validity. Define an explicit
+  representation for oversized structured content before changing the truncation path.
+- Legacy message-event names are deprecated; plan any migration separately from retaining
+  current backend compatibility.
+
 ## Standing heuristics (labeled)
 
 Standing semantic heuristics approved per the AGENTS.md "Heuristic policy" (upstream
@@ -114,7 +132,7 @@ built, it must re-derive the current semantics, not the ones at first writing:
   `gen_ai.client.token.usage` input type both include cache read + cache write
   (separate `gen_ai.usage.cache_read/write.input_tokens` attributes carry the split).
 - **Truncation semantics**: `contentMaxLength` sentinel chain (-1 = full, 0 = metadata
-  only, N>0 = N-byte cap with `[TRUNCATED original_length=N]` marker) applies equally
+  only, N>0 = N-byte retained prefix plus `[TRUNCATED original_length=<original bytes>]` marker) applies equally
   to replayed content.
 - **Signal surface**: traces are the point; metrics/logs lanes stay optional (the
   replay host may have no metrics backend). Wire frames are absent in replay — the
@@ -143,9 +161,9 @@ v2 schema in `packages/schema/src/session-event.ts`):
 - `session.usage.updated` (rolling cost totals) — exists, not handled
 - Non-session namespaces: `permission.*` (request/decision pairing — wait-duration
   metric if the decision event is actually pushed), `mcp.*` (connection lifecycle)
-- Out of reach without core support (for reference): outbound traceparent injection,
-  raw provider response bodies, transport-level detail (status codes, SDK retries),
-  model-request terminal-state distinctions (refused / cancelled / retries-exhausted),
+- Not currently captured here (upstream support must be checked per item):
+  raw provider response-body capture in this plugin, transport-level detail (status codes, SDK retries),
+  complete model-request terminal-state distinctions (refused / cancelled / retries-exhausted),
   structured MCP server attribution on tool events, plugin/skill load lifecycle,
   session-level end events
 
@@ -227,7 +245,7 @@ traced/sent, backend connectivity, queue depth, spans sent/dropped counters.
 
 Shipped: metrics (gen_ai.client.token.usage + gen_ai.client.operation.duration) and the
 opt-in logs lane (gen_ai.user.message / system.message / tool.message / choice;
-assistant.message folds into choice). Every event carries the deterministic span context
+historical assistant-input events are not emitted; these event names are deprecated). Every event carries the deterministic span context
 of its origin span for log ↔ trace joins. Gated content emits metadata-only events.
 
 ## Backend-specific capability extension points
@@ -265,9 +283,10 @@ expected value vs implementation cost.
 **Instrumentation gaps (span-level)**
 
 - **TTFT / first-content timing on chat spans** — Claude exports `ttft_ms` and
-  `first_content_ms` per llm_request. Requires a first-chunk timestamp source from
-  opencode (SSE wire signal or streaming hook); we only see start/end today.
-  Highest observability value per unit effort; blocked on an upstream signal.
+  `first_content_ms` per llm_request. The plugin currently consumes completed text/reasoning only. The checked upstream
+  schema already exposes `session.text.delta`, `session.reasoning.delta`, and
+  `session.step.streamed`; evaluate their timing and correlation before calling this
+  blocked on upstream support.
 - **Per-retry span events** — Claude emits each retry attempt as a
   `gen_ai.request.attempt` span event (with `attempt` number +
   `client_request_id`). We currently stamp `opencode.retry.attempt` on the retrying
@@ -298,6 +317,9 @@ expected value vs implementation cost.
   env > file > default precedence.
 
 **Trace context propagation (bigger lifts)**
+
+- Outbound primary-request header injection already ships through `model.request`; the
+  remaining ideas below concern subprocess propagation, response links, and inbound context.
 
 - **W3C `traceparent` propagation** — Claude (a) injects `TRACEPARENT` env into
   Bash/MCP subprocesses, (b) sends a `traceparent` header on the LLM request and

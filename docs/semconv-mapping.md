@@ -1,24 +1,25 @@
 # OpenCode events → GenAI semconv mapping
 
-Authoritative one-page reference for what we capture from OpenCode and where each piece
+Reference for what we capture from OpenCode and where each piece
 lands in the emitted spans. Reflects `src/spans.ts` + `src/otlp.ts` (Real-time lane);
 the on-disk wire JSONL is documented in `src/types.ts` and `README.md`. Traces lane
 only — metrics-lane attributes and logs-lane event bodies are documented in the README's
 Metrics and Log events tables.
 
-Citations are `path:line` pointers.
+Source paths refer to this plugin repository; upstream paths and checked revisions are listed in
+[source audit](source-audit.md).
 
 ## 1. Inbound sources
 
 | Source | What it carries | Where it goes |
 |---|---|---|
-| `ctx.session.hook("prompt")` | `sessionID`, `messageID`, `prompt.text` | Stashed in `pendingPrompts`; the first `step.started` consumes it and opens the turn root (`spans.ts:577`) |
-| `ctx.session.hook("experimental.ws.send")` | `sessionID`, `agent`, `model.{providerID,id}`, `kind`, `frame` | Written to per-session JSONL; also stashed per-session FIFO and consumed by the next `chat` span for `input.value` (`wire.ts:170`) |
-| `ctx.session.hook("http.request")` | Same as `ws.send`, body is a cloned `ReadableStream` | Same path as above (`wire.ts:190`) |
-| `ctx.event.subscribe()` → `session.*` SSE | All events listed in §2 | Drives the span state machine (`index.ts:240`) |
-| `ctx.session.get({ sessionID })` | `parentID`, `agent`, `title`, `location.directory` | Lazily merged at turn/container close to fill `opencode.session.title/directory` (`index.ts:166`) |
+| `ctx.session.hook("prompt")` | `sessionID`, `messageID`, `prompt.text` | Stashed in `pendingPrompts`; the first `step.started` consumes it and opens the turn root (`src/spans.ts`) |
+| `ctx.session.hook("experimental.ws.send")` | `sessionID`, `agent`, `model.{providerID,id}`, `kind`, `frame` | Written to per-session JSONL; also stashed per-session FIFO and consumed by the next `chat` span for `input.value` (`src/wire.ts`) |
+| `ctx.session.hook("http.request")` | Same as `ws.send`, payload contains a web `Request`, which the recorder clones and reads with `.text()` | Same path as above (`src/wire.ts`) |
+| `ctx.event.subscribe()` → `session.*` SSE | Events listed below | Drives the span state machine (`src/index.ts`) |
+| `ctx.session.get({ sessionID })` | `parentID`, `agent`, `title`, `location.directory` | Lazily merged at turn/container close to fill `opencode.session.title/directory` (`src/index.ts`) |
 
-`session.*` events handled (`spans.ts:518`):
+`session.*` events handled (`src/spans.ts`):
 
 | Event | Effect |
 |---|---|
@@ -40,32 +41,36 @@ Citations are `path:line` pointers.
 
 ## 2. Span inventory
 
+Kinds below use OTLP numbers (`CLIENT = 3`, `INTERNAL = 1`). The JS API uses `CLIENT = 2`,
+`INTERNAL = 0`; `src/otlp.ts` converts to JS values before the SDK serializes them.
+`compaction` is a plugin-defined operation value, not a predefined checked semconv value.
+
 | Span name | `kind` | Semconv `gen_ai.operation.name` | OpenInference `openinference.span.kind` | Trigger |
 |---|---|---|---|---|
-| `<40-char prompt/wakeup preview>` (fall back to session title, then the turn's `userMessageID`, then `"(empty)"`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`spans.ts:400`) |
-| `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`spans.ts:802`) |
-| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`spans.ts:951`) |
-| `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`spans.ts:1105`) |
-| `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`spans.ts:1051`) |
+| `<40-char prompt/wakeup preview>` (fall back to session title, then the turn's `userMessageID`, then `"(empty)"`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`src/spans.ts`) |
+| `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`src/spans.ts`) |
+| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`src/spans.ts`) |
+| `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`src/spans.ts`) |
+| `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`src/spans.ts`) |
 
-Span status: every span closes `code 1` (unset/ok) on success and `code 2` (error) on
+Span status: every span closes `code 1` (`OK`, not `UNSET`; `UNSET = 0`) on success and `code 2` (error) on
 failure, with `status.message = "<error.type>: <error.message>"` from the triggering
 event (`step.failed` / `tool.failed` / `execution.failed` / `compaction.failed` /
 `execution.interrupted` → `type: "interrupted"`).
 
 ## 3. Attribute inventory (by span kind)
 
-Keys with a leading `→ gate` row are toggled off by the corresponding `tracing.contentGates.*` flag; see `src/config.ts:48`.
+Keys marked **Gate** are toggled off by the corresponding `tracing.contentGates.*` flag; see `src/config.ts`.
 `tracing.contentMaxLength` is three-state (mirrors `wire.maxFrameBytes`): `-1` = no truncation,
 `0` = metadata-only (the value attribute is omitted, `*_original_length` still emitted for spans that
 provide one), `N > 0` = first N UTF-8 bytes (character-boundary safe) with a
-`[TRUNCATED original_length=N]` marker plus `*_original_length`. Default is `61440` (60 KB) — sized
-just under the 64 KB single-attribute limit enforced by common backends so one oversized tool result
-cannot reject the whole span at intake; the budget is in bytes (not chars), so the cap holds for
-CJK-heavy content too.
-All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.ts:84`).
+`[TRUNCATED original_length=<original UTF-8 bytes>]` marker plus `*_original_length`.
+The default is `61440` (60 KiB) of retained content; the suffix is extra. OTel defines no universal
+64 KB attribute ceiling, and this budget does not guarantee backend acceptance. Truncating
+JSON-valued strings can also make them invalid JSON.
+All attributes are skipped when their value is `null`/`undefined`/`""` (`src/spans.ts`).
 
-### 3.1 Turn root (`invoke_agent` on a root session) — `spans.ts:400`
+### 3.1 Turn root (`invoke_agent` on a root session) — `src/spans.ts`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -83,24 +88,27 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `opencode.user_prompt.length` | `turn.inputText` size in UTF-8 bytes | user rounds only (Bug 25); ungated size signal; same unit as the truncation budget, useful when `userPrompts` gate is off |
 | `openinference.span.kind` | `"AGENT"` | |
 | `input.value` | user round: the prompt; synthetic round: the wakeup text (`session.synthetic` / synthetic `session.inbox.enqueued`); unknown round: omitted | **Gate: `userPrompts`** |
-| `input.value_original_length` | truncation marker | only when truncated |
+| `input.value_original_length` | truncation marker | when shortened or withheld by a zero budget |
 | `output.value` | last `text.ended` aggregated across the turn, truncated | **Gate: `assistantResponses`** |
 | `output.value_original_length` | truncation marker | |
 
-### 3.2 Chat step (`chat ...`) — `spans.ts:802`
+The root span records step/tool count, input/output text, and session metadata; it does not
+aggregate token counts or cost.
+
+### 3.2 Chat step (`chat ...`) — `src/spans.ts`
 
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | `"chat"` | |
 | `gen_ai.provider.name` | `step.model.providerID` | |
-| `gen_ai.request.model` / `gen_ai.response.model` | `step.model.id` | same value on both |
+| `gen_ai.request.model` / `gen_ai.response.model` | `step.model.id` | request model is copied to both; no independent response-model observation |
 | `gen_ai.conversation.id` | `sessionID` | |
-| `gen_ai.response.finish_reasons` | `data.finish` (string) | serialized as `["<finish>"]` |
+| `gen_ai.response.finish_reasons` | `data.finish` (string) | emitted as a JSON string containing `["<finish>"]`; semconv expects a string-array attribute (implementation gap) |
 | `gen_ai.usage.input_tokens` | `tokens.input + cache.read + cache.write` | semconv totals |
-| `gen_ai.usage.output_tokens` | `tokens.output + tokens.reasoning` | |
+| `gen_ai.usage.output_tokens` | `tokens.output + tokens.reasoning` | Correct for OpenCode: `output` is visible output only, separate from reasoning |
 | `gen_ai.usage.reasoning.output_tokens` | `tokens.reasoning` | |
 | `gen_ai.usage.cache_read.input_tokens` | `tokens.cache.read` | |
-| `gen_ai.usage.cache_write.input_tokens` | `tokens.cache.write` | |
+| `gen_ai.usage.cache_write.input_tokens` | `tokens.cache.write` | Actual emitted key; nonstandard spelling. OTel uses `gen_ai.usage.cache_creation.input_tokens` |
 | `gen_ai.output.messages` | `[{role:'assistant', parts:[{type:'reasoning', content}…, {type:'text', content}…]}]` JSON | **Gate: `assistantResponses`**; reasoning parts precede text (`reasoning.ended` has no ordinal — no fabricated interleaving); tool calls stay on `execute_tool` spans, never `tool_call` parts |
 | `opencode.cost.usd` | `data.cost` | USD per step |
 | `opencode.reasoning` | concatenated reasoning chunks | **Gate: `assistantResponses`**; flat mirror of the reasoning parts for attribute-table UIs |
@@ -122,7 +130,12 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
 | `opencode.wire.seq` | `wire.seq` of the consumed frame | correlation back to the on-disk JSONL |
 
-### 3.3 Tool call (`execute_tool <name>`) — `spans.ts:951`
+Chat duration follows `session.step.started` → `session.step.ended/failed`. Upstream step
+settlement includes tool settlement and snapshot work; `session.step.streamed` marks the
+provider response-body boundary separately but is not consumed here. Reported chat duration
+is therefore a step interval, not pure model-request latency.
+
+### 3.3 Tool call (`execute_tool <name>`) — `src/spans.ts`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -133,14 +146,14 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `gen_ai.conversation.id` | `sessionID` | |
 | `gen_ai.agent.name` | `input.agent` — only when `name ∈ {subagent, task}` | identifies the child agent role |
 | `gen_ai.tool.call.arguments` | `JSON.stringify(tool.input)` | **Gate: `toolDetails`** |
-| `gen_ai.tool.call.result` | tool result content: text parts joined, other parts kept as objects | **Gate: `toolContent`** |
+| `gen_ai.tool.call.result` | JSON array string: each text part becomes its text string, other parts remain objects | **Gate: `toolContent`** |
 | `error.type` | `"tool_error"` | set only on failure |
 | `openinference.span.kind` | `"TOOL"` | |
 | `input.value` | same as `gen_ai.tool.call.arguments` | OpenInference mirror; **Gate: `toolDetails`** |
 | `output.value` | same as `gen_ai.tool.call.result` | |
 | `output.value_original_length` | truncation marker | |
 
-### 3.4 Sub-agent container (`invoke_agent <agent>`) — `spans.ts:1105`
+### 3.4 Sub-agent container (`invoke_agent <agent>`) — `src/spans.ts`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -154,9 +167,10 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`spans.t
 | `openinference.span.kind` | `"AGENT"` | |
 
 The container's parent is the `execute_tool {subagent,task}` span that registered the attachment
-(`spans.ts:985`); the child session's own `chat` / `execute_tool` spans hang under this container.
+(`src/spans.ts`) when a link is available. Child chat spans hang under the container; each
+child tool span hangs under its issuing chat span.
 
-### 3.5 Compaction — `spans.ts:1051`
+### 3.5 Compaction — `src/spans.ts`
 
 | Attribute | Source | Notes |
 |---|---|---|
@@ -173,13 +187,16 @@ The container's parent is the `execute_tool {subagent,task}` span that registere
 | `output.value_original_length` | truncation marker | |
 | `session.id` / `opencode.session.id` | `sessionID` | |
 
-## 4. Resource block (every batch) — `otlp.ts:105`
+## 4. Trace resource block (every batch) — `src/otlp.ts`
 
 | Resource attribute | Source |
 |---|---|
 | `service.name` | `OTEL_SERVICE_NAME` env, else a `service.name` key in the merged resource attributes, else const `"opencode-genai-obs"` |
 | `openinference.project.name` | `tracing.project` config (default `"opencode"`) |
 | `<custom>` | `tracing.resourceAttributes` merged under `OTEL_RESOURCE_ATTRIBUTES` (env wins per key); builtin keys win on conflicts, except `service.name` |
+
+Metrics and logs build separate resources from configured attributes plus `service.name`;
+`tracing.project` is automatically added only to the trace resource.
 
 Instrumentation scope: `{ name: "opencode-genai-obs", version: PLUGIN_VERSION }` — `PLUGIN_VERSION` is the shared `src/version.ts` constant (one version for the traces/metrics/logs scopes so they cannot drift), bumped together with `package.json` at release; no dynamic linkage.
 
@@ -194,19 +211,23 @@ Instrumentation scope: `{ name: "opencode-genai-obs", version: PLUGIN_VERSION }`
 | Compaction traceId / spanId | `sessionID × compaction.started timestamp` |
 | Orphan trace (sub-agent with no parent link) | child `sessionID` |
 
-Rationale: byte-identical ids let the offline replay lane dedup against the real-time lane
-and make duplicate SSE deliveries harmless (Phoenix-style backends upsert on
-`(traceId, spanId)`), so hot reloads and multi-realm dispatch cannot double-emit spans.
+The offline replay lane is not implemented yet. Matching IDs can support reconciliation if
+the backend supports it; OTLP does not guarantee upsert or deduplication. The shared pipeline
+and terminal-event guards suppress duplicate processing in the current instance. They do not
+provide durable exactly-once delivery across restarts. Compaction IDs depend on the captured
+start timestamp, and synthetic/unknown turns may use an `auto:<created>` key.
 
 ## 6. What we deliberately do NOT emit
 
 - `gen_ai.request.temperature` / `top_p` / `max_tokens` / `stop_sequences` — these live
   only inside the wire body (`wire.frame`); surfacing them as attributes would duplicate
-  the canonical OpenInference `input.value` payload.
+  the OpenInference `input.value` payload. This is a plugin choice; standard queryable
+  attributes may coexist with captured request content.
 - `gen_ai.system_instructions` — same reasoning; the system prompt is part of the wire
   frame (and gated by `contentGates.wireBody`).
-- OTel span events (`gen_ai.client.inference.operation.details`, exception events) —
-  statuses are encoded via OTLP `Status`, not events, to keep the encoder minimal.
+- Additional OTel log events (`gen_ai.client.inference.operation.details`,
+  `gen_ai.client.operation.exception`) — not emitted. The adapter also supplies empty span
+  `events` and `links` arrays; OTLP and the SDK support both.
 - Logs (`log_body` on OpenInference) — the `log_body` convention is not used; message
   content ships via the opt-in OTLP logs lane (`src/logs.ts`). Plugin diagnostics go
   only to the local file sink (`~/.local/share/opencode/log/ocg-obs.*.log`), never to
