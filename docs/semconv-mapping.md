@@ -91,6 +91,7 @@ All attributes are skipped when their value is `null`/`undefined`/`""` (`src/spa
 | `opencode.turn.messages` | steps + tools emitted under this turn | diagnostic |
 | `opencode.turn.wakeup` | `"synthetic"` \| `"unknown"` | non-user round origin marker (Bug 25): `synthetic` = round opened by a wakeup event, `unknown` = no prompt hook and no wakeup observed; absent on user rounds |
 | `opencode.user_prompt.length` | `turn.inputText` size in UTF-8 bytes | user rounds only (Bug 25); ungated size signal; same unit as the truncation budget, useful when `userPrompts` gate is off |
+| `opencode.interrupt.reason` | `execution.interrupted` `reason` | host enum only: `"user" \| "shutdown" \| "superseded" \| "inactivity"` (Bug 30); on interrupted turn roots; one field, one source of meaning (user decision, option B, 2026-11-03) — NEVER set by plugin-side synthetic interrupts: ABSENT at plugin-unload teardown, where the status message carries `interrupted: plugin_unload` instead (Bug 34) |
 | `openinference.span.kind` | `"AGENT"` | |
 | `input.value` | user round: the prompt; synthetic round: the wakeup text (`session.synthetic` / synthetic `session.inbox.enqueued`); unknown round: omitted | **Gate: `userPrompts`** |
 | `input.value_original_length` | truncation marker | when shortened or withheld by a zero budget |
@@ -169,6 +170,7 @@ is therefore a step interval, not pure model-request latency.
 | `session.id` / `opencode.session.id` | child `sessionID` | |
 | `opencode.session.parent_id` | registering parent's sessionID | |
 | `opencode.session.title` / `opencode.session.directory` | from `session.get` on the child | |
+| `opencode.interrupt.reason` | `execution.interrupted` `reason` | host enum only (Bug 30); on interrupted sub-agent containers; ABSENT at plugin-unload teardown — the status message carries `interrupted: plugin_unload` instead (Bug 34) |
 | `openinference.span.kind` | `"AGENT"` | |
 
 The container's parent is the `execute_tool {subagent,task}` span that registered the attachment

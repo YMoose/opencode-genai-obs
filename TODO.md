@@ -91,6 +91,10 @@ its terminal (the Bug 13/16/17 class; not observed live). Fix when undertaken: a
 by session (`src/spans.ts:426-430`), so an unstamped old-round tool can inherit the next
 round's trace.
 
+Audit item ① adjudicated (user decision, option B, 2026-11-03):
+`opencode.interrupt.reason` is host-enum-only; unload teardown does not set it (the
+`plugin_unload` cause stays in the status message) — Bug 34.
+
 ## Governance log
 
 - 2026-11-01: Full-project review surfaced 10 bugs (Bugs 16-22 fixed red-first) and a

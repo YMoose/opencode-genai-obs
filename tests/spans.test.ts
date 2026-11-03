@@ -1213,3 +1213,81 @@ test("Bug 32: unload flushAll emits in-flight tools as interrupted: plugin_unloa
     "the emitted tool counts on its own turn root",
   )
 })
+
+// ------------------------------------------------- Bug 34 (teardown must not fake a host interrupt reason)
+
+test("Bug 34: unload teardown reports interrupted status but never sets opencode.interrupt.reason", async () => {
+  // User decision (option B, 2026-11-03): the attribute is owned by the host enum
+  // ["user","shutdown","superseded","inactivity"] — one field, one source of meaning.
+  // "plugin_unload" is a plugin-invented value; pre-fix it leaked into the attribute
+  // at teardown. The unload story stays in the freeform status.message instead.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "read" }))
+  // unload mid-round: no tool terminal, no execution.* terminal
+  await builder.flushAll()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the in-flight turn root must still flush at unload")
+  assert.ok(
+    !root.attributes.some(([key]) => key === "opencode.interrupt.reason"),
+    "teardown must not set the host-owned reason attribute (pre-fix: carried the invented 'plugin_unload')",
+  )
+  assert.ok(
+    root.status.code === 2 && root.status.message!.includes("interrupted: plugin_unload"),
+    "the unload story stays visible in the freeform status message (Bug 31 semantics unchanged)",
+  )
+
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.ok(tool, "the in-flight tool must still emit at unload (no Bug 32 regression)")
+  assert.ok(
+    !tool.attributes.some(([key]) => key === "opencode.interrupt.reason"),
+    "the tool span never carries the host reason attribute",
+  )
+})
+
+test("Bug 34: unload teardown of a sub-agent container does not set opencode.interrupt.reason", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "root" }))
+  builder.handleEvent(event("session.created", 1_001, { sessionID: "child", parentID: "root" }))
+  builder.handlePrompt("root", "m1", "task")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "root", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "root", assistantMessageID: "a1", id: "tc1", name: "task" }))
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "root", assistantMessageID: "a1", id: "tc1", input: { sessionID: "child" } }))
+  builder.handleEvent(event("session.step.started", 1_200, { sessionID: "child", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  // unload with the child's round still open: the container flushes as interrupted
+  await builder.flushAll()
+
+  const container = spans.find((span) => span.spanId === hash("opencode-session:child", 8))
+  assert.ok(container, "the in-flight sub-agent container must flush at unload")
+  assert.ok(
+    !container.attributes.some(([key]) => key === "opencode.interrupt.reason"),
+    "teardown must not set the host-owned reason attribute on containers either",
+  )
+  assert.ok(
+    container.status.code === 2 && container.status.message!.includes("interrupted: plugin_unload"),
+    "the container still names the teardown cause in its status message",
+  )
+})
+
+test("Bug 34: a real host interrupt still lands opencode.interrupt.reason on the turn root", async () => {
+  // Regression guard for the host-driven path (Bug 30): stopping teardown from
+  // setting the attribute must not stop the real session.execution.interrupted
+  // event — the host enum value remains a queryable attribute.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.interrupted", 1_150, { sessionID: "s1", reason: "user" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the interrupted turn root flushes")
+  assert.strictEqual(
+    root.attributes.find(([key]) => key === "opencode.interrupt.reason")?.[1],
+    "user",
+    "the host enum value keeps flowing through the attribute (host path intact)",
+  )
+})

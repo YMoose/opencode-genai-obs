@@ -500,8 +500,12 @@ export function createSpanBuilder(
         // synthetic/unknown round has no user prompt to measure (Bug 25)
         ["opencode.user_prompt.length", turn.origin === "user" ? Buffer.byteLength(turn.inputText, "utf-8") : undefined],
         ["openinference.span.kind", "AGENT"],
-        // Upstream reason enum (["user","shutdown","superseded","inactivity"]) as its own
-        // attribute: queryable, where a freeform status message is not (Bug 30)
+        // Host-enum-only contract (Bug 30, tightened by Bug 34 / user decision option B
+        // 2026-11-03): the upstream reason enum (["user","shutdown","superseded",
+        // "inactivity"]) as its own queryable attribute, where a freeform status message
+        // is not. One field, one source of meaning — plugin-side synthetic interrupts
+        // (unload teardown) must NOT set it; the plugin-unload detail lives in the
+        // status.message instead.
         ["opencode.interrupt.reason", error?.interruptReason],
         ["input.value", inputTrunc?.value],
         ["input.value_original_length", inputTrunc?.originalLength],
@@ -1250,8 +1254,11 @@ export function createSpanBuilder(
       }
       // In-flight rounds never reached a terminal: reporting them OK (the pre-fix
       // default) is a false success on the ledger. Mark them interrupted with the
-      // teardown cause, distinct from a real execution.interrupted.
-      const teardown = { type: "interrupted", message: `interrupted: ${reason}`, interruptReason: reason }
+      // teardown cause, distinct from a real execution.interrupted. The teardown cause
+      // stays in the freeform status message only — opencode.interrupt.reason is
+      // host-enum-only and is deliberately absent here (user decision, option B,
+      // 2026-11-03: "plugin_unload" is not a host enum value).
+      const teardown = { type: "interrupted", message: `interrupted: ${reason}` }
       for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now, teardown)
       for (const sid of [...containers.keys()]) await flushContainer(sid, now, teardown)
       // In-flight compactions keep their bare span OK by decision (user decision
