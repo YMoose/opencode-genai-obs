@@ -12,7 +12,7 @@ to the OpenCode repository root. This audit changes documentation, not runtime b
   its comment claiming the kind enums match numerically is inaccurate, but the conversion
   itself handles the two kinds used here. The adapter emits no span events or links.
 
-- `src/spans.ts`, `emitToolSpan` and `flushTurn` — tools are children of their issuing chat
+- `src/spans.ts`, `emitToolSpan` and `flushTurnRoot` — tools are children of their issuing chat
   spans. A linked subagent container is a child of the delegating tool; its chat spans
   contain its own tool spans. Root turns expose emitted step/tool count, not aggregate
   token counts or cost. Tool results are JSON array strings, not joined plain text.

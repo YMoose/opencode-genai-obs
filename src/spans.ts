@@ -1254,6 +1254,9 @@ export function createSpanBuilder(
       const teardown = { type: "interrupted", message: `interrupted: ${reason}`, interruptReason: reason }
       for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now, teardown)
       for (const sid of [...containers.keys()]) await flushContainer(sid, now, teardown)
+      // In-flight compactions keep their bare span OK by decision (user decision
+      // 2026-11-03), unlike the interrupted teardown above: a bare flush is a tombstone
+      // with an UNKNOWN outcome, not a claimed success — changing it was considered and declined.
       for (const [sid, state] of [...compactions]) emitCompactionSpan(sid, state, {}, now, false)
     },
     activeChatContext(sessionID) {

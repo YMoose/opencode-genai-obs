@@ -52,7 +52,7 @@ design: the guard (`src/spans.ts:559`) mutates nothing, so the superseded round'
 reason never lands on any span; surfacing it would require an upstream round
 discriminator. Second, the no-seq degrade path: when `durable.seq` is absent (older
 hosts), a late terminal still flushes the current turn early and the new round's chat span
-is lost — pinned by the Bug 23 fallback test (`tests/spans.test.ts:804`) as the documented
+is lost — pinned by the Bug 23 fallback test (`tests/spans.test.ts:838`) as the documented
 pre-Bug-23 behavior.
 
 Known limitation (S4, record-only per user decision 2026-11-03): a `session.renamed`
@@ -76,6 +76,20 @@ round's root (traceId-guarded accounting). Unload `flushAll` emits unsettled too
 `interrupted: plugin_unload` and counts each on its own still-open turn's root; the
 registry is bounded by MAX_IN_FLIGHT_TOOLS (1024, oldest-first eviction, degraded
 terminal for the evicted call — never a fabricated span).
+
+Candidate Bug 33 (deferred, record-only per user decision 2026-11-03): a redelivered
+`session.tool.input.started` / `session.tool.called` for a callId whose terminal already
+emitted re-creates the ToolState (`src/spans.ts:764-803` — no `endedTools` check at
+re-creation; `:770` `prior` only preserves an entry that still exists) stamped with the
+CURRENT round's live traceId (`:776`). The redelivery's own terminal is correctly ignored
+(`:811-814`), but since Bug 32 retention keeps tool state across round closes, the zombie
+ToolState survives and at unload emits a phantom `interrupted: plugin_unload` span under
+the WRONG round's trace and inflates that turn's `opencode.turn.messages`
+(`src/spans.ts:1233-1250`). Precondition: at-least-once redelivery of a tool start after
+its terminal (the Bug 13/16/17 class; not observed live). Fix when undertaken: an
+`endedTools` guard at re-creation entry. Replay-only variant: `stampInFlightTools` stamps
+by session (`src/spans.ts:426-430`), so an unstamped old-round tool can inherit the next
+round's trace.
 
 ## Governance log
 

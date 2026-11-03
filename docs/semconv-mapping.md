@@ -56,7 +56,12 @@ Kinds below use OTLP numbers (`CLIENT = 3`, `INTERNAL = 1`). The JS API uses `CL
 Span status: every span closes `code 1` (`OK`, not `UNSET`; `UNSET = 0`) on success and `code 2` (error) on
 failure, with `status.message = "<error.type>: <error.message>"` from the triggering
 event (`step.failed` / `tool.failed` / `execution.failed` / `compaction.failed` /
-`execution.interrupted` → `type: "interrupted"`).
+`execution.interrupted` → `type: "interrupted"`). Unload teardown is a further status
+source (`flushAll`, `src/spans.ts:1240-1256`): open turns, sub-agent containers, and
+in-flight tools emit ERROR `interrupted` / `interrupted: plugin_unload`; in-flight
+compactions keep their bare span as OK by decision (user decision 2026-11-03) — a bare
+flush is a tombstone with an UNKNOWN outcome, not a claimed success; changing it was
+considered and declined.
 
 ## 3. Attribute inventory (by span kind)
 
