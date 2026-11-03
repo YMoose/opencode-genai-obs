@@ -333,8 +333,8 @@ export function createSpanBuilder(
    *
    * HEURISTIC(upstream-gap): an UNVERIFIED guess at approval (2026-11-01) — refuted for live ordering by
    * upstream verification (2026-11-03): step terminals publish inside an uninterruptible block
-   * (runner/step.ts:140-149, Step.Ended at :247-258); execution.interrupted publishes only afterwards, from
-   * the settled hook (execution.ts:128-132, run-coordinator.ts:96-99) — in live delivery step.ended ALWAYS
+   * (runner/step.ts:140-283, Step.Ended at :247-258); execution.interrupted publishes only afterwards, from
+   * the settled hook (execution.ts:129-133, run-coordinator.ts:96-100) — in live delivery step.ended ALWAYS
    * precedes interrupted; sole no-terminal path: cancellation before the assistant started (step.ts:147-148),
    * so the mark branch never fires live. RETAINED by explicit user decision (2026-11-03) as cheap gap/replay
    * defense (bounded: ~20 lines, tested, no live-path branching cost beyond this dual-mode purge) — a
@@ -402,7 +402,7 @@ export function createSpanBuilder(
     if (!turn) return
     openTurns.delete(sid)
     // Bug 26: a wake stashed while THIS turn was open was a mid-turn continuation of
-    // this round (incomplete-stream / output-limit continuation, llm.ts:309,340) — it
+    // this round (incomplete-stream / output-limit continuation, llm.ts:333,364) — it
     // must not survive into the next round. Live producers of a NEXT-round wake
     // (subagent-completion, restart continuation) only ever fire while the parent is
     // idle (no open turn), so deleting at turn close never discards a legitimate wake
@@ -583,9 +583,9 @@ export function createSpanBuilder(
             // removed, and the wakeup text is consumed from the events that actually
             // fire — `session.synthetic` and `session.inbox.enqueued` with a synthetic
             // item (subagent-completion wakeup, `Session.synthetic` external route,
-            // restart continuation ("Continuing after server restart", restart.ts:92),
+            // restart continuation ("Continuing after server restart", restart.ts:93),
             // instruction injection (instructions.ts:75), stream continuation
-            // (llm.ts:309,340)). The earlier "session.synthetic empirically NEVER
+            // (llm.ts:333,364)). The earlier "session.synthetic empirically NEVER
             // fires" claim (live-probe 2026-11-01) was wrong — the probe just didn't
             // exercise those paths; a follow-up probe verified the firing contexts
             // (/tmp/opencode/syn-probe.jsonl). Remaining gap: no upstream marker ties
