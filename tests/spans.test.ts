@@ -1025,3 +1025,80 @@ test("Bug 26: a mid-turn synthetic continuation (stream continuation) must not l
     "the previous round's continuation text must not leak into the next round's input.value",
   )
 })
+
+test("Bug 30: execution.interrupted surfaces the host's reason enum as a queryable span attribute", async () => {
+  // Upstream (v2 schema, session-event.ts): execution.interrupted carries
+  // reason ∈ ["user", "shutdown", "superseded", "inactivity"] — the host already
+  // distinguishes manual cancel from host kill; we just surface it (was: only
+  // folded into the freeform status message, indistinguishable downstream).
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.interrupted", 1_150, { sessionID: "s1", reason: "shutdown" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the interrupted turn root flushes")
+  assert.strictEqual(
+    root.attributes.find(([key]) => key === "opencode.interrupt.reason")?.[1],
+    "shutdown",
+    "the host reason enum lands as its own attribute — not buried in the status message",
+  )
+  assert.ok(
+    root.status && root.status.code === 2 && root.status.message!.includes("shutdown"),
+    "the status message keeps carrying the reason (back-compat)",
+  )
+})
+
+test("Bug 30: a clean turn never carries an interrupt reason", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the clean turn root flushes")
+  assert.ok(
+    !root.attributes.some(([key]) => key === "opencode.interrupt.reason"),
+    "no interrupt reason on a turn that ended cleanly",
+  )
+})
+
+test("Bug 31: unload flushAll reports in-flight work as interrupted, not OK", async () => {
+  // Pre-fix, unload teardown marked every still-running turn/container OK (code 1) —
+  // false success on the ledger. teardown flush must say interrupted: plugin_unload.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  // mid-flight: no step.ended, no execution.* terminal
+  await builder.flushAll()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the in-flight turn root must flush at unload")
+  assert.strictEqual(root.status.code, 2, "an interrupted-at-unload turn must not report OK")
+  assert.ok(
+    root.status.message!.includes("interrupted: plugin_unload"),
+    "the status names the teardown cause so it is queryable and distinct from a real user cancel",
+  )
+})
+
+test("Bug 31: a completed turn stays OK when flushAll runs later", async () => {
+  // unload teardown must not rewrite already-closed rounds (they were never in flight)
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+  await builder.flushAll()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the turn root flushes")
+  assert.strictEqual(root.status.code, 1, "a turn that completed before unload stays OK")
+})

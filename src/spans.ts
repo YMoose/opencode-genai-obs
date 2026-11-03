@@ -397,7 +397,7 @@ export function createSpanBuilder(
 
   // --------------------------------------------------------------- turn root
 
-  const flushTurnRoot = async (sid: string, endNano: bigint, error?: { type?: string; message?: string }) => {
+  const flushTurnRoot = async (sid: string, endNano: bigint, error?: { type?: string; message?: string; interruptReason?: string }) => {
     const turn = openTurns.get(sid)
     if (!turn) return
     openTurns.delete(sid)
@@ -448,6 +448,9 @@ export function createSpanBuilder(
         // synthetic/unknown round has no user prompt to measure (Bug 25)
         ["opencode.user_prompt.length", turn.origin === "user" ? Buffer.byteLength(turn.inputText, "utf-8") : undefined],
         ["openinference.span.kind", "AGENT"],
+        // Upstream reason enum (["user","shutdown","superseded","inactivity"]) as its own
+        // attribute: queryable, where a freeform status message is not (Bug 30)
+        ["opencode.interrupt.reason", error?.interruptReason],
         ["input.value", inputTrunc?.value],
         ["input.value_original_length", inputTrunc?.originalLength],
         ["output.value", outputTrunc?.value],
@@ -784,8 +787,8 @@ export function createSpanBuilder(
           log("stale round terminal ignored", { sessionID: sid, type: event.type, seq: event.seq })
           return
         }
-        if (isChild(sid)) void flushContainer(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "" })
-        else void flushTurnRoot(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "" })
+        if (isChild(sid)) void flushContainer(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
+        else void flushTurnRoot(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
         // The interrupted step stays answerable to a late step.ended (its chat span still
         // emits), but its propagation coordinates die with the round (Bug 19)
         purgeInFlight(sid, "mark")
@@ -1102,7 +1105,7 @@ export function createSpanBuilder(
   }
 
   /** Sub-agent session close: emit the invoke_agent container span */
-  const flushContainer = async (sid: string, endNano: bigint, error?: { type?: string; message?: string }) => {
+  const flushContainer = async (sid: string, endNano: bigint, error?: { type?: string; message?: string; interruptReason?: string }) => {
     const container = containers.get(sid)
     if (!container) return // nothing ever produced a step/tool (empty session) — skip
     containers.delete(sid)
@@ -1128,6 +1131,7 @@ export function createSpanBuilder(
         ["opencode.session.parent_id", link?.parentSid ?? info?.parentID],
         ["opencode.session.title", info?.title],
         ["opencode.session.directory", info?.directory],
+        ["opencode.interrupt.reason", error?.interruptReason],
         ["openinference.span.kind", "AGENT"],
       ),
       status: error ? { code: 2, message: `${error.type}: ${error.message}` } : { code: 1 },
