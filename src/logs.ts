@@ -44,6 +44,7 @@ export type LogObservation =
       readonly tool: string
       readonly content: string | undefined
       readonly failed: boolean
+      readonly errorType?: string
     }
   | {
       readonly event: "choice"
@@ -191,7 +192,7 @@ export function createLogs(options: LogsOptions): Logs {
             obs,
             "gen_ai.tool.message",
             { role: "tool", id: obs.callId, name: obs.tool, ...(content !== undefined ? { content } : {}) },
-            { ...(obs.failed ? { "error.type": "tool_error" } : {}), ...truncatedAttr(truncated) },
+            { ...(obs.failed ? { "error.type": obs.errorType || "tool_error" } : {}), ...truncatedAttr(truncated) },
           )
           return
         }

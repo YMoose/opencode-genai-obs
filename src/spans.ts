@@ -1059,19 +1059,19 @@ export function createSpanBuilder(
       ? JSON.stringify(content.map((item) => (item.type === "text" ? item.text ?? "" : item)))
       : undefined
     const error = data.error as { type?: string; message?: string } | undefined
+    const errorType = typeof error?.type === "string" && error.type ? error.type : "tool_error"
 
     const spanId = toolSpanId(assistantMessageID, callId)
 
     // Sub-agent attachment: metadata.sessionID → register the attachment point
-    if (isSubagent) {
-      const metadata = data.metadata as Record<string, unknown> | undefined
-      const childSid = metadata?.sessionID as string | undefined
-      if (childSid) {
-        links.set(childSid, { toolSpanId: spanId, traceId, parentSid: sid })
-        ensureContainer(childSid, endNano)
-        const info = sessions.get(childSid)
-        if (!info?.parentID) registerSession(childSid, { ...info, parentID: sid })
-      }
+    const metadata = data.metadata as Record<string, unknown> | undefined
+    const childSid = isSubagent && typeof metadata?.sessionID === "string" && metadata.sessionID
+      ? metadata.sessionID : undefined
+    if (childSid) {
+      links.set(childSid, { toolSpanId: spanId, traceId, parentSid: sid })
+      ensureContainer(childSid, endNano)
+      const info = sessions.get(childSid)
+      if (!info?.parentID) registerSession(childSid, { ...info, parentID: sid })
     }
 
     const limit = options.contentMaxLength
@@ -1093,9 +1093,10 @@ export function createSpanBuilder(
         ["gen_ai.tool.type", "function"],
         ["gen_ai.conversation.id", sid],
         ["gen_ai.agent.name", isSubagent ? (input.agent as string | undefined) : undefined],
+        ["opencode.subagent.session_id", childSid],
         ["gen_ai.tool.call.arguments", argumentsJson],
         ["gen_ai.tool.call.result", resultTrunc?.value],
-        ["error.type", failed ? "tool_error" : undefined],
+        ["error.type", failed ? errorType : undefined],
         ["openinference.span.kind", "TOOL"],
         ["input.value", argumentsJson],
         ["output.value", resultTrunc?.value],
@@ -1110,7 +1111,7 @@ export function createSpanBuilder(
         operation: "execute_tool",
         durationNano: endNano > tool.startedNano ? endNano - tool.startedNano : 0n,
         tool: name,
-        errorType: failed ? (error?.type ?? "tool_error") : undefined,
+        errorType: failed ? errorType : undefined,
       })
     }
 
@@ -1125,6 +1126,7 @@ export function createSpanBuilder(
       tool: name,
       content: options.gates.toolContent ? result : undefined,
       failed,
+      errorType: failed ? errorType : undefined,
     })
 
     return traceId

@@ -151,9 +151,10 @@ is therefore a step interval, not pure model-request latency.
 | `gen_ai.tool.type` | `"function"` | |
 | `gen_ai.conversation.id` | `sessionID` | |
 | `gen_ai.agent.name` | `input.agent` — only when `name ∈ {subagent, task}` | identifies the child agent role |
+| `opencode.subagent.session_id` | nonempty string `metadata.sessionID` from `tool.success/failed`, only for `subagent` / `task` | ungated child identity; never inferred from arguments or result text |
 | `gen_ai.tool.call.arguments` | `JSON.stringify(tool.input)` | **Gate: `toolDetails`** |
 | `gen_ai.tool.call.result` | JSON array string: each text part becomes its text string, other parts remain objects | **Gate: `toolContent`** |
-| `error.type` | `"tool_error"` | set only on failure |
+| `error.type` | nonempty string `data.error.type`, fallback `"tool_error"` | failure only; same value on tool duration metrics and tool message logs; local unload uses `"interrupted"` with `end_source=plugin_flush` |
 | `openinference.span.kind` | `"TOOL"` | |
 | `input.value` | same as `gen_ai.tool.call.arguments` | OpenInference mirror; **Gate: `toolDetails`** |
 | `output.value` | same as `gen_ai.tool.call.result` | |
