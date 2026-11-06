@@ -4,7 +4,7 @@ import { LoggerProvider } from "@opentelemetry/sdk-logs"
 import type { LogRecord } from "@opentelemetry/api-logs"
 import { createSpanBuilder, type SpanBuilderOptions } from "../src/spans.js"
 import { createLogs } from "../src/logs.js"
-import { toolSpanId } from "../src/ids.js"
+import { toolSpanId, turnSpanId } from "../src/ids.js"
 import type { SpanRecord } from "../src/otlp.js"
 import type { MetricObservation } from "../src/metrics.js"
 
@@ -89,4 +89,79 @@ test("Bug 35: tool message events preserve the same error types as spans with co
   send("session.tool.input.started", 210, { id: "call", name: "shell", assistantMessageID: "assistant" })
   send("session.tool.success", 230, { id: "call" })
   assert.equal(records.filter((item) => item.eventName === "gen_ai.tool.message").at(-1)?.attributes?.["error.type"], undefined)
+})
+
+for (const terminal of ["succeeded", "failed", "interrupted"]) {
+  test(`Bug 36: host execution.${terminal} is distinct from a plugin flush`, async () => {
+    const { builder, spans, send } = capture()
+    send("session.execution." + terminal, 300, { error: { type: "aborted", message: "failure" }, reason: "user" })
+    await builder.flushAll()
+    const root = spans.find((span) => span.spanId === turnSpanId("parent", "user"))
+    const attrs = attributes(root)
+    assert.equal(attrs["opencode.observation.end_source"], "host_event")
+    assert.equal(attrs["opencode.observation.end_trigger"], "session.execution." + terminal)
+    assert.equal(attrs["opencode.observation.terminal_observed"], true)
+    assert.equal(attrs["opencode.interrupt.reason"], terminal === "interrupted" ? "user" : undefined)
+  })
+}
+
+test("Bug 36: unload marks tools, turns, containers and compactions without claiming host termination", async () => {
+  const { builder, spans, send } = capture()
+  send("session.tool.input.started", 210, { id: "call", name: "subagent", assistantMessageID: "assistant" })
+  send("session.compaction.started", 220, { reason: "auto" })
+  send("session.created", 230, { sessionID: "child", parentID: "parent", agent: "actor" })
+  send("session.step.started", 240, { sessionID: "child", assistantMessageID: "child-assistant" })
+  await builder.flushAll()
+  assert.equal(spans.length, 4)
+  for (const span of spans) {
+    const attrs = attributes(span)
+    assert.equal(attrs["opencode.observation.end_source"], "plugin_flush")
+    assert.equal(attrs["opencode.observation.end_trigger"], "plugin_unload")
+    assert.equal(attrs["opencode.observation.terminal_observed"], false)
+    assert.equal(attrs["opencode.interrupt.reason"], undefined)
+    assert.equal(span.status.code, span.name === "compaction" ? 1 : 2)
+  }
+})
+
+test("Bug 36: chat, tool and compaction terminals preserve their exact event sources", () => {
+  const { spans, send } = capture()
+  send("session.tool.input.started", 210, { id: "call", name: "shell", assistantMessageID: "assistant" })
+  send("session.tool.success", 220, { id: "call" })
+  send("session.step.ended", 230, { assistantMessageID: "assistant" })
+  send("session.compaction.started", 240, { reason: "auto" })
+  send("session.compaction.failed", 250, { error: { type: "aborted" } })
+  for (const [name, trigger] of [["execute_tool shell", "session.tool.success"], ["chat model", "session.step.ended"], ["compaction", "session.compaction.failed"]]) {
+    const attrs = attributes(spans.find((span) => span.name === name))
+    assert.equal(attrs["opencode.observation.end_source"], "host_event")
+    assert.equal(attrs["opencode.observation.end_trigger"], trigger)
+    assert.equal(attrs["opencode.observation.terminal_observed"], true)
+  }
+})
+
+test("Bug 36: replacement and deletion do not pretend to observe execution terminals", async () => {
+  const { builder, spans, send } = capture()
+  builder.handlePrompt("parent", "next-user", "next")
+  send("session.step.started", 300, { assistantMessageID: "next-assistant" })
+  send("session.deleted", 400)
+  await builder.flushAll()
+  const first = attributes(spans.find((span) => span.spanId === turnSpanId("parent", "user")))
+  const second = attributes(spans.find((span) => span.spanId === turnSpanId("parent", "next-user")))
+  assert.equal(first["opencode.observation.end_source"], "plugin_flush")
+  assert.equal(first["opencode.observation.end_trigger"], "new_prompt")
+  assert.equal(first["opencode.observation.terminal_observed"], false)
+  assert.equal(second["opencode.observation.end_source"], "host_event")
+  assert.equal(second["opencode.observation.end_trigger"], "session.deleted")
+  assert.equal(second["opencode.observation.terminal_observed"], false)
+})
+
+test("Bug 36: a replaced compaction has no observed terminal even though its legacy status is OK", () => {
+  const { spans, send } = capture()
+  send("session.compaction.started", 300, { reason: "auto" })
+  send("session.compaction.started", 400, { reason: "auto" })
+  const span = spans.find((item) => item.name === "compaction")
+  const attrs = attributes(span)
+  assert.equal(attrs["opencode.observation.end_source"], "plugin_flush")
+  assert.equal(attrs["opencode.observation.end_trigger"], "compaction_replaced")
+  assert.equal(attrs["opencode.observation.terminal_observed"], false)
+  assert.equal(span?.status.code, 1)
 })

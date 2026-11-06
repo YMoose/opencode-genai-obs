@@ -3,7 +3,8 @@
 Checked on 2026-11-03. Plugin baseline: `b2e58439bb6d3a146fd71d7fb5ffa44493466830`.
 OpenCode baseline: `c5fea455b5af7765c021b808afd294937a99f9b8`.
 Paths beginning with `src/` refer to this plugin; paths beginning with `packages/` refer
-to the OpenCode repository root. This audit changes documentation, not runtime behavior.
+to the OpenCode repository root. Capture provenance additions were checked on 2026-11-06
+against OpenCode `3ba597f776`. This audit changes documentation, not runtime behavior.
 
 ## Plugin behavior and upstream evidence
 
@@ -55,7 +56,13 @@ to the OpenCode repository root. This audit changes documentation, not runtime b
   modify it before transport dispatch. Capture does not prove successful transmission;
   read failures/timeouts, disposal, and disk errors can leave gaps. The per-session pending
   queue retains at most eight primary frames, consumed FIFO; frame sequence is recorder-wide,
-  not a per-file line number or a durable identifier across recorder restarts.
+  not a per-file line number.
+
+- `packages/schema/src/session-event.ts` and `src/spans.ts` — tool terminals already carry
+  metadata and structured error types. The plugin exports `metadata.sessionID` on
+  subagent/task spans and preserves actual error types across tool spans, metrics, and logs.
+  Observation end attributes distinguish host terminals from local flushes without changing
+  existing statuses or the host-only `opencode.interrupt.reason` contract.
 
 - `src/spans.ts` and `src/wire.ts` — content budgets limit retained UTF-8 prefixes; suffixes,
   metadata, and JSON escaping add bytes. Truncated JSON content may no longer parse as JSON.

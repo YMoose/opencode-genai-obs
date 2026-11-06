@@ -57,7 +57,7 @@ Span status: every span closes `code 1` (`OK`, not `UNSET`; `UNSET = 0`) on succ
 failure, with `status.message = "<error.type>: <error.message>"` from the triggering
 event (`step.failed` / `tool.failed` / `execution.failed` / `compaction.failed` /
 `execution.interrupted` → `type: "interrupted"`). Unload teardown is a further status
-source (`flushAll`, `src/spans.ts:1240-1256`): open turns, sub-agent containers, and
+source (`flushAll`, `src/spans.ts`): open turns, sub-agent containers, and
 in-flight tools emit ERROR `interrupted` / `interrupted: plugin_unload`; in-flight
 compactions keep their bare span as OK by decision (user decision 2026-11-03) — a bare
 flush is a tombstone with an UNKNOWN outcome, not a claimed success; changing it was
@@ -74,6 +74,21 @@ The default is `61440` (60 KiB) of retained content; the suffix is extra. OTel d
 64 KB attribute ceiling, and this budget does not guarantee backend acceptance. Truncating
 JSON-valued strings can also make them invalid JSON.
 All attributes are skipped when their value is `null`/`undefined`/`""` (`src/spans.ts`).
+
+Every span kind also carries these ungated observation attributes:
+
+| Attribute | Values | Meaning |
+|---|---|---|
+| `opencode.observation.end_source` | `host_event` / `plugin_flush` | Whether a host event or plugin-side flush caused emission |
+| `opencode.observation.end_trigger` | Exact host event name or local flush reason | Host events include `session.step.ended/failed`, `session.tool.success/failed`, `session.execution.succeeded/failed/interrupted`, `session.compaction.ended/failed`, and `session.deleted`; local reasons are `plugin_unload`, `new_prompt`, and `compaction_replaced` (or an explicit `flushAll` reason) |
+| `opencode.observation.terminal_observed` | boolean | The plugin received the corresponding step/tool/execution/compaction terminal; false for local flushes and `session.deleted` |
+
+These fields describe the observation boundary, not capture completeness or task success.
+A failed host terminal still sets `terminal_observed=true`; an unloaded compaction still
+has the legacy OK status but sets `terminal_observed=false`. Session deletion flushes only
+an open root turn; other session state is dropped without emitting additional spans.
+`opencode.interrupt.reason` remains exclusively the host's execution-interruption enum.
+Older spans without these attributes have unknown observation provenance.
 
 ### 3.1 Turn root (`invoke_agent` on a root session) — `src/spans.ts`
 

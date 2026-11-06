@@ -139,6 +139,28 @@ interface SessionInfoLite {
   directory?: string
 }
 
+interface SpanEnd {
+  readonly source: "host_event" | "plugin_flush"
+  readonly trigger: string
+  readonly terminalObserved: boolean
+}
+
+function hostEnd(trigger: string, terminalObserved = true): SpanEnd {
+  return { source: "host_event", trigger, terminalObserved }
+}
+
+function pluginEnd(trigger: string): SpanEnd {
+  return { source: "plugin_flush", trigger, terminalObserved: false }
+}
+
+function observationAttrs(end: SpanEnd): Array<readonly [string, AttrValue]> {
+  return [
+    ["opencode.observation.end_source", end.source],
+    ["opencode.observation.end_trigger", end.trigger],
+    ["opencode.observation.terminal_observed", end.terminalObserved],
+  ]
+}
+
 /** Turn origin: a real prompt hook ("user"), a consumed wakeup event ("synthetic"), or neither ("unknown") */
 type TurnOrigin = "user" | "synthetic" | "unknown"
 
@@ -370,7 +392,7 @@ export function createSpanBuilder(
 
   /** session.deleted: flush any unfinished turn root, then drop all registry entries for the session (prevents unbounded growth) */
   const dropSession = (sid: string, nowNano: bigint): void => {
-    void flushTurnRoot(sid, nowNano) // no-op when no turn is open
+    void flushTurnRoot(sid, nowNano, hostEnd("session.deleted", false)) // no-op when no turn is open
     openTurns.delete(sid)
     sessions.delete(sid)
     links.delete(sid)
@@ -449,7 +471,7 @@ export function createSpanBuilder(
 
   // --------------------------------------------------------------- turn root
 
-  const flushTurnRoot = async (sid: string, endNano: bigint, error?: { type?: string; message?: string; interruptReason?: string }) => {
+  const flushTurnRoot = async (sid: string, endNano: bigint, end: SpanEnd, error?: { type?: string; message?: string; interruptReason?: string }) => {
     const turn = openTurns.get(sid)
     if (!turn) return
     openTurns.delete(sid)
@@ -480,6 +502,7 @@ export function createSpanBuilder(
       startTimeUnixNano: turn.startedNano,
       endTimeUnixNano: endNano > turn.startedNano ? endNano : turn.lastEndNano,
       attributes: attrs(
+        ...observationAttrs(end),
         ["gen_ai.operation.name", "invoke_agent"],
         ["gen_ai.provider.name", "opencode"],
         ["gen_ai.agent.name", turn.agent ?? merged.agent],
@@ -631,7 +654,7 @@ export function createSpanBuilder(
             if (existing && existing.key !== pending.messageID) {
               // Previous execution stream never reached succeeded before the new prompt
               // took over: flush that turn root now
-              void flushTurnRoot(sid, nano(event.created))
+              void flushTurnRoot(sid, nano(event.created), pluginEnd("new_prompt"))
             }
             openTurn(sid, pending.messageID, pending.text, event.created, "user", data.agent as string | undefined)
           } else if (!openTurns.has(sid)) {
@@ -711,7 +734,7 @@ export function createSpanBuilder(
         // A redelivered started is NOT a predecessor — same created timestamp → same run key; a bare
         // flush would emit a premature span with the same deterministic id, and first-write-wins
         // backends would keep the bare one (Bug 17)
-        if (previous && previous.key !== state.key) emitCompactionSpan(sid, previous, {}, nano(event.created), false)
+        if (previous && previous.key !== state.key) emitCompactionSpan(sid, previous, {}, nano(event.created), false, pluginEnd("compaction_replaced"))
         return
       }
 
@@ -726,7 +749,7 @@ export function createSpanBuilder(
           return
         }
         compactions.delete(sid)
-        emitCompactionSpan(sid, state, data, nano(event.created), event.type === "session.compaction.failed")
+        emitCompactionSpan(sid, state, data, nano(event.created), event.type === "session.compaction.failed", hostEnd(event.type))
         return
       }
 
@@ -754,7 +777,7 @@ export function createSpanBuilder(
         const error = event.type === "session.step.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
         // malformed event (no assistantMessageID): skip the chat span — the
         // deterministic id would degrade to a hash of "undefined"
-        if (assistantMessageID) emitChatSpan(sid, assistantMessageID, step, data, endNano, error)
+        if (assistantMessageID) emitChatSpan(sid, assistantMessageID, step, data, endNano, hostEnd(event.type), error)
         const turn = openTurns.get(sid)
         if (turn) {
           if (endNano > turn.lastEndNano) turn.lastEndNano = endNano
@@ -819,7 +842,7 @@ export function createSpanBuilder(
         const tool = tools.get(callId)
         tools.delete(callId)
         const endNano = nano(event.created)
-        const emittedTraceId = emitToolSpan(sid, callId, tool, data, endNano, event.type === "session.tool.failed")
+        const emittedTraceId = emitToolSpan(sid, callId, tool, data, endNano, event.type === "session.tool.failed", hostEnd(event.type))
         // Round accounting (Bug 32): only a tool that emitted under THIS turn's trace
         // counts on it — a late Round 1 terminal must not inflate the current round's
         // message count or end time
@@ -845,8 +868,8 @@ export function createSpanBuilder(
         // live trace source — their late terminals still emit under this round (Bug 32)
         stampInFlightTools(sid)
         const error = event.type === "session.execution.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
-        if (isChild(sid)) void flushContainer(sid, nano(event.created), error)
-        else void flushTurnRoot(sid, nano(event.created), error)
+        if (isChild(sid)) void flushContainer(sid, nano(event.created), hostEnd(event.type), error)
+        else void flushTurnRoot(sid, nano(event.created), hostEnd(event.type), error)
         // Round over: a step still in flight at succeeded/failed is a missed terminal —
         // purge it (tools stay: their terminals can still land on the stamped trace)
         purgeInFlight(sid, "purge")
@@ -861,8 +884,8 @@ export function createSpanBuilder(
         }
         // Bind the round's in-flight tools to its trace BEFORE the flush (Bug 32)
         stampInFlightTools(sid)
-        if (isChild(sid)) void flushContainer(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
-        else void flushTurnRoot(sid, nano(event.created), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
+        if (isChild(sid)) void flushContainer(sid, nano(event.created), hostEnd(event.type), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
+        else void flushTurnRoot(sid, nano(event.created), hostEnd(event.type), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
         // The interrupted step stays answerable to a late step.ended (its chat span still
         // emits), but its propagation coordinates die with the round (Bug 19); its tools
         // stay answerable to their own late terminals (Bug 32)
@@ -883,6 +906,7 @@ export function createSpanBuilder(
     step: StepState | undefined,
     data: Record<string, unknown>,
     endNano: bigint,
+    end: SpanEnd,
     error?: { type?: string; message?: string },
   ) => {
     if (!assistantMessageID) return // defensive: deterministic hashes would collide without ids
@@ -941,6 +965,7 @@ export function createSpanBuilder(
       startTimeUnixNano: step?.startedNano ?? endNano,
       endTimeUnixNano: endNano,
       attributes: attrs(
+        ...observationAttrs(end),
         ["gen_ai.operation.name", "chat"],
         ["gen_ai.provider.name", model.providerID],
         ["gen_ai.request.model", model.id],
@@ -1038,6 +1063,7 @@ export function createSpanBuilder(
     data: Record<string, unknown>,
     endNano: bigint,
     failed: boolean,
+    end: SpanEnd,
   ): string | undefined => {
     const child = isChild(sid)
     // The tool's own round binding (Bug 32) — stamped at creation or round close —
@@ -1087,6 +1113,7 @@ export function createSpanBuilder(
       startTimeUnixNano: tool?.startedNano ?? endNano,
       endTimeUnixNano: endNano,
       attributes: attrs(
+        ...observationAttrs(end),
         ["gen_ai.operation.name", "execute_tool"],
         ["gen_ai.tool.name", name],
         ["gen_ai.tool.call.id", callId],
@@ -1143,6 +1170,7 @@ export function createSpanBuilder(
     data: Record<string, unknown>,
     endNano: bigint,
     failed: boolean,
+    end: SpanEnd,
   ) => {
     const model = (data.model ?? {}) as { id?: string; providerID?: string }
     const tokens = data.tokens as TokenUsage | undefined
@@ -1161,6 +1189,7 @@ export function createSpanBuilder(
       startTimeUnixNano: state.startedNano,
       endTimeUnixNano: endNano,
       attributes: attrs(
+        ...observationAttrs(end),
         ["gen_ai.operation.name", "compaction"],
         ["gen_ai.provider.name", model.providerID],
         ["gen_ai.request.model", model.id],
@@ -1191,7 +1220,7 @@ export function createSpanBuilder(
   }
 
   /** Sub-agent session close: emit the invoke_agent container span */
-  const flushContainer = async (sid: string, endNano: bigint, error?: { type?: string; message?: string; interruptReason?: string }) => {
+  const flushContainer = async (sid: string, endNano: bigint, end: SpanEnd, error?: { type?: string; message?: string; interruptReason?: string }) => {
     const container = containers.get(sid)
     if (!container) return // nothing ever produced a step/tool (empty session) — skip
     containers.delete(sid)
@@ -1208,6 +1237,7 @@ export function createSpanBuilder(
       startTimeUnixNano: container.startedNano,
       endTimeUnixNano: endNano > container.lastEndNano ? endNano : container.lastEndNano,
       attributes: attrs(
+        ...observationAttrs(end),
         ["gen_ai.operation.name", "invoke_agent"],
         ["gen_ai.provider.name", "opencode"],
         ["gen_ai.agent.name", info?.agent],
@@ -1250,6 +1280,7 @@ export function createSpanBuilder(
           { assistantMessageID: tool.assistantMessageID, error: { type: "interrupted", message: `interrupted: ${reason}` } },
           now,
           true,
+          pluginEnd(reason),
         )
         const turn = openTurns.get(tool.sessionID)
         if (turn && emittedTraceId === turn.traceId) turn.spanCount += 1
@@ -1261,12 +1292,12 @@ export function createSpanBuilder(
       // host-enum-only and is deliberately absent here (user decision, option B,
       // 2026-11-03: "plugin_unload" is not a host enum value).
       const teardown = { type: "interrupted", message: `interrupted: ${reason}` }
-      for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now, teardown)
-      for (const sid of [...containers.keys()]) await flushContainer(sid, now, teardown)
+      for (const sid of [...openTurns.keys()]) await flushTurnRoot(sid, now, pluginEnd(reason), teardown)
+      for (const sid of [...containers.keys()]) await flushContainer(sid, now, pluginEnd(reason), teardown)
       // In-flight compactions keep their bare span OK by decision (user decision
       // 2026-11-03), unlike the interrupted teardown above: a bare flush is a tombstone
       // with an UNKNOWN outcome, not a claimed success — changing it was considered and declined.
-      for (const [sid, state] of [...compactions]) emitCompactionSpan(sid, state, {}, now, false)
+      for (const [sid, state] of [...compactions]) emitCompactionSpan(sid, state, {}, now, false, pluginEnd(reason))
     },
     activeChatContext(sessionID) {
       // steps is keyed by assistantMessageID; at most one step per session is in flight
