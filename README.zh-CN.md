@@ -242,6 +242,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 {
   "v": 1,
   "ts": "2026-10-27T03:25:06.123Z",
+  "captureID": "61b9be54-60c5-4d98-806d-1202a7827471",
   "seq": 42,
   "hook": "ws.send",
   "sessionID": "ses_example0123456789",
@@ -253,6 +254,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 ```
 
 - `kind`：OpenCode 的请求分类（`primary` | `compaction` | `title` | `generate`）。仅 `primary` 帧会按 FIFO 被消费并注入 `chat` Span 的 `input.value`。
+- `(captureID, seq)` 用于跨采集器重启识别记录：`captureID` 是每个采集实例的 UUID，`seq` 在该实例的所有会话之间递增。Chat Span 用 `opencode.wire.capture_id` / `opencode.wire.seq` 保留这组关联字段，即使关闭 Span 的正文采集或将内容预算设为零也会保留。旧记录没有 `captureID`，不能仅凭 `seq` 跨重启唯一关联。
 - `wire.maxFrameBytes` 仅限制**磁盘 JSONL** 中 `frame` 的保留文本字节数，截断标记、JSON 转义和元数据另计（Span 路径始终接收完整帧，由 `contentGates.wireBody` 与 `contentMaxLength` 独立控制）：
   - `-1`（默认）：完整落盘
   - `0`：仅记录元数据（`frame: ""`、`truncated: true`、`frameBytes: <原始字节数>`）

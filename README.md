@@ -243,6 +243,7 @@ When `wire.enabled: true`, observed requests are recorded to `~/.local/share/ope
 {
   "v": 1,
   "ts": "2026-10-27T03:25:06.123Z",
+  "captureID": "61b9be54-60c5-4d98-806d-1202a7827471",
   "seq": 42,
   "hook": "ws.send",
   "sessionID": "ses_example0123456789",
@@ -254,6 +255,7 @@ When `wire.enabled: true`, observed requests are recorded to `~/.local/share/ope
 ```
 
 - `kind`: OpenCode's request classification (`primary` | `compaction` | `title` | `generate`). Only `primary` frames are consumed into chat-span `input.value` (FIFO).
+- `(captureID, seq)` identifies a record across recorder restarts: `captureID` is a UUID per recorder instance, and `seq` increases across all its sessions. Chat spans retain this pair as `opencode.wire.capture_id` / `opencode.wire.seq` even when body capture on spans is gated off or has a zero content budget. Legacy records without `captureID` cannot be uniquely joined across restarts using `seq` alone.
 - `wire.maxFrameBytes` limits the retained **on-disk frame string**, not the complete serialized JSONL record (spans still receive the full frame, governed by `contentGates.wireBody` + `contentMaxLength`):
   - `-1` (default): full payload
   - `0`: metadata-only (`frame: ""`, `truncated: true`, `frameBytes: <original_bytes>`)

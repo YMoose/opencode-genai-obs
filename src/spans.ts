@@ -45,6 +45,7 @@ import {
 import type { SpanRecord, AttrValue } from "./otlp.js"
 import type { MetricObservation } from "./metrics.js"
 import type { LogObservation } from "./logs.js"
+import type { CapturedWireFrame } from "./types.js"
 
 const KIND_INTERNAL = 1
 const KIND_CLIENT = 3
@@ -246,7 +247,7 @@ export interface SpanBuilderOptions {
   /** Byte budget for content attributes: -1 = no truncation, 0 = metadata-only (see tracing.contentMaxLength) */
   readonly contentMaxLength: number
   /** Take one pending wire frame (kind=primary FIFO); undefined when none is left */
-  readonly consumeWire: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined
+  readonly consumeWire: (sessionID: string) => CapturedWireFrame | undefined
   /** Fetch the session's latest info asynchronously (fills title/directory at turn close); undefined on failure */
   readonly getSessionInfo?: (sessionID: string) => Promise<SessionInfoLite | undefined>
   /** GenAI-semconv metric observations (token usage + operation duration); undefined disables metrics */
@@ -1002,7 +1003,8 @@ export function createSpanBuilder(
         ["opencode.session.parent_id", child ? (links.get(sid)?.parentSid ?? sessions.get(sid)?.parentID) : undefined],
         ["opencode.retry.attempt", retry?.attempt],
         ["opencode.retry.error", retryError],
-        ["opencode.wire.seq", wireTrunc ? wire?.seq : undefined],
+        ["opencode.wire.seq", wire?.seq],
+        ["opencode.wire.capture_id", wire?.captureID],
       ),
       status: error ? { code: 2, message: `${error.type ?? "error"}: ${error.message ?? "step failed"}` } : { code: 1 },
     })

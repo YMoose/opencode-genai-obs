@@ -1,12 +1,17 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync, rmSync } from "node:fs"
+import { join } from "node:path"
 import { LoggerProvider } from "@opentelemetry/sdk-logs"
 import type { LogRecord } from "@opentelemetry/api-logs"
 import { createSpanBuilder, type SpanBuilderOptions } from "../src/spans.js"
+import { createWireRecorder } from "../src/wire.js"
 import { createLogs } from "../src/logs.js"
 import { toolSpanId, turnSpanId } from "../src/ids.js"
 import type { SpanRecord } from "../src/otlp.js"
 import type { MetricObservation } from "../src/metrics.js"
+import type { CapturedWireFrame } from "../src/types.js"
+import { tempDir, waitFor } from "./helpers.js"
 
 const GATES = { userPrompts: true, assistantResponses: true, toolDetails: true, toolContent: true, wireBody: true }
 
@@ -164,4 +169,42 @@ test("Bug 36: a replaced compaction has no observed terminal even though its leg
   assert.equal(attrs["opencode.observation.end_trigger"], "compaction_replaced")
   assert.equal(attrs["opencode.observation.terminal_observed"], false)
   assert.equal(span?.status.code, 1)
+})
+
+test("Bug 37: recorder recreation keeps wire-to-span identity unique when seq restarts", async (t) => {
+  const directory = tempDir("ocg-capture-identity-")
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const emitted: SpanRecord[] = []
+  for (const hook of ["ws", "http"]) {
+    const wire = createWireRecorder({ enabled: true, directory, maxFrameBytes: 0 }, () => {})
+    t.after(() => wire.dispose())
+    const event = { sessionID: "parent", agent: "reasoner", model: { providerID: "p", id: "m" }, kind: "primary" }
+    if (hook === "ws") wire.recordWsSend({ ...event, frame: "request one" })
+    else wire.recordHttpRequest({ ...event, request: new Request("http://example.test", { method: "POST", body: "request two" }) })
+    let pending: CapturedWireFrame | undefined
+    await waitFor(() => (pending = wire.consumePending("parent")) !== undefined)
+    const { spans, send } = capture({ consumeWire: () => pending, gates: { ...GATES, wireBody: false } })
+    send("session.step.ended", 300, { assistantMessageID: "assistant" })
+    emitted.push(...spans)
+    wire.recordWsSend({ ...event, sessionID: "other", frame: "next request" })
+    await wire.dispose()
+  }
+  const records = readFileSync(join(directory, "parent.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line))
+  assert.equal(records.length, 2)
+  assert.equal(emitted.length, 2)
+  assert.equal(records[0].seq, 1)
+  assert.equal(records[1].seq, 1)
+  assert.match(records[0].captureID, /^[0-9a-f-]{36}$/)
+  assert.notEqual(records[0].captureID, records[1].captureID)
+  const other = readFileSync(join(directory, "other.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line))
+  assert.equal(other.length, 2)
+  for (const [index, span] of emitted.entries()) {
+    const attrs = attributes(span)
+    assert.equal(attrs["opencode.wire.capture_id"], records[index].captureID)
+    assert.equal(attrs["opencode.wire.seq"], records[index].seq)
+    assert.equal(attrs["input.value"], undefined)
+    assert.equal(records[index].frame, "")
+    assert.equal(other[index].seq, 2)
+    assert.equal(other[index].captureID, records[index].captureID)
+  }
 })

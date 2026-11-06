@@ -1,14 +1,20 @@
 /**
- * @fileoverview One JSONL record of a raw LLM request body (wire body).
- * Fields align with the offline lane's raw-request schema.
+ * @fileoverview Raw LLM request bodies shared by the wire recorder and span builder.
+ * JSONL fields align with the offline lane's raw-request schema.
  */
-export interface WireRecord {
+export interface CapturedWireFrame {
+  readonly frame: string
+  /** Recorder-wide monotonically increasing sequence; unique only within captureID. */
+  readonly seq: number
+  /** Recorder-instance identity; paired with seq because reloads restart the counter. */
+  readonly captureID: string
+}
+
+export interface WireRecord extends CapturedWireFrame {
   /** Schema version; bump on breaking changes */
   readonly v: 1
   /** ISO8601 with milliseconds */
   readonly ts: string
-  /** Process-wide monotonically increasing sequence, used for ordering within a session */
-  readonly seq: number
   readonly hook: "ws.send" | "http.request"
   readonly sessionID: string
   readonly agent: string

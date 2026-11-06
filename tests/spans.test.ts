@@ -722,7 +722,7 @@ test("log events: system event fires only when a wire frame is consumed", async 
   const logEvents: Array<Record<string, unknown>> = []
   const { builder } = makeHarness({
     emitLogEvent: (obs) => logEvents.push(obs as unknown as Record<string, unknown>),
-    consumeWire: () => ({ frame: JSON.stringify({ messages: [{ role: "system", content: "sys" }] }), seq: 1 }),
+    consumeWire: () => ({ frame: JSON.stringify({ messages: [{ role: "system", content: "sys" }] }), seq: 1, captureID: "capture" }),
   })
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
   builder.handlePrompt("s1", "m1", "hi")

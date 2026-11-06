@@ -4,7 +4,7 @@ Checked on 2026-11-03. Plugin baseline: `b2e58439bb6d3a146fd71d7fb5ffa4449346683
 OpenCode baseline: `c5fea455b5af7765c021b808afd294937a99f9b8`.
 Paths beginning with `src/` refer to this plugin; paths beginning with `packages/` refer
 to the OpenCode repository root. Capture provenance additions were checked on 2026-11-06
-against OpenCode `3ba597f776`. This audit changes documentation, not runtime behavior.
+against OpenCode `3ba597f776`.
 
 ## Plugin behavior and upstream evidence
 
@@ -56,7 +56,9 @@ against OpenCode `3ba597f776`. This audit changes documentation, not runtime beh
   modify it before transport dispatch. Capture does not prove successful transmission;
   read failures/timeouts, disposal, and disk errors can leave gaps. The per-session pending
   queue retains at most eight primary frames, consumed FIFO; frame sequence is recorder-wide,
-  not a per-file line number.
+  not a per-file line number. New captures add a recorder-instance UUID (`captureID`),
+  making `(captureID, seq)` unambiguous across restarts; chat spans retain that pair even
+  with wire content gated off. Legacy records without `captureID` retain the ambiguity.
 
 - `packages/schema/src/session-event.ts` and `src/spans.ts` — tool terminals already carry
   metadata and structured error types. The plugin exports `metadata.sessionID` on

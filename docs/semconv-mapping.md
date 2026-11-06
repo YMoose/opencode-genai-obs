@@ -149,7 +149,14 @@ aggregate token counts or cost.
 | `opencode.session.parent_id` | parent session's ID (from the subagent/task link or session registry) | sub-agent sessions only; same key as the invoke_agent container span |
 | `opencode.retry.attempt` | stamped from prior `session.retry.scheduled` in the same session | consumed once |
 | `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
-| `opencode.wire.seq` | `wire.seq` of the consumed frame | correlation back to the on-disk JSONL |
+| `opencode.wire.capture_id` | consumed frame's recorder-instance UUID (`captureID` in JSONL) | ungated; identifies the recorder, not a host request |
+| `opencode.wire.seq` | `wire.seq` of the consumed frame | ungated; correlate to JSONL using `(captureID, seq)`, never `seq` alone across restarts |
+
+The correlation pair is emitted whenever a frame is consumed, including when `wireBody`
+is off or the content budget is zero. It identifies the frame selected by the existing
+per-session FIFO; it does not change that association policy or the frozen trace/span IDs.
+Legacy JSONL records have no `captureID` and cannot be uniquely joined across restarts by
+`seq` alone. The new field is additive within wire schema `v: 1`.
 
 Chat duration follows `session.step.started` → `session.step.ended/failed`. Upstream step
 settlement includes tool settlement and snapshot work; `session.step.streamed` marks the

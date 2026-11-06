@@ -12,8 +12,9 @@
  */
 
 import { createWriteStream, mkdirSync, chmodSync, type WriteStream } from "node:fs"
+import { randomUUID } from "node:crypto"
 import { join } from "node:path"
-import type { WireRecord, WireHookEvent } from "./types.js"
+import type { WireRecord, WireHookEvent, CapturedWireFrame } from "./types.js"
 import type { WireConfig } from "./config.js"
 import { cutUtf8Bytes } from "./truncate.js"
 
@@ -35,7 +36,7 @@ export interface WireRecorder {
    * session (FIFO), or undefined. Non-primary frames (compaction/title) stay in a
    * separate tally and never pollute the main-path ordering.
    */
-  readonly consumePending: (sessionID: string) => { readonly frame: string; readonly seq: number } | undefined
+  readonly consumePending: (sessionID: string) => CapturedWireFrame | undefined
   /** Close all file handles and wait for flush completion (called on plugin unload) */
   readonly dispose: () => void | Promise<void>
 }
@@ -50,7 +51,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
   })
 
   /** Pending slots: per-session, per-kind FIFO (the kind=primary queue is consumed by the span builder) */
-  const pending = new Map<string, { primary: Array<{ frame: string; seq: number }>; other: number }>()
+  const pending = new Map<string, { primary: CapturedWireFrame[]; other: number }>()
 
   const pendingFor = (sessionID: string) => {
     let slot = pending.get(sessionID)
@@ -65,7 +66,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     const slot = pendingFor(sessionID)
     if (kind === "primary") {
       if (slot.primary.length >= PENDING_CAP) slot.primary.shift()
-      slot.primary.push({ frame, seq })
+      slot.primary.push({ frame, seq, captureID })
     } else slot.other += 1
   }
 
@@ -80,7 +81,9 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
     return noopRecorder()
   }
 
-  /** One append stream per session (cached by file name), plus a process-wide seq counter */
+  // This identifies our recorder, not a host request or a deterministic trace/span.
+  const captureID = randomUUID()
+  /** One append stream per session (cached by file name), plus a recorder-wide seq counter */
   const streams = new Map<string, WriteStream>()
   let seq = 0
 
@@ -178,6 +181,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
         v: 1,
         ts: new Date().toISOString(),
         seq: recordSeq,
+        captureID,
         hook: "ws.send",
         sessionID: event.sessionID,
         agent: event.agent,
@@ -217,6 +221,7 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
             v: 1,
             ts: new Date().toISOString(),
             seq: recordSeq,
+            captureID,
             hook: "http.request",
             sessionID: event.sessionID,
             agent: event.agent,
