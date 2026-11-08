@@ -5,6 +5,7 @@
  */
 
 import { createTraceExporter, type SpanRecord } from "./otlp.js"
+import { probeEndpoint } from "./probe.js"
 
 export interface SenderOptions {
   readonly endpoint: string
@@ -21,6 +22,10 @@ export interface SenderOptions {
   readonly retryDelayMs?: number
   /** Per-POST timeout in ms, default 30s */
   readonly timeoutMs?: number
+  /** Total time drain() may spend at unload (waiting for an in-flight send + a final flush), default 1s */
+  readonly drainBudgetMs?: number
+  /** Time close() may spend releasing the exporter, default 0.5s */
+  readonly closeBudgetMs?: number
 }
 
 interface Item {
@@ -30,6 +35,13 @@ interface Item {
 
 const MAX_ATTEMPTS = 5
 const BASE_DELAY_MS = 1_000
+// Shutdown bounds. With the collector stopped, every host exit or plugin reload otherwise waits out the exporter's
+// own retries (about 3 s measured). Blast radius: spans still queued when a bound is hit are dropped and never
+// retried at shutdown; with a healthy backend the final flush finishes well inside these limits.
+const DRAIN_BUDGET_MS = 1_000
+const CLOSE_BUDGET_MS = 500
+// One TCP connect before the final flush: a refused connection answers in about 1 ms, so a dead endpoint costs no wait.
+const PROBE_TIMEOUT_MS = 150
 
 export interface Sender {
   readonly push: (span: SpanRecord) => void
@@ -48,6 +60,10 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
   let timer: ReturnType<typeof setTimeout> | undefined
   let pumping = false
   let disposed = false
+  /** True after a failed send and until a send succeeds: the backend is presumed down, so shutdown does not retry */
+  let lastExportFailed = false
+  /** Set once shutdown concluded the backend is unreachable: close() then does not wait for the exporter */
+  let backendDown = false
 
   const schedule = (delayMs: number) => {
     if (disposed || timer) return
@@ -65,8 +81,10 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
         const batch = queue.slice(0, batchSize)
         try {
           await exporter.exportBatch(batch.map((item) => item.span))
+          lastExportFailed = false
           queue.splice(0, batch.length)
         } catch (error) {
+          lastExportFailed = true
           for (const item of batch) item.attempts += 1
           const expired = batch.filter((item) => item.attempts >= MAX_ATTEMPTS)
           if (expired.length > 0) {
@@ -104,13 +122,52 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
         clearTimeout(timer)
         timer = undefined
       }
-      // Wait for the in-flight pump to finish before touching the queue concurrently
-      while (pumping) await new Promise((resolve) => setTimeout(resolve, 25))
+      const deadline = Date.now() + (options.drainBudgetMs ?? DRAIN_BUDGET_MS)
+      const dropAll = (reason: string) => {
+        backendDown = true
+        if (queue.length > 0) log(`otlp drain: ${reason}, dropping remaining`, { remaining: queue.length })
+        queue.length = 0
+      }
+      if (pumping || queue.length > 0) {
+        const probe = await probeEndpoint(options.endpoint, PROBE_TIMEOUT_MS)
+        if (!probe.ok) {
+          dropAll(`endpoint not reachable (${probe.error ?? "no connection"})`)
+          return
+        }
+      }
+      /** Settles `{done:false}` at the shared deadline; the timer is unref'd so it cannot keep the host alive */
+      const within = <T>(work: Promise<T>): Promise<{ done: true; value: T } | { done: false }> => {
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const expired = new Promise<{ done: false }>((resolve) => {
+          timeout = setTimeout(() => resolve({ done: false }), Math.max(0, deadline - Date.now()))
+          timeout.unref?.()
+        })
+        const finished = work.then((value) => ({ done: true as const, value }))
+        return Promise.race([finished, expired]).finally(() => clearTimeout(timeout))
+      }
+      // Wait (bounded) for the in-flight pump before touching the queue concurrently
+      if (pumping) {
+        let abandon = false
+        const idle = (async () => {
+          while (pumping && !abandon) await new Promise<void>((resolve) => setTimeout(resolve, 25).unref?.())
+        })()
+        const settled = await within(idle)
+        if (!settled.done) {
+          abandon = true
+          dropAll("in-flight send still pending at the drain budget")
+          return
+        }
+      }
+      // A backend that just failed is presumed down: do not spend the shutdown budget retrying it
+      if (lastExportFailed) {
+        dropAll("backend unreachable")
+        return
+      }
       while (queue.length > 0) {
         const batch = queue.splice(0, batchSize)
-        try {
-          await exporter.exportBatch(batch.map((item) => item.span))
-        } catch {
+        const sent = exporter.exportBatch(batch.map((item) => item.span)).then(() => true, () => false)
+        const result = await within(sent)
+        if (!result.done || !result.value) {
           log("otlp drain flush failed, dropping remaining", { remaining: queue.length + batch.length })
           queue.length = 0
           break
@@ -118,7 +175,21 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
       }
     },
     async close() {
-      await exporter.close()
+      if (backendDown) {
+        // Do not wait for a backend we already know is gone; the exporter winds down on its own
+        void exporter.close().catch(() => {})
+        return
+      }
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const budget = new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, options.closeBudgetMs ?? CLOSE_BUDGET_MS)
+        timeout.unref?.()
+      })
+      try {
+        await Promise.race([exporter.close().catch(() => {}), budget])
+      } finally {
+        clearTimeout(timeout)
+      }
     },
   }
 }

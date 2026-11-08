@@ -265,6 +265,7 @@ When `wire.enabled: true`, observed requests are recorded to `~/.local/share/ope
 
 - **Logs**: `~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log` (7-day retention, automatic secret redaction).
 - **Startup probe**: when tracing is enabled, one TCP connect per distinct configured OTLP endpoint (traces/metrics/logs, deduplicated) at boot logs `otlp endpoint reachable` or `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` — log-only diagnostics; the sender's retry/backoff owns the behavioral response. Wire-only mode never probes (zero network egress).
+- **Shutdown**: unloading the plugin waits at most about 1.5 s for the final flush (a 150 ms TCP probe, a 1 s drain budget, a 0.5 s close budget). If nothing listens on the OTLP endpoint the queue is dropped at once and logged (`otlp drain: endpoint not reachable`); spans still queued when a bound is hit are dropped, never retried at shutdown.
 - **Attribute mapping**: [docs/semconv-mapping.md](docs/semconv-mapping.md) — what we capture from OpenCode → where it lands in GenAI semconv / OpenInference.
 - **Source verification**: [docs/source-audit.md](docs/source-audit.md) — local relative paths, checked versions, and implementation limitations.
 - **Roadmap**: [TODO.md](TODO.md)
