@@ -1,13 +1,16 @@
 /**
- * @fileoverview One-shot startup liveness probe for the configured OTLP endpoints.
+ * @fileoverview One-shot TCP liveness probe for the configured OTLP endpoints.
  *
  * Idea adapted from DEVtheOPS/opencode-plugin-otel probe.ts (MPL-2.0) — a TCP connect
- * with a short timeout at boot tells the user immediately whether the backend is
- * reachable, instead of discovering it through the first span's retry/backoff cycle.
- * Re-derived for our context: OTLP/HTTP-only (no gRPC default-port guessing), pure
- * diagnostics (log-only — the sender's retry/backoff owns the behavioral response, and
- * a backend that comes up later is none of the probe's business), and never called in
- * wire-only mode (the zero-network-egress promise holds).
+ * with a short timeout tells the user immediately whether the backend is reachable,
+ * instead of discovering it through the first span's retry/backoff cycle.
+ * Two callers with different roles: at boot (index.ts) it is pure, log-only diagnostics
+ * (the sender's retry/backoff owns the behavioral response, and a backend that comes up
+ * later is none of the probe's business), and never runs in wire-only mode (the
+ * zero-network-egress promise holds). At shutdown, sender.ts reuses probeEndpoint as a
+ * CLI fast-fail shortcut (tracing.fastShutdown, default on) to drop the queue at once
+ * when nothing listens locally, instead of waiting out the exporter's internal retry
+ * loop against the dead port.
  */
 import { connect } from "node:net"
 import { performance } from "node:perf_hooks"

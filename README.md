@@ -182,10 +182,13 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$X
     "resourceAttributes": {},             // merged into the OTLP Resource block (builtin keys take precedence)
     "annotations": { "enabled": true },   // POST session project/title to /v1/session_annotations (Phoenix REST extension;
                                           // set false on non-Phoenix backends to avoid 404 retries)
-    "propagation": { "providers": [] }    // W3C traceparent injection into outbound model requests: provider IDs (or "*")
-                                          // whose primary requests carry the in-flight chat span's context, so an
-                                          // OTel-instrumented gateway (LiteLLM, vLLM, …) can parent its spans under
-                                          // ours. Title/compaction/generate requests are never injected.
+    "propagation": { "providers": [] },   // W3C traceparent injection into outbound model requests: provider IDs (or "*")
+                                           // whose primary requests carry the in-flight chat span's context, so an
+                                           // OTel-instrumented gateway (LiteLLM, vLLM, …) can parent its spans under
+                                           // ours. Title/compaction/generate requests are never injected.
+    "fastShutdown": true                   // CLI fast-fail shortcuts at shutdown (150 ms TCP pre-probe + skip the final
+                                           // flush after a failed export). Set false for strict remote/proxied collectors:
+                                           // shutdown then always attempts the final flush within the same bounded budgets
   },
   "metrics": {
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration via OTLP/HTTP
@@ -217,6 +220,7 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$X
 | Log events only | default off; `"logs.enabled": true` to enable |
 | Session annotations only | `"tracing.annotations.enabled": false` |
 | Trace-context propagation | default off; configure `tracing.propagation.providers` to enable |
+| Shutdown fast-fail shortcuts | `"tracing.fastShutdown": false` — shutdown always attempts the final flush within the bounded budgets (strict remote/proxied collectors) |
 
 ### Environment variables
 
@@ -265,7 +269,7 @@ When `wire.enabled: true`, observed requests are recorded to `~/.local/share/ope
 
 - **Logs**: `~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log` (7-day retention, automatic secret redaction).
 - **Startup probe**: when tracing is enabled, one TCP connect per distinct configured OTLP endpoint (traces/metrics/logs, deduplicated) at boot logs `otlp endpoint reachable` or `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` — log-only diagnostics; the sender's retry/backoff owns the behavioral response. Wire-only mode never probes (zero network egress).
-- **Shutdown**: unloading the plugin waits at most about 1.5 s for the final flush (a 150 ms TCP probe, a 1 s drain budget, a 0.5 s close budget). If nothing listens on the OTLP endpoint the queue is dropped at once and logged (`otlp drain: endpoint not reachable`); spans still queued when a bound is hit are dropped, never retried at shutdown.
+- **Shutdown**: unloading the plugin always respects spec-mandated bounds — at most about 1.5 s for the final flush (1 s drain budget + 0.5 s close budget); spans still queued when a bound is hit are dropped, never retried at shutdown. On top of those bounds, `tracing.fastShutdown` (default `true`) adds CLI fast-fail shortcuts: a 150 ms TCP probe that drops the queue at once when nothing listens on the endpoint (`otlp drain: endpoint not reachable`), and skipping the final flush after a failed export. Set `tracing.fastShutdown: false` to disable both shortcuts — the drain/close budgets stay enforced, but shutdown always attempts the final flush within them (strict remote/proxied collectors).
 - **Attribute mapping**: [docs/semconv-mapping.md](docs/semconv-mapping.md) — what we capture from OpenCode → where it lands in GenAI semconv / OpenInference.
 - **Source verification**: [docs/source-audit.md](docs/source-audit.md) — local relative paths, checked versions, and implementation limitations.
 - **Roadmap**: [TODO.md](TODO.md)

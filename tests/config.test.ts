@@ -4,6 +4,7 @@
  * - Bug 7: type-mismatched fields warn and fall back to defaults (no more silent JS truthiness)
  * - Unknown-key warnings across the root and wire/tracing/contentGates nesting levels
  * - OTEL env override precedence
+ * - tracing.fastShutdown default/validation (Bug 38 follow-up: CLI fast-fail shutdown toggle)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -331,4 +332,21 @@ test("Bug 21: file-level metrics/logs headers are accepted and merged (no unknow
   assert.equal(config.metrics.headers["x-m"], "1", "the metrics file headers apply")
   assert.equal(config.metrics.headers["authorization"], "t", "tracing headers still inherit")
   assert.equal(config.logs.headers["x-l"], "2", "the logs file headers apply")
+})
+
+test("tracing.fastShutdown: defaults true, accepts false, non-boolean warns and falls back", () => {
+  const { config: def, warnings: defWarnings } = loadFrom(null)
+  assert.strictEqual(def.tracing.fastShutdown, true, "default is the CLI-ergonomic fast-fail shutdown")
+  assert.ok(!defWarnings.some((w) => w.message.includes("fastShutdown")), "no warning without the key")
+
+  const { config: strict, warnings: strictWarnings } = loadFrom(`{ "tracing": { "fastShutdown": false } }`)
+  assert.strictEqual(strict.tracing.fastShutdown, false, "strict remote/proxy deployments can opt out")
+  assert.ok(!strictWarnings.some((w) => w.message.includes("fastShutdown")), "a valid boolean needs no warning")
+
+  const { config: bad, warnings } = loadFrom(`{ "tracing": { "fastShutdown": "false" } }`)
+  assert.strictEqual(bad.tracing.fastShutdown, true, "the string 'false' must not take effect")
+  assert.ok(
+    warnings.some((w) => w.kind === "bad-type" && w.message.includes("tracing.fastShutdown")),
+    "the type error must warn and name the field",
+  )
 })

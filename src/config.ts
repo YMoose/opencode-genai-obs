@@ -96,6 +96,13 @@ export interface TracingConfig {
   readonly resourceAttributes: Record<string, string>
   readonly annotations: AnnotationsConfig
   readonly propagation: PropagationConfig
+  /**
+   * Default true (CLI-optimized): at shutdown, skip the final flush immediately when
+   * the last export failed or a 150ms TCP pre-probe fails. Set false for strict OTel
+   * remote/proxy collectors where shutdown should always attempt exportBatch within
+   * the bounded drain budget.
+   */
+  readonly fastShutdown: boolean
 }
 
 export interface PropagationConfig {
@@ -170,6 +177,7 @@ const TRACING_KEYS = new Set([
   "resourceAttributes",
   "annotations",
   "propagation",
+  "fastShutdown",
 ])
 const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "toolContent", "wireBody"])
 const ANNOTATION_KEYS = new Set(["enabled"])
@@ -336,6 +344,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       resourceAttributes: {},
       annotations: { enabled: true },
       propagation: { providers: [] },
+      fastShutdown: true,
     },
     metrics: {
       enabled: true,
@@ -405,6 +414,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
             propagation: {
               providers: stringListField(propagationRaw.providers, "tracing.propagation.providers", defaults.tracing.propagation.providers, warnings),
             },
+            fastShutdown: boolField(tracingRaw.fastShutdown, "tracing.fastShutdown", defaults.tracing.fastShutdown, warnings),
           },
           metrics: {
             enabled: boolField(metricsRaw.enabled, "metrics.enabled", defaults.metrics.enabled, warnings),

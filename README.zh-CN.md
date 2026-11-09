@@ -181,10 +181,13 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
     "resourceAttributes": {},             // 并入 OTLP Resource 块（内置键优先，不被覆盖）
     "annotations": { "enabled": true },   // 向 /v1/session_annotations 推送会话项目名与标题（Phoenix REST 扩展；
                                           // 非 Phoenix 后端建议设为 false 以免产生 404 重试）
-    "propagation": { "providers": [] }    // 向出站模型请求注入 W3C traceparent：列入 provider ID（或 "*"）后，
-                                          // 主循环请求携带当前 chat span 的上下文，OTel 插桩网关（LiteLLM、
-                                          // vLLM 等）便可把自身 span 挂到我们的 trace 下；title/compaction/
-                                          // generate 请求永不注入
+    "propagation": { "providers": [] },   // 向出站模型请求注入 W3C traceparent：列入 provider ID（或 "*"）后，
+                                           // 主循环请求携带当前 chat span 的上下文，OTel 插桩网关（LiteLLM、
+                                           // vLLM 等）便可把自身 span 挂到我们的 trace 下；title/compaction/
+                                           // generate 请求永不注入
+    "fastShutdown": true                   // 关机阶段的 CLI 快速失败捷径（150 ms TCP 预探测 + 上次导出失败后跳过
+                                           // 最终 flush）。远程/代理 collector 等严格部署设为 false：关机时仍在同样的
+                                           // 有界预算内始终尝试最终 flush
   },
   "metrics": {
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration，
@@ -216,6 +219,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 | 仅日志事件 | 默认关闭；`"logs.enabled": true` 开启 |
 | 仅会话标注 | `"tracing.annotations.enabled": false` |
 | trace-context 传播 | 默认关闭；配置 `tracing.propagation.providers` 启用 |
+| 关机快速失败捷径 | `"tracing.fastShutdown": false` —— 关机时在有界预算内始终尝试最终 flush（严格远程/代理 collector） |
 
 ### 环境变量
 
@@ -264,6 +268,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 
 - **插件日志**：`~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log`（保留 7 天，敏感凭据自动脱敏）。
 - **启动探测**：tracing 开启时，启动阶段对每个去重后的已配置 OTLP 端点（traces/metrics/logs）做一次 TCP 连接，记录 `otlp endpoint reachable` 或 `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` —— 纯诊断日志，导出行为由 sender 的重试/退避负责。wire-only 模式永不探测（零网络出流量）。
+- **关机**：插件卸载始终遵守规范规定的有界预算 —— 最终 flush 最多约 1.5 s（1 s drain 预算 + 0.5 s close 预算）；预算耗尽时仍在队列中的 span 被丢弃，关机阶段不再重试。在此之上，`tracing.fastShutdown`（默认 `true`）附加 CLI 快速失败捷径：150 ms TCP 预探测（端点无人监听时立刻丢弃队列并记录 `otlp drain: endpoint not reachable`）以及上次导出失败后跳过最终 flush。设 `tracing.fastShutdown: false` 可同时关闭两条捷径 —— drain/close 预算仍然生效，但关机始终会在预算内尝试最终 flush（严格远程/代理 collector 场景）。
 - **属性映射**：[docs/semconv-mapping.md](docs/semconv-mapping.md) —— 从 OpenCode 采集到的数据如何一一对应到 GenAI semconv / OpenInference。
 - **源码核查**：[docs/source-audit.md](docs/source-audit.md)——相对源码路径、核查版本和实现限制。
 - **路线图**：[TODO.md](TODO.md)

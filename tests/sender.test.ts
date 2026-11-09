@@ -3,6 +3,8 @@
  * - Recovery after failed retries (exponential backoff with injectable short delays)
  * - drain() completes in bounded time under persistent backend failure (Bug 2 follow-up: timeouts guarantee unload never hangs)
  * - Queue full: drops the oldest span and logs it
+ * - Bug 38: spec-mandated shutdown bounds (drain/close budgets, always on) vs. CLI
+ *   fast-fail shortcuts (pre-drain probe + lastExportFailed skip, fastShutdown-gated)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -160,4 +162,48 @@ test("Bug 38: drain() and close() return at once when nothing listens on the end
   const took = Date.now() - started
   assert.ok(took < 600, `shutdown against a dead endpoint must be near-instant, took ${took}ms`)
   assert.ok(logs.some((m) => m.includes("endpoint not reachable")), "the drop is logged with its reason")
+})
+
+test("Bug 38 fastShutdown=false: drain() retries the final flush after a failed send and delivers the span", async (t) => {
+  // First POST fails (400, non-retriable: fails fast, no exporter-internal retry — same trick as
+  // the fastShutdown=true test above), the next one succeeds. fastShutdown=false must not treat
+  // the failed send as "backend down" — it attempts the final flush within the budget.
+  const server = await startServer((_req, res, nth) => {
+    res.statusCode = nth === 0 ? 400 : 200
+    res.end()
+  })
+  t.after(() => server.close())
+  const sender = createSender(
+    { endpoint: server.url, retryDelayMs: 60_000, timeoutMs: 2_000, fastShutdown: false, drainBudgetMs: 2_000 },
+    () => {},
+  )
+  const span = makeSpan()
+  sender.push(span)
+  await waitFor(() => server.requests.length >= 1, 5_000)
+  await new Promise((resolve) => setTimeout(resolve, 100)) // let the failed pump settle
+  const before = server.requests.length
+  const started = Date.now()
+  await sender.drain()
+  await sender.close()
+  // The failed span was re-sent by the drain flush itself (not by the pump: retryDelayMs is 60 s)
+  assert.ok(server.requests.length > before, "drain must attempt the final flush even after a failed export")
+  assert.ok(server.requests.some((r) => r.body.includes(span.name)), "the queued span is delivered on the strict path")
+  assert.ok(Date.now() - started < 4_000, "the strict path stays bounded by drainBudgetMs (+ close budget)")
+})
+
+test("Bug 38 fastShutdown=false: a hung endpoint is still bounded by drainBudgetMs", async (t) => {
+  const server = await startServer(() => {
+    /* never respond */
+  })
+  t.after(() => server.close())
+  const sender = createSender(
+    { endpoint: server.url, retryDelayMs: 10, timeoutMs: 5_000, fastShutdown: false, drainBudgetMs: 200 },
+    () => {},
+  )
+  sender.push(makeSpan())
+  await waitFor(() => server.requests.length >= 1, 5_000)
+  const started = Date.now()
+  await sender.drain()
+  assert.ok(Date.now() - started < 1_500, `strict drain must stay bounded, took ${Date.now() - started}ms`)
+  await sender.close()
 })

@@ -131,6 +131,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       project: config.tracing.project,
       headers: config.tracing.headers,
       resourceAttributes: config.tracing.resourceAttributes,
+      fastShutdown: config.tracing.fastShutdown,
     },
     log,
   )

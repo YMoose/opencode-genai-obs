@@ -1,7 +1,9 @@
 /**
- * @fileoverview OTLP send queue: in-memory FIFO with exponential-backoff retry.
- * Spans buffer while the backend restarts; past the cap they are dropped with a
- * warn-log (tracing is the observability plane and never blocks the main path).
+ * @fileoverview Batched OTLP span sender with retry/backoff, bounded queue, and
+ * bounded drain-on-dispose (Bug 38). Shutdown separates spec-mandated bounds
+ * (drainBudgetMs / closeBudgetMs, always enforced so unload never hangs the host)
+ * from CLI fast-fail shortcuts (pre-drain TCP probe + lastExportFailed short-circuit,
+ * enabled by default via fastShutdown for instant exit when no local collector runs).
  */
 
 import { createTraceExporter, type SpanRecord } from "./otlp.js"
@@ -26,6 +28,12 @@ export interface SenderOptions {
   readonly drainBudgetMs?: number
   /** Time close() may spend releasing the exporter, default 0.5s */
   readonly closeBudgetMs?: number
+  /**
+   * Enable CLI fast-fail shortcuts at shutdown (150ms TCP pre-probe + skip retry when
+   * the last export failed), default true. When false, drain() still enforces
+   * drainBudgetMs/closeBudgetMs per OTel spec but always attempts the final flush.
+   */
+  readonly fastShutdown?: boolean
 }
 
 interface Item {
@@ -55,6 +63,7 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
   const batchSize = options.batchSize ?? 32
   const maxQueue = options.maxQueue ?? 10_000
   const baseDelay = options.retryDelayMs ?? BASE_DELAY_MS
+  const fastShutdown = options.fastShutdown ?? true
   const exporter = createTraceExporter(options)
   const queue: Item[] = []
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -128,7 +137,9 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
         if (queue.length > 0) log(`otlp drain: ${reason}, dropping remaining`, { remaining: queue.length })
         queue.length = 0
       }
-      if (pumping || queue.length > 0) {
+      // CLI fast-fail shortcut: one TCP connect before the final flush (skipped when fastShutdown is off —
+      // a remote/proxied collector may refuse bare TCP connects yet still accept OTLP POSTs)
+      if (fastShutdown && (pumping || queue.length > 0)) {
         const probe = await probeEndpoint(options.endpoint, PROBE_TIMEOUT_MS)
         if (!probe.ok) {
           dropAll(`endpoint not reachable (${probe.error ?? "no connection"})`)
@@ -158,8 +169,9 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
           return
         }
       }
-      // A backend that just failed is presumed down: do not spend the shutdown budget retrying it
-      if (lastExportFailed) {
+      // CLI fast-fail shortcut: a backend that just failed is presumed down, so do not spend the
+      // shutdown budget retrying it (skipped when fastShutdown is off — the spec path always attempts the flush)
+      if (fastShutdown && lastExportFailed) {
         dropAll("backend unreachable")
         return
       }
@@ -175,8 +187,9 @@ export function createSender(options: SenderOptions, log: (msg: string, data?: u
       }
     },
     async close() {
-      if (backendDown) {
-        // Do not wait for a backend we already know is gone; the exporter winds down on its own
+      // Fast-fail shortcut: do not wait for a backend we already know is gone (the exporter winds
+      // down on its own). With fastShutdown off, the spec path keeps the bounded closeBudgetMs wait.
+      if (fastShutdown && backendDown) {
         void exporter.close().catch(() => {})
         return
       }

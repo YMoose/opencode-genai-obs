@@ -123,6 +123,27 @@ canonical example).
   accommodate replay-only anomalies (such as out-of-order historical streams) that the
   live bus cannot produce — normalize or sort in the replay feeder instead.
 
+## Spec baselines vs. CLI-ergonomic optimizations
+
+Separate spec-mandated baselines from scenario-specific optimizations, and never let the
+second pose as the first. Baselines are what a spec or upstream contract makes
+non-negotiable — OTel semantic conventions, the bounded `ForceFlush`/`Shutdown` timeouts
+(unload must never hang the host, whatever the backend does), deterministic IDs. They are
+enforced unconditionally in the core mechanism, with a comment naming the bound and its
+blast radius, and no configuration can switch them off.
+
+Scenario-specific optimizations are the fast paths a particular deployment shape wants
+— e.g. the CLI fast-fail shutdown (150 ms TCP pre-probe + skip the final flush after a
+failed export) that exists because a local dev box with no collector running wants an
+instant exit. Hard-wiring such an assumption into the transport contract would silently
+break the shape it was not designed for (a strict remote/proxied OTel collector may
+refuse bare TCP connects yet still accept OTLP POSTs, and its users want every
+last-delivery attempt within the budget). Instead: keep them as explicit, composable
+policy toggles on top of the intact baseline (`tracing.fastShutdown`, default on for the
+ergonomic CLI experience, off for strict deployments). The rule of thumb: a new
+optimization may never narrow what the baseline guarantees — only what it additionally
+skips, and the skip must be visible in config and docs.
+
 ## Commits
 
 Short imperative English subjects with a conventional prefix (`fix:` / `feat:` / `test:` /
