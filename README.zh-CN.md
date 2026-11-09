@@ -49,6 +49,8 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 发生重试时，随后的 chat span 会打标 `opencode.retry.attempt` / `opencode.retry.error`。
 
+所有标识 agent 的 span（轮根、子代理 `execute_tool`、`invoke_agent` 容器、chat）都按 `tracing.agentName` 模板（默认 `"opencode/{agent}"`）写入 `gen_ai.agent.name`，并同时把裸角色名写入不受门控的 `opencode.agent` 属性 —— 按裸名查询与模板无关；设 `tracing.agentName: ""` 可同时省略两者中的前者（`opencode.agent` 始终保留）。
+
 ### Metrics
 
 | 指标 | 类型 | 属性 |
@@ -185,9 +187,14 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
                                            // 主循环请求携带当前 chat span 的上下文，OTel 插桩网关（LiteLLM、
                                            // vLLM 等）便可把自身 span 挂到我们的 trace 下；title/compaction/
                                            // generate 请求永不注入
-    "fastShutdown": true                   // 关机阶段的 CLI 快速失败捷径（150 ms TCP 预探测 + 上次导出失败后跳过
+    "fastShutdown": true,                 // 关机阶段的 CLI 快速失败捷径（150 ms TCP 预探测 + 上次导出失败后跳过
                                            // 最终 flush）。远程/代理 collector 等严格部署设为 false：关机时仍在同样的
                                            // 有界预算内始终尝试最终 flush
+    "agentName": "opencode/{agent}"       // gen_ai.agent.name 模板；"{agent}" → agent 角色名（build/plan/reasoner/
+                                           // actor/general/explore 或自定义名）。默认 "opencode/{agent}"：多个 AI CLI
+                                           // 共用一个后端时框架身份一目了然；"{agent}" = 裸角色名；"" = 完全省略该
+                                           // 属性。原始角色名始终写入不受门控的 opencode.agent 属性，按裸名查询与
+                                           // 模板无关。注意保持低基数：切勿把 message/session id 塞进模板
   },
   "metrics": {
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration，
@@ -220,6 +227,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 | 仅会话标注 | `"tracing.annotations.enabled": false` |
 | trace-context 传播 | 默认关闭；配置 `tracing.propagation.providers` 启用 |
 | 关机快速失败捷径 | `"tracing.fastShutdown": false` —— 关机时在有界预算内始终尝试最终 flush（严格远程/代理 collector） |
+| `gen_ai.agent.name` 模板 | 默认 `"opencode/{agent}"`；`"{agent}"` = 裸角色名，`""` = 省略该属性（裸角色名仍保留在 `opencode.agent`） |
 
 ### 环境变量
 

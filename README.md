@@ -49,6 +49,8 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 Retry events stamp `opencode.retry.attempt` / `opencode.retry.error` onto the following chat span.
 
+Every span kind that identifies an agent (turn root, sub-agent `execute_tool`, `invoke_agent` container, chat) sets `gen_ai.agent.name` from the `tracing.agentName` template (default `"opencode/{agent}"`) and additionally carries the raw role name on the ungated `opencode.agent` attribute — query the bare name via `opencode.agent` regardless of the template, or omit both through `tracing.agentName: ""`.
+
 ### Metrics
 
 | Metric | Type | Attributes |
@@ -186,9 +188,16 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$X
                                            // whose primary requests carry the in-flight chat span's context, so an
                                            // OTel-instrumented gateway (LiteLLM, vLLM, …) can parent its spans under
                                            // ours. Title/compaction/generate requests are never injected.
-    "fastShutdown": true                   // CLI fast-fail shortcuts at shutdown (150 ms TCP pre-probe + skip the final
+    "fastShutdown": true,                  // CLI fast-fail shortcuts at shutdown (150 ms TCP pre-probe + skip the final
                                            // flush after a failed export). Set false for strict remote/proxied collectors:
                                            // shutdown then always attempts the final flush within the same bounded budgets
+    "agentName": "opencode/{agent}"        // gen_ai.agent.name template; "{agent}" → the agent role name (build/plan/
+                                           // reasoner/actor/general/explore or custom). Default "opencode/{agent}" keeps
+                                           // the framework identity visible when multiple AI CLIs share one backend;
+                                           // "{agent}" = bare role name; "" = omit the attribute entirely. The raw role
+                                           // name always lands on the ungated opencode.agent attribute, so queries on
+                                           // the bare name are template-independent. Keep cardinality low: never
+                                           // template in message or session ids.
   },
   "metrics": {
     "enabled": true,                      // gen_ai.client.token.usage + gen_ai.client.operation.duration via OTLP/HTTP
@@ -221,6 +230,7 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$X
 | Session annotations only | `"tracing.annotations.enabled": false` |
 | Trace-context propagation | default off; configure `tracing.propagation.providers` to enable |
 | Shutdown fast-fail shortcuts | `"tracing.fastShutdown": false` — shutdown always attempts the final flush within the bounded budgets (strict remote/proxied collectors) |
+| `gen_ai.agent.name` templating | default `"opencode/{agent}"`; `"{agent}"` = bare role name, `""` = omit the attribute (the raw name stays on `opencode.agent`) |
 
 ### Environment variables
 

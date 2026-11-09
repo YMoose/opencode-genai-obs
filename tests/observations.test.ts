@@ -21,6 +21,7 @@ function capture(options: Partial<SpanBuilderOptions> = {}) {
   const builder = createSpanBuilder({
     gates: GATES,
     contentMaxLength: -1,
+    agentNameTemplate: "opencode/{agent}",
     consumeWire: () => undefined,
     observe: (observation) => metrics.push(observation),
     ...options,

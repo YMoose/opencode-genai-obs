@@ -163,6 +163,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     {
       gates: config.tracing.contentGates,
       contentMaxLength: config.tracing.contentMaxLength,
+      agentNameTemplate: config.tracing.agentName,
       consumeWire: (sessionID) => wire.consumePending(sessionID),
       getSessionInfo: async (sessionID) => {
         try {

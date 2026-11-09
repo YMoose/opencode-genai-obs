@@ -28,6 +28,7 @@ function makeHarness(overrides?: Partial<SpanBuilderOptions>): Harness {
     {
       gates: GATES,
       contentMaxLength: -1,
+      agentNameTemplate: "opencode/{agent}",
       consumeWire: () => undefined,
       getSessionInfo: async () => ({ agent: "build", title: "T", directory: "/w/p" }),
       ...overrides,
@@ -1270,6 +1271,135 @@ test("Bug 34: unload teardown of a sub-agent container does not set opencode.int
     container.status.code === 2 && container.status.message!.includes("interrupted: plugin_unload"),
     "the container still names the teardown cause in its status message",
   )
+})
+
+// ------------------------------------------------- tracing.agentName template (issue #2)
+
+/**
+ * One full round on a root session + one delegated sub-agent round, parameterized by
+ * the agentName template. Emits the turn root, the subagent tool span, and the child
+ * container span — the three span kinds that set gen_ai.agent.name. Returns the three
+ * spans after the async round-close flushes have landed.
+ */
+async function runAgentNameRound(template: string): Promise<{ root: SpanRecord; tool: SpanRecord; container: SpanRecord }> {
+  // getSessionInfo mirrors ctx.session.get: it answers with the session's own agent
+  const harness = makeHarness({
+    agentNameTemplate: template,
+    getSessionInfo: async (sid) => ({ agent: sid === "s2" ? "general" : "build", title: "T", directory: "/w/p" }),
+  })
+  harness.builder.handleEvent(event("session.created", 1_000, { sessionID: "s1", agent: "build" }))
+  harness.builder.handlePrompt("s1", "m1", "delegate work")
+  harness.builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", agent: "build", model: { id: "m", providerID: "p" } }))
+  // sub-agent delegation: the task tool's input.agent is the child role name
+  harness.builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "task" }))
+  harness.builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { agent: "general" } }))
+  harness.builder.handleEvent(
+    event("session.tool.success", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      id: "t1",
+      content: [{ type: "text", text: "ok" }],
+      metadata: { sessionID: "s2" },
+    }),
+  )
+  // child session round (container span)
+  harness.builder.handleEvent(event("session.created", 1_250, { sessionID: "s2", parentID: "s1", agent: "general" }))
+  harness.builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s2", assistantMessageID: "c1", agent: "general", model: { id: "m", providerID: "p" } }))
+  harness.builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "s2", assistantMessageID: "c1" }))
+  harness.builder.handleEvent(event("session.execution.succeeded", 1_500, { sessionID: "s2" }))
+  harness.builder.handleEvent(event("session.step.ended", 1_550, { sessionID: "s1", assistantMessageID: "a1" }))
+  harness.builder.handleEvent(event("session.execution.succeeded", 1_600, { sessionID: "s1" }))
+  await settle()
+  const find = (id: string): SpanRecord => {
+    const span = harness.spans.find((item) => item.spanId === hash(id, 8))
+    assert.ok(span, `must emit the span for ${id}`)
+    return span
+  }
+  return {
+    root: find("opencode-turn-span:s1:m1"),
+    tool: find("opencode-tool:a1:t1"),
+    container: find("opencode-session:s2"),
+  }
+}
+
+const attr = (span: SpanRecord, key: string): unknown => span.attributes.find(([k]) => k === key)?.[1]
+
+test("agentName default template: gen_ai.agent.name renders \"opencode/<role>\" on turn root, subagent tool span, and container", async () => {
+  const { root, tool, container } = await runAgentNameRound("opencode/{agent}")
+  assert.equal(attr(root, "gen_ai.agent.name"), "opencode/build", "turn root renders the default template")
+  assert.equal(attr(tool, "gen_ai.agent.name"), "opencode/general", "subagent tool span renders the delegated child role")
+  assert.equal(attr(container, "gen_ai.agent.name"), "opencode/general", "container span renders the child session's role")
+})
+
+test("agentName \"{agent}\": the bare role name (pre-change behavior restored)", async () => {
+  const { root, tool, container } = await runAgentNameRound("{agent}")
+  assert.equal(attr(root, "gen_ai.agent.name"), "build")
+  assert.equal(attr(tool, "gen_ai.agent.name"), "general")
+  assert.equal(attr(container, "gen_ai.agent.name"), "general")
+})
+
+test("agentName \"\": gen_ai.agent.name omitted, opencode.agent still present", async () => {
+  const { root, tool, container } = await runAgentNameRound("")
+  for (const [name, span] of [["turn root", root], ["tool span", tool], ["container", container]] as const) {
+    assert.ok(!span.attributes.some(([key]) => key === "gen_ai.agent.name"), `${name}: the attribute must be omitted entirely`)
+  }
+  assert.equal(attr(root, "opencode.agent"), "build", "the raw name survives on the ungated query key")
+  assert.equal(attr(tool, "opencode.agent"), "general")
+  assert.equal(attr(container, "opencode.agent"), "general")
+})
+
+test("agentName custom template: \"team-x/{agent}/v2\" renders on all three span kinds", async () => {
+  const { root, tool, container } = await runAgentNameRound("team-x/{agent}/v2")
+  assert.equal(attr(root, "gen_ai.agent.name"), "team-x/build/v2")
+  assert.equal(attr(tool, "gen_ai.agent.name"), "team-x/general/v2")
+  assert.equal(attr(container, "gen_ai.agent.name"), "team-x/general/v2")
+})
+
+test("agentName: every agent span carries the raw opencode.agent regardless of the template (template-independent query key)", async () => {
+  for (const template of ["opencode/{agent}", "{agent}", "", "team-x/{agent}/v2"]) {
+    const { root, tool, container } = await runAgentNameRound(template)
+    assert.equal(attr(root, "opencode.agent"), "build", `template ${JSON.stringify(template)}: turn root raw name`)
+    assert.equal(attr(tool, "opencode.agent"), "general", `template ${JSON.stringify(template)}: tool span raw name`)
+    assert.equal(attr(container, "opencode.agent"), "general", `template ${JSON.stringify(template)}: container raw name`)
+  }
+})
+
+test("agentName: a non-subagent tool span never carries gen_ai.agent.name (delegation-only attribute)", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1", agent: "build" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", agent: "build", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "bash" }))
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { cmd: "ls" } }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))!
+  assert.ok(tool, "the plain tool span must emit")
+  assert.ok(!tool.attributes.some(([key]) => key === "gen_ai.agent.name"), "a non-delegation tool has no agent name to render")
+  assert.ok(!tool.attributes.some(([key]) => key === "opencode.agent"), "no raw name either — the tool argument input.agent is not the parent's role")
+})
+
+test("agentName: a missing raw role name omits gen_ai.agent.name (\"opencode/\" with nothing after it is worse than omitting)", async () => {
+  // No agent anywhere: session.created carries none, step.started carries none
+  const { spans, builder } = makeHarness({ getSessionInfo: async () => ({ title: "T", directory: "/w/p" }) })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))!
+  assert.ok(root, "the turn root must emit")
+  assert.ok(
+    !root.attributes.some(([key]) => key === "gen_ai.agent.name"),
+    "no raw name → no attribute: a rendered \"opencode/\" with nothing after it is worse than omitting",
+  )
+  assert.ok(!root.attributes.some(([key]) => key === "opencode.agent"), "no raw name at all → no raw-name attribute either")
+})
+
+test("agentName: multiple {agent} occurrences all render", async () => {
+  const { root } = await runAgentNameRound("{agent}-opencode-{agent}")
+  assert.equal(attr(root, "gen_ai.agent.name"), "build-opencode-build")
 })
 
 test("Bug 34: a real host interrupt still lands opencode.interrupt.reason on the turn root", async () => {

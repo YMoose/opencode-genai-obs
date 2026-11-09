@@ -103,6 +103,18 @@ export interface TracingConfig {
    * the bounded drain budget.
    */
   readonly fastShutdown: boolean
+  /**
+   * Template for the gen_ai.agent.name attribute (free-form text per OTel GenAI
+   * semconv, only constrained to low cardinality — the user owns that responsibility,
+   * e.g. never template in message ids or session ids). Exactly one built-in
+   * placeholder: `{agent}` (replaced at span emission with the current agent role
+   * name: build/plan/reasoner/actor/general/explore or a custom name). Default
+   * "opencode/{agent}" makes the framework identity visible out of the box (issue #2:
+   * multi-tool collisions in one backend). "" = never set gen_ai.agent.name (the
+   * spec's "omit when no meaningful name" guidance). "{agent}" = the bare role name
+   * (pre-change behavior). Any other brace usage is malformed → warning + default.
+   */
+  readonly agentName: string
 }
 
 export interface PropagationConfig {
@@ -178,6 +190,7 @@ const TRACING_KEYS = new Set([
   "annotations",
   "propagation",
   "fastShutdown",
+  "agentName",
 ])
 const GATE_KEYS = new Set(["userPrompts", "assistantResponses", "toolDetails", "toolContent", "wireBody"])
 const ANNOTATION_KEYS = new Set(["enabled"])
@@ -248,6 +261,25 @@ function stringListField(value: unknown, path: string, fallback: readonly string
     out.push(item)
   }
   return out
+}
+
+/**
+ * Template validation for tracing.agentName: the value may contain zero or more
+ * `{agent}` placeholders plus any literal characters, but no other brace usage —
+ * `{agnet}` (typo), `{agent` (unclosed), `agent}`, or `{}` are almost certainly
+ * mistakes that would leak verbatim into a semconv attribute. Malformed → warning
+ * and the default template. Full replacement (not a prefix), so double-prefix risk
+ * does not exist by construction and no idempotency guard is needed.
+ */
+function validateAgentNameTemplate(value: string, warnings: ConfigWarning[]): string {
+  if (value === "") return value
+  const stripped = value.replaceAll("{agent}", "")
+  if (!stripped.includes("{") && !stripped.includes("}")) return value
+  warnings.push({
+    kind: "invalid-value",
+    message: `tracing.agentName: unsupported brace usage in template ${JSON.stringify(value)} (only "{agent}" is a placeholder); using default "opencode/{agent}"`,
+  })
+  return "opencode/{agent}"
 }
 
 /** Read a config section: null/missing → {}; non-object → warn and treat as {} */
@@ -345,6 +377,7 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
       annotations: { enabled: true },
       propagation: { providers: [] },
       fastShutdown: true,
+      agentName: "opencode/{agent}",
     },
     metrics: {
       enabled: true,
@@ -415,6 +448,10 @@ export function loadConfig(log: (msg: string, data?: unknown) => void): { config
               providers: stringListField(propagationRaw.providers, "tracing.propagation.providers", defaults.tracing.propagation.providers, warnings),
             },
             fastShutdown: boolField(tracingRaw.fastShutdown, "tracing.fastShutdown", defaults.tracing.fastShutdown, warnings),
+            agentName: validateAgentNameTemplate(
+              stringField(tracingRaw.agentName, "tracing.agentName", defaults.tracing.agentName, warnings),
+              warnings,
+            ),
           },
           metrics: {
             enabled: boolField(metricsRaw.enabled, "metrics.enabled", defaults.metrics.enabled, warnings),

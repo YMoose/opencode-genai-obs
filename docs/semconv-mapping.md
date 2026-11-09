@@ -66,6 +66,11 @@ considered and declined.
 ## 3. Attribute inventory (by span kind)
 
 Keys marked **Gate** are toggled off by the corresponding `tracing.contentGates.*` flag; see `src/config.ts`.
+`tracing.agentName` templates the `gen_ai.agent.name` value on turn roots, sub-agent tool spans, and
+sub-agent containers: `{agent}` occurrences are replaced with the agent role name at emission
+(default `"opencode/{agent}"`, `""` = omit the attribute, malformed brace usage → warning + default).
+The raw role name is always mirrored on the ungated `opencode.agent` attribute (chat spans already
+carried it; the other three kinds were extended), so queries on the bare name are template-independent.
 `tracing.contentMaxLength` is three-state (mirrors `wire.maxFrameBytes`): `-1` = no truncation,
 `0` = metadata-only (the value attribute is omitted, `*_original_length` still emitted for spans that
 provide one), `N > 0` = first N UTF-8 bytes (character-boundary safe) with a
@@ -96,7 +101,8 @@ Older spans without these attributes have unknown observation provenance.
 |---|---|---|
 | `gen_ai.operation.name` | const `"invoke_agent"` | semconv |
 | `gen_ai.provider.name` | const `"opencode"` | semconv |
-| `gen_ai.agent.name` | turn's `agent` ∪ session registry | semconv |
+| `gen_ai.agent.name` | rendered from the `tracing.agentName` template (`{agent}` → turn's `agent` ∪ session registry), default `"opencode/{agent}"` | semconv; omitted when the raw role name is missing or the template is `""` |
+| `opencode.agent` | turn's `agent` ∪ session registry | raw role name, ungated; the template-independent query key |
 | `gen_ai.conversation.id` | `sessionID` | semconv; also duplicated as `session.id` and `opencode.session.id` for Phoenix |
 | `session.id` | `sessionID` | OpenInference native |
 | `opencode.session.id` | `sessionID` | convenience alias |
@@ -145,7 +151,7 @@ aggregate token counts or cost.
 | `output.value` | concatenated text chunks, truncated | **Gate: `assistantResponses`** |
 | `output.value_original_length` | truncation marker | |
 | `opencode.message.id` | `assistantMessageID` | deterministic-id input |
-| `opencode.agent` | `step.agent` | |
+| `opencode.agent` | `step.agent` | raw role name, ungated; the template-independent query key |
 | `opencode.session.parent_id` | parent session's ID (from the subagent/task link or session registry) | sub-agent sessions only; same key as the invoke_agent container span |
 | `opencode.retry.attempt` | stamped from prior `session.retry.scheduled` in the same session | consumed once |
 | `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
@@ -172,7 +178,8 @@ is therefore a step interval, not pure model-request latency.
 | `gen_ai.tool.call.id` | `toolCallId` | deterministic-id input |
 | `gen_ai.tool.type` | `"function"` | |
 | `gen_ai.conversation.id` | `sessionID` | |
-| `gen_ai.agent.name` | `input.agent` — only when `name ∈ {subagent, task}` | identifies the child agent role |
+| `gen_ai.agent.name` | rendered from the `tracing.agentName` template (`{agent}` → `input.agent`), only when `name ∈ {subagent, task}` | identifies the child agent role; default template `"opencode/{agent}"`; omitted when the raw role name is missing or the template is `""` |
+| `opencode.agent` | `input.agent` — only when `name ∈ {subagent, task}` | raw role name, ungated; the template-independent query key |
 | `opencode.subagent.session_id` | nonempty string `metadata.sessionID` from `tool.success/failed`, only for `subagent` / `task` | ungated child identity; never inferred from arguments or result text |
 | `gen_ai.tool.call.arguments` | `JSON.stringify(tool.input)` | **Gate: `toolDetails`** |
 | `gen_ai.tool.call.result` | JSON array string: each text part becomes its text string, other parts remain objects | **Gate: `toolContent`** |
@@ -188,7 +195,8 @@ is therefore a step interval, not pure model-request latency.
 |---|---|---|
 | `gen_ai.operation.name` | `"invoke_agent"` | |
 | `gen_ai.provider.name` | `"opencode"` | |
-| `gen_ai.agent.name` | child session's `agent` field | |
+| `gen_ai.agent.name` | rendered from the `tracing.agentName` template (`{agent}` → child session's `agent` field), default `"opencode/{agent}"` | omitted when the raw role name is missing or the template is `""` |
+| `opencode.agent` | child session's `agent` field | raw role name, ungated; the template-independent query key |
 | `gen_ai.conversation.id` | child `sessionID` | |
 | `session.id` / `opencode.session.id` | child `sessionID` | |
 | `opencode.session.parent_id` | registering parent's sessionID | |

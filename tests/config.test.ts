@@ -5,6 +5,7 @@
  * - Unknown-key warnings across the root and wire/tracing/contentGates nesting levels
  * - OTEL env override precedence
  * - tracing.fastShutdown default/validation (Bug 38 follow-up: CLI fast-fail shutdown toggle)
+ * - tracing.agentName template default/validation (issue #2: framework-namespaced gen_ai.agent.name)
  */
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -349,4 +350,40 @@ test("tracing.fastShutdown: defaults true, accepts false, non-boolean warns and 
     warnings.some((w) => w.kind === "bad-type" && w.message.includes("tracing.fastShutdown")),
     "the type error must warn and name the field",
   )
+})
+
+test("tracing.agentName: default \"opencode/{agent}\"; accepts custom templates, \"\" and \"{agent}\"", () => {
+  const { config: def, warnings } = loadFrom(null)
+  assert.strictEqual(def.tracing.agentName, "opencode/{agent}", "framework identity visible out of the box (issue #2)")
+  assert.deepStrictEqual(warnings, [])
+
+  const { config: custom, warnings: customWarnings } = loadFrom(`{ "tracing": { "agentName": "team-x/{agent}/v2" } }`)
+  assert.strictEqual(custom.tracing.agentName, "team-x/{agent}/v2")
+  assert.deepStrictEqual(customWarnings, [])
+
+  // A template with no placeholder at all is valid: a fixed literal name
+  const { config: literal } = loadFrom(`{ "tracing": { "agentName": "assistant" } }`)
+  assert.strictEqual(literal.tracing.agentName, "assistant")
+
+  const { config: bare } = loadFrom(`{ "tracing": { "agentName": "{agent}" } }`)
+  assert.strictEqual(bare.tracing.agentName, "{agent}", "\"{agent}\" restores the bare role name (pre-change behavior)")
+
+  const { config: empty, warnings: emptyWarnings } = loadFrom(`{ "tracing": { "agentName": "" } }`)
+  assert.strictEqual(empty.tracing.agentName, "", "\"\" = omit gen_ai.agent.name entirely")
+  assert.deepStrictEqual(emptyWarnings, [], "an explicit empty string is a deliberate choice, not a mistake")
+
+  const { config: badType, warnings: typeWarnings } = loadFrom(`{ "tracing": { "agentName": 42 } }`)
+  assert.strictEqual(badType.tracing.agentName, "opencode/{agent}", "a non-string falls back to the default")
+  assert.ok(typeWarnings.some((w) => w.kind === "bad-type" && w.message.includes("tracing.agentName")))
+})
+
+test("tracing.agentName: malformed brace usage warns and falls back to the default template", () => {
+  for (const template of ["{agnet}", "{agent", "agent}", "{}", "{agent}}", "prefix-{x}/{agent}"]) {
+    const { config, warnings } = loadFrom(`{ "tracing": { "agentName": "${template}" } }`)
+    assert.strictEqual(config.tracing.agentName, "opencode/{agent}", `malformed template ${JSON.stringify(template)} must fall back to the default`)
+    assert.ok(
+      warnings.some((w) => w.kind === "invalid-value" && w.message.includes("tracing.agentName") && w.message.includes(template)),
+      `the warning must name the field and the rejected template: ${JSON.stringify(template)}`,
+    )
+  }
 })

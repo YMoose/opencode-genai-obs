@@ -104,6 +104,15 @@ function preview(text: string | null | undefined): string | undefined {
   return flat.length > 40 ? flat.slice(0, 40) + "…" : flat
 }
 
+/**
+ * Resolve the tracing.agentName template for one span: `{agent}` occurrences are
+ * replaced with the raw role name, "" omits the attribute (the spec's guidance when
+ * there is no meaningful name), and a missing raw name also omits it — a rendered
+ * "opencode/" with nothing after it is worse than no attribute at all.
+ */
+const renderAgentName = (template: string, rawAgent: string | undefined): string | undefined =>
+  rawAgent === undefined || rawAgent === "" || template === "" ? undefined : template.replaceAll("{agent}", rawAgent)
+
 interface TokenUsage {
   readonly input: number
   readonly output: number
@@ -246,6 +255,13 @@ export interface SpanBuilderOptions {
   }
   /** Byte budget for content attributes: -1 = no truncation, 0 = metadata-only (see tracing.contentMaxLength) */
   readonly contentMaxLength: number
+  /**
+   * gen_ai.agent.name template (tracing.agentName): `{agent}` is replaced with the
+   * current agent role name at span emission; "" omits the attribute entirely.
+   * The raw role name always lands on the ungated opencode.agent attribute instead,
+   * so downstream queries on the bare name are template-independent.
+   */
+  readonly agentNameTemplate: string
   /** Take one pending wire frame (kind=primary FIFO); undefined when none is left */
   readonly consumeWire: (sessionID: string) => CapturedWireFrame | undefined
   /** Fetch the session's latest info asynchronously (fills title/directory at turn close); undefined on failure */
@@ -506,7 +522,9 @@ export function createSpanBuilder(
         ...observationAttrs(end),
         ["gen_ai.operation.name", "invoke_agent"],
         ["gen_ai.provider.name", "opencode"],
-        ["gen_ai.agent.name", turn.agent ?? merged.agent],
+        ["gen_ai.agent.name", renderAgentName(options.agentNameTemplate, turn.agent ?? merged.agent)],
+        // Raw role name, ungated: the template-independent query key (see tracing.agentName)
+        ["opencode.agent", turn.agent ?? merged.agent],
         ["gen_ai.conversation.id", sid],
         ["session.id", sid],
         ["opencode.session.id", sid],
@@ -1121,7 +1139,9 @@ export function createSpanBuilder(
         ["gen_ai.tool.call.id", callId],
         ["gen_ai.tool.type", "function"],
         ["gen_ai.conversation.id", sid],
-        ["gen_ai.agent.name", isSubagent ? (input.agent as string | undefined) : undefined],
+        ["gen_ai.agent.name", renderAgentName(options.agentNameTemplate, isSubagent ? (input.agent as string | undefined) : undefined)],
+        // Raw role name, ungated: the template-independent query key (see tracing.agentName)
+        ["opencode.agent", isSubagent ? (input.agent as string | undefined) : undefined],
         ["opencode.subagent.session_id", childSid],
         ["gen_ai.tool.call.arguments", argumentsJson],
         ["gen_ai.tool.call.result", resultTrunc?.value],
@@ -1242,7 +1262,9 @@ export function createSpanBuilder(
         ...observationAttrs(end),
         ["gen_ai.operation.name", "invoke_agent"],
         ["gen_ai.provider.name", "opencode"],
-        ["gen_ai.agent.name", info?.agent],
+        ["gen_ai.agent.name", renderAgentName(options.agentNameTemplate, info?.agent)],
+        // Raw role name, ungated: the template-independent query key (see tracing.agentName)
+        ["opencode.agent", info?.agent],
         ["gen_ai.conversation.id", sid],
         ["session.id", sid],
         ["opencode.session.id", sid],
