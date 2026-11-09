@@ -86,3 +86,78 @@ test("queue full drops the oldest span and logs it", async (t) => {
   await sender.drain()
   await sender.close()
 })
+
+test("Bug 38: drain() returns within its budget while an in-flight send hangs", async (t) => {
+  const server = await startServer(() => {
+    /* never respond: the send stays in flight */
+  })
+  t.after(() => server.close())
+  const logs: string[] = []
+  const options = { endpoint: server.url, retryDelayMs: 10, timeoutMs: 5_000, drainBudgetMs: 200 }
+  const sender = createSender(options, (m) => logs.push(m))
+  sender.push(makeSpan())
+  await waitFor(() => server.requests.length >= 1, 5_000)
+  const started = Date.now()
+  await sender.drain()
+  assert.ok(Date.now() - started < 1_500, `drain must return within its budget, took ${Date.now() - started}ms`)
+  assert.ok(logs.some((m) => m.includes("drain budget")), "the dropped spans are logged")
+})
+
+test("Bug 38: drain() sends nothing more once the last send failed (backend presumed down)", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 400 // not retryable: fails fast, no exporter-internal retry
+    res.end()
+  })
+  t.after(() => server.close())
+  const sender = createSender({ endpoint: server.url, retryDelayMs: 60_000, timeoutMs: 2_000 }, () => {})
+  sender.push(makeSpan())
+  await waitFor(() => server.requests.length >= 1, 5_000)
+  await new Promise((resolve) => setTimeout(resolve, 100)) // let the failed pump settle
+  const before = server.requests.length
+  await sender.drain()
+  assert.equal(server.requests.length, before, "no extra request at shutdown while the backend is presumed down")
+})
+
+test("Bug 38 guard: drain() still delivers pending spans when the backend is healthy", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+  const sender = createSender({ endpoint: server.url, retryDelayMs: 10, timeoutMs: 2_000 }, () => {})
+  const span = makeSpan()
+  sender.push(span)
+  await sender.drain()
+  await sender.close()
+  assert.ok(server.requests.some((r) => r.body.includes(span.name)), "the span reaches the backend on a healthy drain")
+})
+
+test("Bug 38: close() returns within its budget while an export hangs", async (t) => {
+  const server = await startServer(() => {
+    /* hang */
+  })
+  t.after(() => server.close())
+  const options = { endpoint: server.url, timeoutMs: 5_000, closeBudgetMs: 200, drainBudgetMs: 50 }
+  const sender = createSender(options, () => {})
+  sender.push(makeSpan())
+  await waitFor(() => server.requests.length >= 1, 5_000)
+  const started = Date.now()
+  await sender.close()
+  assert.ok(Date.now() - started < 1_500, `close must return within its budget, took ${Date.now() - started}ms`)
+})
+
+test("Bug 38: drain() and close() return at once when nothing listens on the endpoint", async () => {
+  const closed = await startServer(() => {})
+  const deadUrl = closed.url
+  await closed.close() // the port is now closed: connections are refused
+  const logs: string[] = []
+  const sender = createSender({ endpoint: deadUrl, retryDelayMs: 60_000, timeoutMs: 30_000 }, (m) => logs.push(m))
+  sender.push(makeSpan())
+  sender.push(makeSpan())
+  const started = Date.now()
+  await sender.drain()
+  await sender.close()
+  const took = Date.now() - started
+  assert.ok(took < 600, `shutdown against a dead endpoint must be near-instant, took ${took}ms`)
+  assert.ok(logs.some((m) => m.includes("endpoint not reachable")), "the drop is logged with its reason")
+})
