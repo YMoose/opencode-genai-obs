@@ -55,7 +55,7 @@ Every bug fix lands with an accompanying test:
 
 - Write the test first and confirm it fails against the unfixed code (red), then fix and
   confirm green. The commit that fixes a bug must contain its test.
-- Continue the `Bug N` numbering in test titles (currently Bug 1–15); cite the upstream origin
+- Continue the `Bug N` numbering in test titles (currently Bug 1–38); cite the upstream origin
   in the title when one exists (e.g. `Bug 9 (same as opencode #55002)`).
 - The test must assert the observable behavior that was wrong, not just that code ran.
 
@@ -111,7 +111,8 @@ canonical example).
 - Semantic heuristics — anything that invents identity, ordering, or attribution the
   upstream contract does not carry — require an explicit user decision. When granted,
   label the heuristic where it lives and record the upstream gap it papers over in
-  TODO.md (and in the upstream issue when one exists).
+  docs/governance.md — adjudications are logged in docs/decisions.md — and in the
+  upstream issue when one exists.
 - Mechanical safeguards (timeouts, size caps, idempotency guards against documented
   at-least-once delivery) are a different class: land them with a comment naming the
   bound and the blast radius. A safeguard that decides attribution or identity

@@ -28,7 +28,7 @@
  * toolCallID; session ids from the child sessionID; compaction ids from sessionID ×
  * start timestamp. Exact outputs are pinned by tests/ids.test.ts.
  *
- * Standing semantic heuristics are labeled at their sites and indexed in TODO.md (AGENTS.md heuristic policy).
+ * Standing semantic heuristics are labeled at their sites and indexed in docs/governance.md (AGENTS.md heuristic policy).
  */
 
 import { cutUtf8Bytes } from "./truncate.js"
