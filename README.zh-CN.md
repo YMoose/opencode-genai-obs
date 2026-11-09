@@ -49,7 +49,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 发生重试时，随后的 chat span 会打标 `opencode.retry.attempt` / `opencode.retry.error`。
 
-所有标识 agent 的 span（轮根、子代理 `execute_tool`、`invoke_agent` 容器、chat）都按 `tracing.agentName` 模板（默认 `"opencode/{agent}"`）写入 `gen_ai.agent.name`，并同时把裸角色名写入不受门控的 `opencode.agent` 属性 —— 按裸名查询与模板无关；设 `tracing.agentName: ""` 可同时省略两者中的前者（`opencode.agent` 始终保留）。
+轮根、子代理 `execute_tool`、`invoke_agent` 容器按 `tracing.agentName` 模板（默认 `"opencode/{agent}"`）写入 `gen_ai.agent.name`（GenAI semconv 将该属性限定于 agent 操作 span，chat span 不写入）；这三类 span 以及 chat span 均把裸角色名写入不受门控的 `opencode.agent` 属性 —— 按裸名查询与模板无关。设 `tracing.agentName: ""` 仅省略 `gen_ai.agent.name`（`opencode.agent` 始终保留）。
 
 ### Metrics
 

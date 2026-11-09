@@ -49,7 +49,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 Retry events stamp `opencode.retry.attempt` / `opencode.retry.error` onto the following chat span.
 
-Every span kind that identifies an agent (turn root, sub-agent `execute_tool`, `invoke_agent` container, chat) sets `gen_ai.agent.name` from the `tracing.agentName` template (default `"opencode/{agent}"`) and additionally carries the raw role name on the ungated `opencode.agent` attribute — query the bare name via `opencode.agent` regardless of the template, or omit both through `tracing.agentName: ""`.
+Turn roots, sub-agent `execute_tool` spans, and `invoke_agent` containers set `gen_ai.agent.name` from the `tracing.agentName` template (default `"opencode/{agent}"`) — the GenAI semconv scopes the agent name to agent-operation spans, so chat spans do not carry it. Those three kinds plus chat spans all mirror the raw role name on the ungated `opencode.agent` attribute — query the bare name there regardless of the template. `tracing.agentName: ""` omits only `gen_ai.agent.name`; `opencode.agent` always stays.
 
 ### Metrics
 

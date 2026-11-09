@@ -7,7 +7,9 @@ only — metrics-lane attributes and logs-lane event bodies are documented in th
 Metrics and Log events tables.
 
 Source paths refer to this plugin repository; upstream paths and checked revisions are listed in
-[source audit](source-audit.md).
+[source audit](source-audit.md). The GenAI semconv source of truth is
+<https://github.com/open-telemetry/semantic-conventions-genai> (prose under `docs/gen-ai/`,
+YAML model under `model/`) — the former opentelemetry.io gen-ai pages are tombstoned.
 
 ## 1. Inbound sources
 
