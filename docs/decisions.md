@@ -71,3 +71,17 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   and keeps its 3-attempt retry — that 404 race self-heals by design. Also fixes a
   latent logger bug the new log-file test assertions surfaced: a queued append failing
   against a file whose sink was already replaced no longer degrades the active sink.
+- 2026-11-10: Bug 33 fixed (user approved after risk review) — an `endedTools` guard at
+  the tool-start re-creation entry drops a redelivered `session.tool.input.started` for a
+  callId whose terminal already emitted, logging one drop line. Contract basis: verified
+  bus semantics — a redelivery is the same event resent, never a new execution —
+  extending the assumption `endedTools` already enforces terminal-side (Bug 16) to the
+  start side. Eliminates the phantom `interrupted: plugin_unload` span under the wrong
+  round's trace and that turn's `opencode.turn.messages` inflation at unload; blast
+  radius: a host reusing a callId for a genuinely new execution loses that start cleanly
+  (wrong data → no data). The replay-only stamping variant (`stampInFlightTools` stamping
+  unstamped old-round tools by session) stays recorded-only per live-capture-first.
+  endedTools cap review: registry is UNBOUNDED (one string per tool call, per session
+  lifecycle; session.deleted is the only purge, session-registry eviction does not
+  remove a victim's set) — growth trait documented at the declaration, cap left for
+  separate adjudication.

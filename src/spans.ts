@@ -323,7 +323,15 @@ export function createSpanBuilder(
    * The endedSteps twin (Bug 16): a redelivered tool.success/failed would emit a
    * degraded second span (same deterministic id, name "unknown", zero duration) plus a
    * non-dedupable log record (log record ids are SDK-generated). Nested by sessionID
-   * so session.deleted can purge it.
+   * so session.deleted can purge it. Also read at the tool-start re-creation entry
+   * (Bug 33).
+   *
+   * Growth trait (Bug 33 review, 2026-11-10): UNBOUNDED and uncapped by decision —
+   * one string per tool call, scoped per session (sessionID → Set), grown over the
+   * session's full lifetime. session.deleted is the only purge; the session-registry
+   * cap's eviction path does NOT remove a victim's set, so an evicted-but-undeleted
+   * session's entry lingers. A cap is flagged for separate adjudication (no behavior
+   * change in the Bug 33 fix).
    */
   const endedTools = new Map<string, Set<string>>()
   /** Transient tool state: toolCallId → ToolState */
@@ -810,6 +818,25 @@ export function createSpanBuilder(
       case "session.tool.input.started": {
         const callId = typeof data.id === "string" ? data.id : ""
         if (!callId) return
+        // Duplicate-delivery guard (Bug 33), the start-side twin of the terminal-side
+        // endedTools idempotency (Bug 16). Contract basis — verified bus semantics: a
+        // redelivery is the same event resent, never a new execution; a callId whose
+        // terminal already emitted can never legitimately start again. Pre-fix, the
+        // re-creation here resurrected a zombie ToolState stamped with the CURRENT
+        // round's live traceId (the prior-traceId preserve only covers entries that
+        // still exist); Bug 32 retention kept it across round close, and unload
+        // flushAll emitted it as a phantom `interrupted: plugin_unload` span under the
+        // wrong round's trace, inflating that turn's opencode.turn.messages — while the
+        // redelivery's own terminal was already dropped by Bug 16. Blast radius: if a
+        // host ever DID reuse a callId for a genuinely new execution, that start is now
+        // cleanly absent; before the guard it produced a phantom span whose terminal
+        // was already dropped (wrong data → no data). The replay-only stamping variant
+        // (stampInFlightTools stamping unstamped old-round tools by session) stays
+        // recorded-only per live-capture-first.
+        if (endedTools.get(sid)?.has(callId)) {
+          log("tool start dropped (terminal already emitted; duplicate delivery)", { sessionID: sid, callId })
+          return
+        }
         if (!tools.has(callId) && tools.size >= MAX_IN_FLIGHT_TOOLS) evictOldestTool()
         // A redelivered input.started must not re-bind the tool to a NEWER round: keep
         // the original stamp (undefined only when creation raced ahead of the turn)

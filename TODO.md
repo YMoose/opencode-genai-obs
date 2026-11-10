@@ -22,24 +22,12 @@ follow-ups; the documentation correction does not change emitted data or frozen 
   current backend compatibility.
 
 
-## Candidate Bug 33 (deferred, record-only 2026-11-03)
+## Bug 33 (resolved 2026-11-10)
 
-Candidate Bug 33 (deferred, record-only per user decision 2026-11-03): a redelivered
-`session.tool.input.started` / `session.tool.called` for a callId whose terminal already
-emitted re-creates the ToolState (`src/spans.ts:764-803` — no `endedTools` check at
-re-creation; `:770` `prior` only preserves an entry that still exists) stamped with the
-CURRENT round's live traceId (`:776`). The redelivery's own terminal is correctly ignored
-(`:811-814`), but since Bug 32 retention keeps tool state across round closes, the zombie
-ToolState survives and at unload emits a phantom `interrupted: plugin_unload` span under
-the WRONG round's trace and inflates that turn's `opencode.turn.messages`
-(`src/spans.ts:1233-1250`). Precondition: at-least-once redelivery of a tool start after
-its terminal (the Bug 13/16/17 class; not observed live). Fix when undertaken: an
-`endedTools` guard at re-creation entry. Replay-only variant: `stampInFlightTools` stamps
-by session (`src/spans.ts:426-430`), so an unstamped old-round tool can inherit the next
-round's trace.
-
-Adjudication context for the Bug 32 retention that keeps the zombie state alive lives in
-[docs/governance.md](docs/governance.md); dated decisions in [docs/decisions.md](docs/decisions.md).
+Fixed by the `endedTools` guard at the tool-start re-creation entry — commit "fix:
+guard tool-start re-creation against endedTools to prevent phantom spans at unload
+(Bug 33)"; adjudication in [docs/decisions.md](docs/decisions.md) (2026-11-10 entry);
+the replay-only stamping variant stays recorded-only.
 
 ## Offline session replay lane (promised, not yet implemented)
 
@@ -265,3 +253,12 @@ expected value vs implementation cost.
 - GenAI semconv (now at <https://github.com/open-telemetry/semantic-conventions-genai>)
   suggests INTERNAL span kind for in-process `gen_ai.invoke_agent.internal` spans; our
   turn root uses CLIENT — watch only, no action.
+- Upstream PR [anomalyco/opencode#61414](https://github.com/anomalyco/opencode/pull/61414)
+  (fork branch `subagent-interrupt-reason`, "preserve parent interruption reason in
+  subagents"): open since 2026-11-03, CI green, bot review positive, no maintainer
+  activity. Upstream has since refactored run-coordinator (internal
+  `execution.interruptionReason` + new `settled` callback) without the PR's interface
+  method → rebase + adaptation required if pushed. Repo moved sst/opencode →
+  anomalyco/opencode (old URLs redirect). When merged and shipped, the host emits real
+  subagent interrupt reasons, completing `opencode.interrupt.reason` data (Bug 30).
+  User decision 2026-11-10: wait. Sibling open PRs #58556 / #58433 are equally idle.

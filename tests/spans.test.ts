@@ -1215,6 +1215,80 @@ test("Bug 32: unload flushAll emits in-flight tools as interrupted: plugin_unloa
   )
 })
 
+// ------------------------------------- Bug 33 (redelivered tool start after its terminal)
+
+test("Bug 33: a redelivered tool start for an ended callId must not emit a phantom span at unload or inflate the wrong turn's messages", async () => {
+  // At-least-once redelivery of a tool START after its terminal (the same event,
+  // resent): pre-fix, the input.started handler re-created ToolState stamped with the
+  // CURRENT round's live traceId; Bug 32 retention kept it across round close, and
+  // unload flushAll emitted it as a phantom `interrupted: plugin_unload` span under
+  // the WRONG round's trace while inflating that turn's opencode.turn.messages.
+  const { spans, builder } = makeHarness()
+  // Round 1: full tool lifecycle; the round closes flushed
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", id: "t1", assistantMessageID: "a1", name: "read" }))
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { path: "src/" } }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+  builder.handleEvent(
+    event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s1" }))
+  await settle()
+
+  // Round 2 opens; t1's start is redelivered (duplicate delivery after the terminal)
+  builder.handlePrompt("s1", "m2", "again")
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 2_150, { sessionID: "s1", id: "t1", assistantMessageID: "a1", name: "read" }))
+  // unload mid-round-2 (flushAll teardown)
+  await builder.flushAll()
+
+  const toolSpans = spans.filter((s) => s.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.strictEqual(toolSpans.length, 1, "exactly the Round 1 terminal emission — no phantom second span from unload flushAll (pre-fix: 2)")
+  assert.strictEqual(
+    toolSpans[0].attributes.find(([key]) => key === "opencode.observation.end_source")?.[1],
+    "host_event",
+    "the surviving span is the real terminal emission, not a plugin_flush teardown span",
+  )
+  assert.strictEqual(toolSpans[0].traceId, hash("opencode-turn:s1:m1", 16), "the surviving span stays on Round 1's trace")
+  const root = spans.find((s) => s.spanId === hash("opencode-turn-span:s1:m2", 8))
+  assert.ok(root, "Round 2's turn root still flushes at unload")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1],
+    0,
+    "Round 2 counts no messages — the zombie must not inflate it (pre-fix: 1)",
+  )
+})
+
+test("Bug 33 regression pin: a duplicate tool start WHILE in-flight keeps the preserve-existing path (one state, one span, no error)", async () => {
+  // Pins the sibling path the Bug 33 guard must not disturb: state exists, terminal
+  // not yet seen — a redelivered input.started re-writes the entry preserving its
+  // stamped traceId. Green before AND after the fix.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  const start = event("session.tool.input.started", 1_150, { sessionID: "s1", id: "t1", assistantMessageID: "a1", name: "read" })
+  builder.handleEvent(start)
+  builder.handleEvent(start) // duplicate delivery while the tool is in flight
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s1", assistantMessageID: "a1", id: "t1", input: { path: "src/" } }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+  builder.handleEvent(
+    event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s1" }))
+  await settle()
+
+  const toolSpans = spans.filter((s) => s.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.strictEqual(toolSpans.length, 1, "one callId, one tool span")
+  assert.strictEqual(toolSpans[0].name, "execute_tool read", "the recorded name survives the duplicate start")
+  assert.strictEqual(toolSpans[0].traceId, hash("opencode-turn:s1:m1", 16), "stays under its own round's trace")
+  const root = spans.find((s) => s.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the turn root must flush")
+  assert.equal(root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1], 2, "chat + one tool — no double count")
+})
+
 // ------------------------------------------------- Bug 34 (teardown must not fake a host interrupt reason)
 
 test("Bug 34: unload teardown reports interrupted status but never sets opencode.interrupt.reason", async () => {
