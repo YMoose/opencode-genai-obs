@@ -323,15 +323,17 @@ export function createSpanBuilder(
    * The endedSteps twin (Bug 16): a redelivered tool.success/failed would emit a
    * degraded second span (same deterministic id, name "unknown", zero duration) plus a
    * non-dedupable log record (log record ids are SDK-generated). Nested by sessionID
-   * so session.deleted can purge it. Also read at the tool-start re-creation entry
-   * (Bug 33).
+   * so session.deleted can purge it. Also read at the tool-start re-creation entries
+   * (Bug 33 and its tool.called follow-up).
    *
-   * Growth trait (Bug 33 review, 2026-11-10): UNBOUNDED and uncapped by decision —
-   * one string per tool call, scoped per session (sessionID → Set), grown over the
-   * session's full lifetime. session.deleted is the only purge; the session-registry
-   * cap's eviction path does NOT remove a victim's set, so an evicted-but-undeleted
-   * session's entry lingers. A cap is flagged for separate adjudication (no behavior
-   * change in the Bug 33 fix).
+   * Growth trait (Bug 33 review, 2026-11-10; revised by Bug 40, 2026-11-10): bounded
+   * by the session lifecycle — one string per tool call, scoped per sessionID. Two
+   * purge paths: session.deleted, and (Bug 40, user decision 2026-11-10 "驱逐时清")
+   * registry-cap eviction — eviction is forgetting the session, consistent with the
+   * re-registration degradation an evicted session already suffers. A numeric
+   * per-session/per-set cap was considered and declined by user decision 2026-11-10;
+   * sessions that stay registered (never deleted, never evicted) still grow their
+   * sets monotonically by design (the set IS the session's terminal history).
    */
   const endedTools = new Map<string, Set<string>>()
   /** Transient tool state: toolCallId → ToolState */
@@ -381,6 +383,11 @@ export function createSpanBuilder(
     const victim = pickVictim(true, true) ?? pickVictim(true, false) ?? pickVictim(false, false)
     if (victim !== undefined) {
       sessions.delete(victim)
+      // The victim's endedTools set must not outlive its registry entry (Bug 40):
+      // eviction is forgetting the session — purge here too, else an evicted-but-
+      // undeleted session's set lingers forever (user decision 2026-11-10 "驱逐时清";
+      // a numeric per-set cap was considered and declined the same day)
+      endedTools.delete(victim)
       // Retained tool state (Bug 32) must not outlive its session's registry entry:
       // the victim's tools die here too, else they linger until MAX_IN_FLIGHT_TOOLS
       for (const [id, tool] of tools) if (tool.sessionID === victim) tools.delete(id)

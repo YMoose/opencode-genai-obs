@@ -85,3 +85,21 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   lifecycle; session.deleted is the only purge, session-registry eviction does not
   remove a victim's set) — growth trait documented at the declaration, cap left for
   separate adjudication.
+- 2026-11-10: Bug 33 follow-up fixed — the `session.tool.called` re-creation entry gets
+  the same `endedTools` guard as the started entry (Bug 33): a redelivered `tool.called`
+  for a callId whose terminal already emitted is dropped with one log line. Same
+  contract basis as Bug 33 (a redelivery is the same event resent, never a new
+  execution, extending the Bug 16 terminal-side idempotency to the called side);
+  without the guard the branch re-created zombie ToolState under the current round's
+  live traceId, emitted as a phantom `interrupted: plugin_unload` span at unload
+  flushAll while the redelivery's own terminal was already dropped by Bug 16.
+- 2026-11-10: Bug 40 fixed (user decision "驱逐时清") — registry-cap eviction now purges
+  the victim's `endedTools` set: eviction is forgetting the session, consistent with
+  the re-registration degradation an evicted session already suffers; without the
+  purge, an evicted-but-undeleted session's set lingered forever. A numeric
+  per-session/per-set cap was considered and DECLINED by user decision (2026-11-10) —
+  a registered session's set is its terminal history and grows by design. Growth-trait
+  comment at the declaration updated accordingly. Same-trait recon (report-only):
+  `endedSteps` (spans.ts) and `postSpanAnnotated` (index.ts) still linger past
+  eviction; `pendingWakes` lingers only for an unconsumed wake; `postSpanTimers`
+  self-heals when the timer fires — left for later adjudication.

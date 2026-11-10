@@ -1540,3 +1540,97 @@ test("Bug 34: a real host interrupt still lands opencode.interrupt.reason on the
     "the host enum value keeps flowing through the attribute (host path intact)",
   )
 })
+
+// ------------------------------------------------ Bug 40 (endedTools lingers past registry-cap eviction)
+
+test("Bug 40: evicting a session from the registry cap purges its endedTools set", async () => {
+  // endedTools is closure-private (not reachable via the harness, even by bracket
+  // access), and its only observable read sites are the idempotency guards (Bug 16
+  // terminal, Bug 33/33-follow-up starts). Observable proxy: after s0 is evicted,
+  // re-open its round (an evicted root degrades to a fresh root — the documented
+  // re-registration degradation) and redeliver the ended callId's terminal. A live
+  // trace source is required for emission (emitToolSpan bails without one), so the
+  // re-opened round makes the two states visible: a lingering set drops the
+  // redelivery silently; a purged set lets it emit degraded (name "unknown" — the
+  // tool state died with the terminal), landing on the live round's trace.
+  const { spans, builder } = makeHarness()
+  // s0 completes a tool call: endedTools[s0] = {t1}
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s0" }))
+  builder.handlePrompt("s0", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s0", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s0", assistantMessageID: "a1", id: "t1", name: "read" }))
+  builder.handleEvent(event("session.tool.called", 1_160, { sessionID: "s0", assistantMessageID: "a1", id: "t1", input: { path: "src/" } }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s0", assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+  builder.handleEvent(
+    event("session.step.ended", 1_300, { sessionID: "s0", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s0" }))
+  await settle()
+
+  // 2048 root registrations trip MAX_SESSIONS (2048); tier 1 (idle root, oldest-first)
+  // evicts s0 — exactly one eviction (Bug 29 idiom)
+  for (let i = 0; i < 2048; i++) {
+    builder.handleEvent(event("session.created", 2_000 + i, { sessionID: `s_${i}`, agent: "build" }))
+  }
+
+  // s0 re-opens a round (post-eviction: a degraded but live root), then the ended
+  // callId's terminal is redelivered under it
+  builder.handlePrompt("s0", "m2", "again")
+  builder.handleEvent(event("session.step.started", 6_000, { sessionID: "s0", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.success", 6_100, { sessionID: "s0", assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+
+  const toolSpans = spans.filter((s) => s.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.strictEqual(
+    toolSpans.length,
+    2,
+    "the evicted session's endedTools was purged — the redelivered terminal re-emits degraded instead of being dropped by a lingering set (pre-fix: 1)",
+  )
+  assert.strictEqual(toolSpans[0].traceId, hash("opencode-turn:s0:m1", 16), "the original Round 1 emission is untouched")
+  assert.strictEqual(toolSpans[1].name, "execute_tool unknown", "the re-emission is degraded — the session (and its tool state) was forgotten with eviction")
+  assert.strictEqual(toolSpans[1].traceId, hash("opencode-turn:s0:m2", 16), "the forgotten session's redelivered terminal lands on the live round (re-registration degradation)")
+})
+
+test("Bug 40 regression pin: a non-evicted session's endedTools set survives the eviction of another session", async () => {
+  // Pins the scope of the Bug 40 purge: only the victim's set goes. s0 is registered
+  // first and s_keep second; 2047 storm registrations trip the cap exactly once, so
+  // tier-1 (idle root, oldest-first) evicts s0 while s_keep stays registered. A
+  // redelivered terminal for s_keep's ended callId (under its own re-opened round,
+  // so a purge WOULD be visible as a degraded emission) must still be dropped.
+  const { spans, builder } = makeHarness()
+  const runToolRound = async (sid: string) => {
+    builder.handlePrompt(sid, "m1", "hello")
+    builder.handleEvent(event("session.step.started", 1_100, { sessionID: sid, assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+    builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: sid, assistantMessageID: "a1", id: "t1", name: "read" }))
+    builder.handleEvent(event("session.tool.called", 1_160, { sessionID: sid, assistantMessageID: "a1", id: "t1", input: { path: "src/" } }))
+    builder.handleEvent(event("session.tool.success", 1_200, { sessionID: sid, assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+    builder.handleEvent(
+      event("session.step.ended", 1_300, { sessionID: sid, assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }),
+    )
+    builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: sid }))
+    await settle()
+  }
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s0" }))
+  await runToolRound("s0")
+  builder.handleEvent(event("session.created", 1_500, { sessionID: "s_keep" }))
+  await runToolRound("s_keep")
+  // 2047 more registrations: 2 + 2047 = 2049 trips the cap exactly once → only s0 evicted
+  for (let i = 0; i < 2047; i++) {
+    builder.handleEvent(event("session.created", 2_000 + i, { sessionID: `s_${i}`, agent: "build" }))
+  }
+
+  // s_keep re-opens a round; its ended callId's terminal is redelivered under it
+  builder.handlePrompt("s_keep", "m2", "again")
+  builder.handleEvent(event("session.step.started", 6_000, { sessionID: "s_keep", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.success", 6_100, { sessionID: "s_keep", assistantMessageID: "a1", id: "t1", content: [{ type: "text", text: "ok" }] }))
+
+  const toolSpans = spans.filter((s) => s.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.strictEqual(
+    toolSpans.length,
+    2,
+    "one emission per session (s0 and s_keep each ran t1) — s_keep's surviving set drops its redelivery (a wrongful purge would emit a third, degraded)",
+  )
+  assert.ok(
+    !toolSpans.some((s) => s.name === "execute_tool unknown"),
+    "no degraded re-emission for the surviving session — its endedTools entry was not purged",
+  )
+})
