@@ -171,7 +171,10 @@ Legacy JSONL records have no `captureID` and cannot be uniquely joined across re
 Chat duration follows `session.step.started` → `session.step.ended/failed`. Upstream step
 settlement includes tool settlement and snapshot work; `session.step.streamed` marks the
 provider response-body boundary separately but is not consumed here. Reported chat duration
-is therefore a step interval, not pure model-request latency.
+is therefore a step interval, not pure model-request latency. Record-only decision
+(2026-11-10): this wall-clock interval is kept as-is, and
+`gen_ai.client.operation.duration{operation=chat}` shares it — read both as step wall-clock
+including post-response settlement, not as pure model-request latency.
 
 ### 3.3 Tool call (`execute_tool <name>`) — `src/spans.ts`
 

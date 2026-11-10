@@ -20,8 +20,16 @@ follow-ups; the documentation correction does not change emitted data or frozen 
   model id was copied into it, implying a provider confirmation that was never observed
   (fake confirmation is worse than absence). `gen_ai.request.model` keeps the true
   requested identity; reintroduction only via the wire-derived backlog item below.
-- Chat duration includes step settlement. Evaluate `session.step.streamed` and request-start
-  timing before presenting this as model-request latency.
+- Chat duration includes step settlement — record-only (user decision 2026-11-10): the
+  current step wall-clock measurement (`session.step.started` → `step.ended/failed`) is
+  kept. Knowledge for any future reconsideration: (a) chat span duration and
+  `gen_ai.client.operation.duration{operation=chat}` include post-response settlement
+  time — upstream `session.step.ended` fires after tool settlement/snapshot work;
+  (b) the true provider-boundary marker `session.step.streamed` is already delivered by
+  the pump filter (`src/index.ts` `session.*` filter) but has no case in `src/spans.ts`;
+  (c) UNVERIFIED: whether `streamed` fires on all response paths (non-streaming/failure)
+  — any future fix needs that verified plus a fallback; (d) TTFT is derivable from
+  upstream stream-delta events if ever needed (not pursued).
 - Truncating JSON-valued attributes can break their JSON/schema validity. Define an explicit
   representation for oversized structured content before changing the truncation path.
 - Legacy message-event names are deprecated; plan any migration separately from retaining

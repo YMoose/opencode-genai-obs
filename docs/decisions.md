@@ -147,3 +147,7 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   response `model` field) is recorded in TODO.md as a conditional backlog item
   (trigger: alias-vs-served-model comparison needed; provider-specific parsing and
   timing coupling noted there).
+- 2026-11-10: semconv gap #4 adjudicated record-only — chat duration keeps the current
+  step wall-clock measurement (settlement included); the `session.step.streamed`
+  provider-boundary marker stays unconsumed; TTFT declined. Facts and future-fix
+  prerequisites preserved in TODO.md (semconv gaps list).
