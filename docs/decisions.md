@@ -59,3 +59,15 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   agent name to agent-operation spans; see docs/semconv-mapping.md). `"{agent}"` restores
   the old value; the ungated raw mirror `opencode.agent` is always present; `""` omits
   only `gen_ai.agent.name`.
+- 2026-11-10: Bug 39 (user decision A+B) — annotation-backfill noise: (A) the startup
+  backfill annotates only sessions the plugin knows have exported ≥1 span, tracked in a
+  new plugin-owned state file `~/.local/share/opencode/ocg-obs-exported-sessions.json`
+  (`OCG_OBS_EXPORTED_SESSIONS` overrides the path; `{"exported":[…]}`, FIFO cap 8192,
+  atomic tmp+rename write, missing/corrupt ⇒ empty — bootstrap: the first post-upgrade
+  backfill annotates ~nothing, old Phoenix rows already carry their labels); the mark
+  hooks the shared span-emit callback in index.ts, which every span kind funnels
+  through. (B) the backfill annotates with zero retries (single attempt). Live
+  event-driven annotation (created/renamed immediate, post-terminal +3 s) is unchanged
+  and keeps its 3-attempt retry — that 404 race self-heals by design. Also fixes a
+  latent logger bug the new log-file test assertions surfaced: a queued append failing
+  against a file whose sink was already replaced no longer degrades the active sink.

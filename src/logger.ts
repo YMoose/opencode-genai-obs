@@ -91,9 +91,15 @@ export function log(message: string, data?: unknown): void {
         try {
           await appendFile(filePath, entry)
         } catch {
-          sink = { kind: "stderr" }
-          safeStderr("[ocg-obs] file append failed, falling back to stderr")
-          safeStderr(entry.trimEnd())
+          // The queued append may target a file whose sink was replaced after the
+          // entry was logged (a reload switches dirs): only degrade the sink when it
+          // still owns the failed file — a stale failure must not kill the active
+          // sink (Bug 39; found by the backfill tests asserting on log files).
+          if (sink.kind === "file" && sink.filePath === filePath) {
+            sink = { kind: "stderr" }
+            safeStderr("[ocg-obs] file append failed, falling back to stderr")
+            safeStderr(entry.trimEnd())
+          }
         }
       })
       .catch(() => undefined)

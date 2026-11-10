@@ -17,7 +17,8 @@
  * then give up silently; the offline sync.py is the backstop. Because a session's first
  * span only lands after its first turn, the plugin additionally re-annotates once shortly
  * after the first terminal execution event (index.ts), and backfills sessions that existed
- * before it loaded.
+ * before it loaded. The backfill passes maxRetries=0: a session absent from Phoenix at
+ * backfill time has no row to race into existence, so retries are pure noise (Bug 39).
  */
 
 export interface SessionAnnotationFields {
@@ -37,8 +38,12 @@ interface AnnotationEntry {
 const MAX_RETRIES = 3
 
 export interface Annotator {
-  /** Fire-and-forget safe: all errors are caught internally — logs, never throws */
-  readonly annotate: (sessionID: string, fields: SessionAnnotationFields) => Promise<void>
+  /**
+   * Fire-and-forget safe: all errors are caught internally — logs, never throws.
+   * maxRetries bounds total POST attempts (named after the retry policy it replaces);
+   * it clamps to ≥1, so 0 means a single attempt. Default 3 (the legacy MAX_RETRIES).
+   */
+  readonly annotate: (sessionID: string, fields: SessionAnnotationFields, maxRetries?: number) => Promise<void>
 }
 
 export function createAnnotator(
@@ -60,7 +65,8 @@ export function createAnnotator(
   }
 
   return {
-    async annotate(sessionID, fields) {
+    async annotate(sessionID, fields, maxRetries = MAX_RETRIES) {
+      const attempts = Math.max(1, maxRetries)
       const title = fields.title?.trim()
       const data: AnnotationEntry[] = []
       if (fields.projectLabel) {
@@ -72,7 +78,7 @@ export function createAnnotator(
       if (data.length === 0) return
 
       const body = JSON.stringify({ data })
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
           const response = await fetch(url, {
             method: "POST",
@@ -87,7 +93,7 @@ export function createAnnotator(
           log("session annotated", { sessionID, names: data.map((entry) => entry.name).join(",") })
           return
         } catch (error) {
-          const exhausted = attempt === MAX_RETRIES
+          const exhausted = attempt === attempts
           log(exhausted ? "session annotations gave up (offline sync.py will fill)" : "session annotations attempt failed", {
             sessionID,
             attempt,

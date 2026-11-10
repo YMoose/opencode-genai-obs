@@ -27,6 +27,8 @@ import { createWireRecorder } from "./wire.js"
 import { createSender } from "./sender.js"
 import { createSpanBuilder } from "./spans.js"
 import { createAnnotator } from "./annotations.js"
+import { createExportedSessionsStore } from "./exported-sessions.js"
+import type { SpanRecord } from "./otlp.js"
 import { createMetrics } from "./metrics.js"
 import { createLogs } from "./logs.js"
 import { collectProbeTargets, probeEndpoint } from "./probe.js"
@@ -138,6 +140,8 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   const annotator = config.tracing.annotations.enabled
     ? createAnnotator({ endpoint: config.tracing.endpoint, headers: config.tracing.headers }, log)
     : undefined
+  // Sessions that have handed ≥1 span to the OTLP pipeline (Bug 39): the backfill gate
+  const exportedSessions = createExportedSessionsStore(log)
   const propagationProviders = new Set(config.tracing.propagation.providers)
 
   const metrics = config.metrics.enabled
@@ -158,6 +162,20 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
         intervalMs: config.logs.intervalMs,
       })
     : undefined
+
+  /**
+   * The choke point every span kind funnels through: all five emitters in spans.ts
+   * (turn root / chat / tool / compaction / sub-agent container) call the shared emit
+   * callback with gen_ai.conversation.id set. The first span per session marks the
+   * session exported (Bug 39) — Phoenix creates its ProjectSession row lazily on the
+   * first ingested span, so the annotation backfill may only target known-exported
+   * sessions. Live annotation paths ignore the mark (their 404 race self-heals).
+   */
+  const emitSpan = (span: SpanRecord): void => {
+    const sid = span.attributes.find(([key]) => key === "gen_ai.conversation.id")?.[1]
+    if (typeof sid === "string") exportedSessions.mark(sid)
+    sender.push(span)
+  }
 
   const spanBuilder = createSpanBuilder(
     {
@@ -182,7 +200,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       observe: metrics?.observe,
       emitLogEvent: logs?.emit,
     },
-    (span) => sender.push(span),
+    emitSpan,
     log,
   )
 
@@ -319,27 +337,44 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   }
 
   // Sessions created before this process loaded (e.g. opencode restarted mid-session) never
-  // emit session.created here; the upsert semantics make rewriting them harmless
+  // emit session.created here; the upsert semantics make rewriting them harmless.
+  // Bug 39 (user decision A+B, 2026-11-10): annotate only sessions that have exported ≥1
+  // span and do not retry — Phoenix rows are created lazily on first span ingestion, so
+  // annotating a span-less session 404s forever (31 probe-only sub-agent sessions × 3
+  // retries × every plugin load were pure noise). The set starts empty on first run (the
+  // state file is new), so the first post-upgrade backfill annotates ~nothing; sessions
+  // that run a round after the upgrade are marked by their first span. Live event-driven
+  // annotation is NOT gated and keeps its retries — that race self-heals by design.
   if (annotator) {
     void (async () => {
+      const exported = exportedSessions.load()
       let cursor: string | undefined
       let attempted = 0
+      let skippedNoExport = 0
       try {
         while (!stopped) {
           const page = await ctx.session.list(cursor ? { cursor } : undefined)
           for (const session of page.data) {
             if (stopped) break
-            await annotator.annotate(session.id, {
-              title: session.title,
-              projectLabel: projectLabel(session.location?.directory),
-            })
+            if (!exported.has(session.id)) {
+              skippedNoExport += 1
+              continue
+            }
+            await annotator.annotate(
+              session.id,
+              {
+                title: session.title,
+                projectLabel: projectLabel(session.location?.directory),
+              },
+              0,
+            )
             attempted += 1
           }
           const nextCursor = page.cursor?.next ?? undefined
           if (!nextCursor || nextCursor === cursor) break
           cursor = nextCursor
         }
-        log("annotation backfill done", { attempted })
+        log("annotation backfill done", { attempted, skippedNoExport })
       } catch (error) {
         log("annotation backfill failed", { attempted, error: String(error) })
       }

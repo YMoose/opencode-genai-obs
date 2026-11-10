@@ -7,11 +7,13 @@
  * - Bug 10: sub-agent sessions (parentID set) are annotated too
  * - Bug 11: the first terminal execution event re-annotates after the spans flush
  * - Bug 12: startup backfill annotates sessions created before the plugin loaded
+ * - Bug 39: backfill is gated to span-exported sessions (A) and never retries (B);
+ *          live session.created annotation keeps its 3-attempt retry
  * - De-platforming: annotations.enabled=false sends no backend-specific /v1/session_annotations
  */
 import test from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { createServer as createNetServer, type AddressInfo } from "node:net"
 import plugin from "../src/index.js"
@@ -37,6 +39,15 @@ const annotationRequests = (server: TestServer) =>
 /** Annotation payload entries of one request (label entries only, no transport fields) */
 const annotationEntries = (body: string): Array<{ session_id: string; name: string; result: { label: string } }> =>
   JSON.parse(body).data
+
+/** Concatenate every log file the test logger wrote under <dir>/logs */
+const logText = (dir: string): string => {
+  let out = ""
+  for (const name of readdirSync(join(dir, "logs"))) {
+    if (name.endsWith(".log")) out += readFileSync(join(dir, "logs", name), "utf-8")
+  }
+  return out
+}
 
 test("Bug 1: wire-only (tracing.enabled=false) sends no outbound request while wire JSONL still lands on disk", async (t) => {
   const snapshot = snapshotEnv()
@@ -107,6 +118,8 @@ test("de-platforming: annotations.enabled=false uses only standard /v1/traces an
   )
   process.env.OCG_OBS_CONFIG = configPath
   process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  // Spans are emitted here: keep the Bug 39 exported-sessions state file inside the fixture
+  process.env.OCG_OBS_EXPORTED_SESSIONS = join(dir, "exported-sessions.json")
 
   const listCalls: Array<MockListInput | undefined> = []
   const mock = makeCtx({
@@ -152,6 +165,8 @@ test("Bug 5: after the owner unloads, a surviving instance's hook triggers re-el
   )
   process.env.OCG_OBS_CONFIG = configPath
   process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  // Spans are emitted here: keep the Bug 39 exported-sessions state file inside the fixture
+  process.env.OCG_OBS_EXPORTED_SESSIONS = join(dir, "exported-sessions.json")
 
   const a: MockCtx = makeCtx()
   const b: MockCtx = makeCtx()
@@ -334,6 +349,11 @@ test("Bug 12: startup backfill annotates every existing session across list page
   )
   process.env.OCG_OBS_CONFIG = configPath
   process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  // Bug 39 (A): the backfill gate skips sessions absent from the exported-sessions
+  // state file — seed all three so this test keeps exercising the paging path
+  const statePath = join(dir, "exported-sessions.json")
+  writeFileSync(statePath, JSON.stringify({ exported: ["s1", "s2", "s3"] }), "utf-8")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = statePath
 
   const listCalls: Array<MockListInput | undefined> = []
   const mock = makeCtx({
@@ -401,6 +421,8 @@ test("trace propagation: model.request injects traceparent only for whitelisted 
   )
   process.env.OCG_OBS_CONFIG = configPath
   process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  // step.started opens a turn that the unload flush emits: keep the state file in the fixture
+  process.env.OCG_OBS_EXPORTED_SESSIONS = join(dir, "exported-sessions.json")
 
   const mock = makeCtx()
   const unload = await setup(mock.ctx)
@@ -584,4 +606,175 @@ test("wire-only mode never runs the startup probe; tracing mode probes once per 
   await waitFor(() => connections >= 1)
   await new Promise((resolve) => setTimeout(resolve, 100))
   assert.strictEqual(connections, 1, "one connect per distinct endpoint, traces+metrics deduped")
+})
+
+test("Bug 39 (B): a 404-ing backfill session is attempted exactly once, never retried", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-bfonce-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  // Phoenix: the session row never appears — every annotation POST 404s forever
+  const server = await startServer((_req, res) => {
+    res.statusCode = 404
+    res.end("no session row")
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  const statePath = join(dir, "exported-sessions.json")
+  writeFileSync(statePath, JSON.stringify({ exported: ["s1"] }), "utf-8")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = statePath
+
+  const mock = makeCtx({
+    sessionList: async () => ({ data: [{ id: "s1", title: "one" }], cursor: {} }),
+  })
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  await waitFor(() => annotationRequests(server).length >= 1, 5_000)
+  // The live-path backoff is 2s x attempt: waiting past the first backoff proves no
+  // second backfill attempt is scheduled (pre-fix the 2nd POST lands at ~2s)
+  await new Promise((resolve) => setTimeout(resolve, 3_200))
+  assert.strictEqual(annotationRequests(server).length, 1, "backfill must give up after a single attempt (no retries)")
+})
+
+test("Bug 39 (A): backfill annotates only span-exported sessions and reports the skipped count", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-bfgate-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  // Only s1 has ever exported a span; s2 is a span-less session (no Phoenix row)
+  const statePath = join(dir, "exported-sessions.json")
+  writeFileSync(statePath, JSON.stringify({ exported: ["s1"] }), "utf-8")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = statePath
+
+  const mock = makeCtx({
+    sessionList: async () => ({
+      data: [
+        { id: "s1", title: "one", location: { directory: "/w/a" } },
+        { id: "s2", title: "two", location: { directory: "/w/b" } },
+      ],
+      cursor: {},
+    }),
+  })
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  await waitFor(() => logText(dir).includes("annotation backfill done"), 5_000)
+  const annotated = annotationRequests(server).map((request) => annotationEntries(request.body)[0]!.session_id)
+  assert.deepStrictEqual(annotated, ["s1"], "only the span-exported session is annotated")
+  assert.ok(
+    logText(dir).includes('annotation backfill done {"attempted":1,"skippedNoExport":1}'),
+    "the summary line must report both attempted and skippedNoExport counts",
+  )
+})
+
+test("Bug 39 (A): the first span emission persists the session in the exported-sessions state file", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-bfmark-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  const statePath = join(dir, "exported-sessions.json")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = statePath
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  const feed = mock.feeds[0]!
+  const now = Date.now()
+  feed.push({ type: "session.created", created: now, data: { sessionID: "s1" } })
+  feed.push({ type: "session.step.started", created: now + 1, data: { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } } })
+  feed.push({ type: "session.step.ended", created: now + 2, data: { sessionID: "s1", assistantMessageID: "a1" } })
+  feed.push({ type: "session.execution.succeeded", created: now + 3, data: { sessionID: "s1" } })
+
+  await waitFor(() => {
+    if (!existsSync(statePath)) return false
+    try {
+      return (JSON.parse(readFileSync(statePath, "utf-8")).exported as string[]).includes("s1")
+    } catch {
+      return false
+    }
+  }, 5_000)
+})
+
+test("Bug 39 guard: a live session.created annotation keeps its 3-attempt retry on 404", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-bflive-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 404
+    res.end("not yet")
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = join(dir, "exported-sessions.json")
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  mock.feeds[0]!.push({ type: "session.created", created: Date.now(), data: { sessionID: "live1", title: "t" } })
+
+  // Attempts land at ~0s / 2s / 4s (backoff = 2s x attempt): the live race self-heals by retry
+  await waitFor(() => annotationRequests(server).length >= 3, 9_000)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  assert.strictEqual(annotationRequests(server).length, 3, "the live path must keep exactly the 3-attempt retry policy")
+})
+
+test("Bug 39 guard: a corrupt exported-sessions file degrades to an empty set without breaking the backfill", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-bfcorrupt-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  const statePath = join(dir, "exported-sessions.json")
+  writeFileSync(statePath, "{not json", "utf-8")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = statePath
+
+  const mock = makeCtx({
+    sessionList: async () => ({ data: [{ id: "s1", title: "one" }], cursor: {} }),
+  })
+  const unload = await setup(mock.ctx) // must not reject on the corrupt state file
+  t.after(() => unload?.())
+
+  await waitFor(() => logText(dir).includes("annotation backfill done"), 5_000)
+  assert.ok(!logText(dir).includes("annotation backfill failed"), "a corrupt state file must not fail the backfill")
 })

@@ -102,3 +102,37 @@ test("falls back to stderr when the log directory is unwritable, without throwin
     assert.ok(errors.some((line) => line.includes("still works")), "logs go to stderr after the fallback")
   })()
 })
+
+test("Bug 39: a queued append to a deleted file must not degrade the newer sink", async (t) => {
+  const snapshot = snapshotEnv()
+  const dirA = mkdtempSync(join(tmpdir(), "ocg-logger-staleA-"))
+  const dirB = mkdtempSync(join(tmpdir(), "ocg-logger-staleB-"))
+  resetLoggerForTesting()
+  const errors: string[] = []
+  const original = console.error
+  console.error = (message?: unknown) => errors.push(String(message))
+  t.after(async () => {
+    console.error = original
+    await flushForTesting()
+    restoreEnv(snapshot)
+    rmSync(dirA, { recursive: true, force: true })
+    rmSync(dirB, { recursive: true, force: true })
+  })
+
+  process.env.OPENCODE_LOG_DIR = dirA
+  initLogger()
+  log("stale entry") // queued against dirA's file
+  // Switch sinks (what a reload does), then delete the OLD dir before the queued append runs
+  process.env.OPENCODE_LOG_DIR = dirB
+  initLogger()
+  rmSync(dirA, { recursive: true, force: true })
+  await flushForTesting() // the stale append fails here; it must not touch sink B
+  console.error = original
+
+  log("fresh entry") // must land in dirB's file, not vanish into a stderr fallback
+  await flushForTesting()
+  const files = logFiles(dirB)
+  assert.ok(files.length >= 1, "sink B owns a file")
+  const content = readFileSync(join(dirB, files[0]!), "utf-8")
+  assert.ok(content.includes("fresh entry"), "a stale append failure must not degrade the newer sink")
+})

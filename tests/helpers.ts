@@ -162,6 +162,7 @@ export const CONFIG_ENV_KEYS = [
   "OTEL_RESOURCE_ATTRIBUTES",
   "OTEL_SERVICE_NAME",
   "OPENCODE_LOG_DIR",
+  "OCG_OBS_EXPORTED_SESSIONS",
 ] as const
 
 export type EnvSnapshot = Partial<Record<(typeof CONFIG_ENV_KEYS)[number], string | undefined>>
