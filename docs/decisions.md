@@ -151,3 +151,13 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   step wall-clock measurement (settlement included); the `session.step.streamed`
   provider-boundary marker stays unconsumed; TTFT declined. Facts and future-fix
   prerequisites preserved in TODO.md (semconv gaps list).
+- 2026-11-10: semconv gap #5 adjudicated record-only — truncated JSON-valued attributes
+  (`input.value`+`input.mime_type`, `gen_ai.output.messages`, tool
+  `gen_ai.tool.call.result`/`output.value`) keep the prefix+marker form; the four
+  representation alternatives (degrade-to-text / structural trim / sentinel object /
+  clean omission) were evaluated and declined. Rationale and re-evaluation trigger
+  preserved in TODO.md (semconv gaps list).
+- 2026-11-10: semconv gap #6 adjudicated record-only — the four legacy log event names
+  (`gen_ai.user.message`/`system.message`/`tool.message`/`choice`) stay despite
+  semantic-conventions 1.43.0 `@deprecated` status; migration options and re-evaluation
+  triggers preserved in TODO.md (semconv gaps list).

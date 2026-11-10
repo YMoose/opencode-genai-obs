@@ -79,7 +79,9 @@ provide one), `N > 0` = first N UTF-8 bytes (character-boundary safe) with a
 `[TRUNCATED original_length=<original UTF-8 bytes>]` marker plus `*_original_length`.
 The default is `61440` (60 KiB) of retained content; the suffix is extra. OTel defines no universal
 64 KB attribute ceiling, and this budget does not guarantee backend acceptance. Truncating
-JSON-valued strings can also make them invalid JSON.
+JSON-valued strings can also make them invalid JSON — truncated JSON-valued attributes may
+be unparseable prefix excerpts while still declaring `application/json` (record-only
+decision 2026-11-10).
 All attributes are skipped when their value is `null`/`undefined`/`""` (`src/spans.ts`).
 
 Every span kind also carries these ungated observation attributes:
@@ -282,7 +284,10 @@ start timestamp, and synthetic/unknown turns may use an `auto:<created>` key.
   present-but-empty kvlist entry — Bug 28), and every record whose non-empty content was
   withheld or shortened by the budget carries the log-record attribute
   `opencode.content.truncated = true` (envelope-level marker; spans use the
-  `*_original_length` markers above instead).
+  `*_original_length` markers above instead). The legacy event names (`gen_ai.user.message`,
+  `gen_ai.system.message`, `gen_ai.tool.message`, `gen_ai.choice`) are retained despite
+  their upstream `@deprecated` status in semantic-conventions 1.43.0 (record-only decision
+  2026-11-10).
 
 ## 7. Cross-references
 

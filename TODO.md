@@ -30,10 +30,27 @@ follow-ups; the documentation correction does not change emitted data or frozen 
   (c) UNVERIFIED: whether `streamed` fires on all response paths (non-streaming/failure)
   — any future fix needs that verified plus a fallback; (d) TTFT is derivable from
   upstream stream-delta events if ever needed (not pursued).
-- Truncating JSON-valued attributes can break their JSON/schema validity. Define an explicit
-  representation for oversized structured content before changing the truncation path.
-- Legacy message-event names are deprecated; plan any migration separately from retaining
-  current backend compatibility.
+- Truncated JSON-valued attributes keep the prefix+marker form — record-only (user decision
+  2026-11-10). Affected emitters: chat-span wire body → `input.value` + `input.mime_type`
+  (src/spans.ts:1098/1100), `gen_ai.output.messages` (src/spans.ts:1088), tool results →
+  `gen_ai.tool.call.result` / `output.value` (src/spans.ts:1235/1239). Options evaluated
+  and declined: (A) degrade to `text/plain` — mime stops lying, excerpt kept; (B)
+  structural trim — valid JSON, `M+`, object-key strategy unresolved; (C) sentinel object
+  — valid JSON, excerpt lost; (D) clean omission — Bug 28-symmetric, loses the span
+  preview. Accepted as-is: excerpt previews remain viewable and nothing downstream parses
+  these fields today. Re-evaluate when downstream consumers start parsing truncated fields.
+- Legacy log event names stay — record-only (user decision 2026-11-10). The four emitted
+  names — `gen_ai.user.message`, `gen_ai.system.message`, `gen_ai.tool.message`,
+  `gen_ai.choice` (assistant folds into choice; src/logs.ts:171/183/193/203) — are
+  `@deprecated` in semantic-conventions 1.43.0, superseded by the
+  `gen_ai.input.messages`/`output.messages`/`system_instructions` span attributes or the
+  GenAI-repo event lane (`gen_ai.client.inference.operation.details`, itself relocated).
+  Nothing breaks today — Phoenix/OpenInference consumers still recognize the names — but
+  they sit on an upstream removal path. If ever pursued: rename is breaking for log
+  queries, dual-emit is additive, and a target decision (span attributes vs GenAI-repo
+  event names) is required; spans already carry `gen_ai.output.messages`, partially
+  covering the content. Re-evaluate when upstream actually removes the names or consumer
+  tooling requires the successor events.
 
 
 ### Conditional backlog: wire-derived `gen_ai.response.model` (Bug 43 option B)
