@@ -855,6 +855,20 @@ export function createSpanBuilder(
       case "session.tool.called": {
         const callId = typeof data.id === "string" ? data.id : ""
         if (!callId) return
+        // Duplicate-delivery guard (Bug 33 follow-up), the called-side sibling of the
+        // started-entry guard: same contract basis (a redelivery is the same event
+        // resent, never a new execution) and same phantom-at-unload blast radius —
+        // without the guard, the re-creation branch below resurrects zombie ToolState
+        // stamped with the current round's live traceId, which unload flushAll emits
+        // as a phantom interrupted span under the wrong round's trace while the
+        // redelivery's own terminal was already dropped by Bug 16. The `existing`
+        // branch above it cannot hit for an ended callId: its terminal deleted the
+        // state. Blast radius mirrors Bug 33: a host reusing a callId for a genuinely
+        // new execution loses this backfill cleanly (wrong data → no data).
+        if (endedTools.get(sid)?.has(callId)) {
+          log("tool called dropped (terminal already emitted; duplicate delivery)", { sessionID: sid, callId })
+          return
+        }
         const existing = tools.get(callId)
         if (existing) {
           existing.input = data.input as Record<string, unknown>
