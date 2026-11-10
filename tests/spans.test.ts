@@ -1760,3 +1760,86 @@ test("Bug 40 follow-up: a throwing onSessionEvicted subscriber is swallowed and 
   await settle()
   assert.ok(spans.some((span) => span.spanId === hash("opencode-turn-span:s_0:m1", 8)), "event processing after the throwing subscriber is unaffected")
 })
+
+// ---------------------------------------------- Bug 41 (semconv gap #1: cache-write key spelling)
+
+// The standard key for cache-write tokens is gen_ai.usage.cache_creation.input_tokens
+// (@opentelemetry/semantic-conventions 1.43.0, ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS;
+// no cache_write variant exists). Transition decision (user, 2026-11-10): dual-emit —
+// standard cache_creation + legacy cache_write (kept for existing dashboards; removal is
+// a future release decision). cache_read is already standard-conformant.
+
+test("Bug 41: chat span with cache-write tokens emits BOTH standard cache_creation and legacy cache_write with identical values", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 11, write: 7 } },
+    }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat, "must emit the chat span")
+  const attr = (name: string) => chat.attributes.find(([key]) => key === name)?.[1]
+  assert.equal(attr("gen_ai.usage.cache_creation.input_tokens"), 7, "standard cache_creation key must carry the cache-write value")
+  assert.equal(attr("gen_ai.usage.cache_write.input_tokens"), 7, "legacy cache_write key must be retained during the transition")
+})
+
+test("Bug 41: compaction span with cache-write tokens emits BOTH standard cache_creation and legacy cache_write with identical values", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
+  builder.handleEvent(
+    event("session.compaction.ended", 3_000, {
+      sessionID: "s1",
+      reason: "auto",
+      model: { id: "model-x", providerID: "example" },
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 10, write: 4 } },
+    }),
+  )
+  await settle()
+
+  const compaction = spans.find((span) => span.name === "compaction")
+  assert.ok(compaction, "must emit the compaction span")
+  const attr = (name: string) => compaction.attributes.find(([key]) => key === name)?.[1]
+  assert.equal(attr("gen_ai.usage.cache_creation.input_tokens"), 4, "standard cache_creation key must carry the cache-write value")
+  assert.equal(attr("gen_ai.usage.cache_write.input_tokens"), 4, "legacy cache_write key must be retained during the transition")
+})
+
+test("Bug 41 regression pin: cache_read keeps the standard gen_ai.usage.cache_read.input_tokens key, unchanged", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 11, write: 7 } },
+    }),
+  )
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
+  builder.handleEvent(
+    event("session.compaction.ended", 3_000, {
+      sessionID: "s1",
+      reason: "auto",
+      model: { id: "model-x", providerID: "example" },
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 10, write: 4 } },
+    }),
+  )
+  await settle()
+
+  for (const span of spans.filter((s) => s.name === "chat gpt" || s.name === "compaction")) {
+    const readKeys = span.attributes.filter(([key]) => key.startsWith("gen_ai.usage.cache_read"))
+    assert.equal(readKeys.length, 1, "exactly one cache_read attribute")
+    assert.equal(readKeys[0][0], "gen_ai.usage.cache_read.input_tokens", "cache_read stays on the standard key")
+    assert.equal(readKeys[0][1], span.name === "chat gpt" ? 11 : 10, "cache_read value unchanged")
+  }
+})

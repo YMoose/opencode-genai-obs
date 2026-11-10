@@ -8,8 +8,10 @@ the tracing path.
 See `docs/source-audit.md` for checked versions and relative source paths. These are runtime
 follow-ups; the documentation correction does not change emitted data or frozen ID formulas.
 
-- Cache writes currently emit `gen_ai.usage.cache_write.input_tokens`; the checked standard
-  name is `gen_ai.usage.cache_creation.input_tokens`. Review compatibility before migrating.
+- Cache-write tokens are dual-emitted since Bug 41 (2026-11-10): standard
+  `gen_ai.usage.cache_creation.input_tokens` plus the legacy self-invented
+  `gen_ai.usage.cache_write.input_tokens` (kept temporarily for existing dashboards;
+  its removal is a future release decision).
 - `gen_ai.response.finish_reasons` is currently a JSON string. Standard typing is `string[]`,
   which requires widening `AttrValue` and verifying actual OTLP encoding with a regression test.
 - `gen_ai.response.model` duplicates the requested model; use independently observed response
@@ -50,7 +52,9 @@ built, it must re-derive the current semantics, not the ones at first writing:
   Unload `flushAll` emits unsettled tools as `interrupted: plugin_unload`.
 - **Billable-input token math**: `gen_ai.usage.input_tokens` and the
   `gen_ai.client.token.usage` input type both include cache read + cache write
-  (separate `gen_ai.usage.cache_read/write.input_tokens` attributes carry the split).
+  (the split is carried by `gen_ai.usage.cache_read.input_tokens` and the
+  dual-emitted cache-write pair `gen_ai.usage.cache_creation.input_tokens` /
+  legacy `gen_ai.usage.cache_write.input_tokens` — same value, Bug 41).
 - **Truncation semantics**: `contentMaxLength` sentinel chain (-1 = full, 0 = metadata
   only, N>0 = N-byte retained prefix plus `[TRUNCATED original_length=<original bytes>]` marker) applies equally
   to replayed content.

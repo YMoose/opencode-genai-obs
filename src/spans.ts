@@ -1075,6 +1075,10 @@ export function createSpanBuilder(
         ["gen_ai.usage.output_tokens", outputTokens],
         ["gen_ai.usage.reasoning.output_tokens", tokens?.reasoning],
         ["gen_ai.usage.cache_read.input_tokens", tokens?.cache.read],
+        // Dual-emit transition (Bug 41): cache_creation is the standard key
+        // (semantic-conventions 1.43.0); legacy cache_write is kept temporarily for
+        // existing dashboards — its removal is a future release decision (2026-11-10).
+        ["gen_ai.usage.cache_creation.input_tokens", tokens?.cache.write],
         ["gen_ai.usage.cache_write.input_tokens", tokens?.cache.write],
         ["opencode.cost.usd", cost],
         ["gen_ai.output.messages", outputMessages],
@@ -1303,6 +1307,10 @@ export function createSpanBuilder(
         ["gen_ai.usage.output_tokens", outputTokens],
         ["gen_ai.usage.reasoning.output_tokens", tokens?.reasoning],
         ["gen_ai.usage.cache_read.input_tokens", tokens?.cache.read],
+        // Dual-emit transition (Bug 41): cache_creation is the standard key
+        // (semantic-conventions 1.43.0); legacy cache_write is kept temporarily for
+        // existing dashboards — its removal is a future release decision (2026-11-10).
+        ["gen_ai.usage.cache_creation.input_tokens", tokens?.cache.write],
         ["gen_ai.usage.cache_write.input_tokens", tokens?.cache.write],
         ["opencode.cost.usd", cost],
         // OpenInference mirrors (same set as chat spans)
