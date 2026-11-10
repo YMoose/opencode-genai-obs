@@ -130,7 +130,8 @@ aggregate token counts or cost.
 |---|---|---|
 | `gen_ai.operation.name` | `"chat"` | |
 | `gen_ai.provider.name` | `step.model.providerID` | |
-| `gen_ai.request.model` / `gen_ai.response.model` | `step.model.id` | request model is copied to both; no independent response-model observation |
+| `gen_ai.request.model` | `step.model.id` | |
+| `gen_ai.response.model` | — not emitted | not independently observed in the response; clean absence until wire-derived observation lands (Bug 43, user decision 2026-11-10) |
 | `gen_ai.conversation.id` | `sessionID` | |
 | `gen_ai.response.finish_reasons` | `data.finish` (string) | true `string[]` attribute (`[finish]`); breaking type change — was a JSON string `["<finish>"]` (user decision option A, no mirror; Bug 42, 2026-11-10) |
 | `gen_ai.usage.input_tokens` | `tokens.input + cache.read + cache.write` | semconv totals |
@@ -216,7 +217,8 @@ child tool span hangs under its issuing chat span.
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | `"compaction"` | |
-| `gen_ai.provider.name` / `gen_ai.request.model` / `gen_ai.response.model` | `session.compaction.ended`'s `data.model` | |
+| `gen_ai.provider.name` / `gen_ai.request.model` | `session.compaction.ended`'s `data.model` | |
+| `gen_ai.response.model` | — not emitted | not independently observed; clean absence until wire-derived observation lands (Bug 43, user decision 2026-11-10) |
 | `gen_ai.conversation.id` | `sessionID` | |
 | `opencode.compaction.reason` | `compaction.started`'s `data.reason` (default `"unknown"`) | |
 | `opencode.compaction.native` | `data.native` boolean | OpenCode's native vs plugin summarizer flag |

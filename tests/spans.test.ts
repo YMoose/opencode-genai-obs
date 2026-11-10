@@ -1896,3 +1896,66 @@ test("Bug 42: absent finish reason omits the finish_reasons attribute entirely",
     "no finish reason → no finish_reasons attribute",
   )
 })
+
+// ---------------------------------------------- Bug 43 (semconv gap #3: response.model honesty)
+
+// gen_ai.response.model must be the model identity observed IN the provider response.
+// The opencode event stream only publishes the requested model, so emitting it as the
+// response model is fabricated confirmation. User decision 2026-11-10: stop emitting
+// the attribute (clean absence); gen_ai.request.model stays (true). Wire-derived
+// observation is recorded as a conditional backlog item.
+
+test("Bug 43: chat span must NOT emit gen_ai.response.model copied from the request", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat, "must emit the chat span")
+  assert.ok(
+    !chat.attributes.some(([key]) => key === "gen_ai.response.model"),
+    "gen_ai.response.model must be absent — the requested model id is not an observed response model (pre-fix: present, copied from step.model.id)",
+  )
+  assert.equal(
+    chat.attributes.find(([key]) => key === "gen_ai.request.model")?.[1],
+    "gpt",
+    "gen_ai.request.model stays — the requested model is genuinely observed",
+  )
+})
+
+test("Bug 43: compaction span must NOT emit gen_ai.response.model copied from the request", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.compaction.started", 2_000, { sessionID: "s1", reason: "auto" }))
+  builder.handleEvent(
+    event("session.compaction.ended", 3_000, {
+      sessionID: "s1",
+      reason: "auto",
+      model: { id: "model-x", providerID: "example" },
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const compaction = spans.find((span) => span.name === "compaction")
+  assert.ok(compaction, "must emit the compaction span")
+  assert.ok(
+    !compaction.attributes.some(([key]) => key === "gen_ai.response.model"),
+    "gen_ai.response.model must be absent — the requested model id is not an observed response model (pre-fix: present, copied from data.model.id)",
+  )
+  assert.equal(
+    compaction.attributes.find(([key]) => key === "gen_ai.request.model")?.[1],
+    "model-x",
+    "gen_ai.request.model stays — the requested model is genuinely observed",
+  )
+})

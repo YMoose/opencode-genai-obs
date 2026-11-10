@@ -137,3 +137,13 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   (key + KeyValue wrapper + arrayValue{values:[{stringValue}]}) is pinned in
   tests/otlp.test.ts (Bug 28 precedent) so a future dependency bump cannot silently
   regress arrays into a kvlist with numeric keys.
+- 2026-11-10: Bug 43 (semconv gap #3, user decision "A + B 记档": stop emitting now,
+  record the wire-derived option as conditional backlog) — chat and compaction spans no
+  longer emit `gen_ai.response.model`; it duplicated the requested `model.id`, a false
+  implication of provider confirmation (data-honesty: fake confirmation is worse than
+  absence — same family as the Bug 25 "(auto)" fabricated-user-message removal).
+  `gen_ai.request.model` is untouched: the requested identity is genuinely observed.
+  Option B (derive the served model identity from the wire capture, e.g. Anthropic's
+  response `model` field) is recorded in TODO.md as a conditional backlog item
+  (trigger: alias-vs-served-model comparison needed; provider-specific parsing and
+  timing coupling noted there).

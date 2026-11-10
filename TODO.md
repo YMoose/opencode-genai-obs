@@ -16,8 +16,10 @@ follow-ups; the documentation correction does not change emitted data or frozen 
   `AttrValue` was widened to flat scalar arrays and the OTLP `arrayValue` encoding is
   pinned by a byte-signature regression test. Breaking type change from the previous
   JSON-string form (user decision option A — no mirror, one-field-one-source).
-- `gen_ai.response.model` duplicates the requested model; use independently observed response
-  identity when available rather than implying that the duplicate is a provider observation.
+- `gen_ai.response.model` is no longer emitted since Bug 43 (2026-11-10): the requested
+  model id was copied into it, implying a provider confirmation that was never observed
+  (fake confirmation is worse than absence). `gen_ai.request.model` keeps the true
+  requested identity; reintroduction only via the wire-derived backlog item below.
 - Chat duration includes step settlement. Evaluate `session.step.streamed` and request-start
   timing before presenting this as model-request latency.
 - Truncating JSON-valued attributes can break their JSON/schema validity. Define an explicit
@@ -25,6 +27,15 @@ follow-ups; the documentation correction does not change emitted data or frozen 
 - Legacy message-event names are deprecated; plan any migration separately from retaining
   current backend compatibility.
 
+
+### Conditional backlog: wire-derived `gen_ai.response.model` (Bug 43 option B)
+
+Trigger: the user's research needs alias-vs-served-model comparison. Then derive the
+observed model identity from the wire capture (e.g., Anthropic's response `model`
+field) and emit it as `gen_ai.response.model` on chat/compaction spans. Costs to note:
+provider-specific response parsing, and timing coupling — the wire hook and span
+emission are asynchronous lanes, so the response model must be correlated to the right
+span rather than read inline on the live path.
 
 ## Bug 33 (resolved 2026-11-10)
 
