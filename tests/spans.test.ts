@@ -1634,3 +1634,129 @@ test("Bug 40 regression pin: a non-evicted session's endedTools set survives the
     "no degraded re-emission for the surviving session — its endedTools entry was not purged",
   )
 })
+
+// --------------------------------------------- Bug 40 follow-up (evict-forget sweep)
+
+test("Bug 40 follow-up: evicting a session from the registry cap purges its endedSteps set", async () => {
+  // endedSteps is closure-private; its only observable read is the step-terminal
+  // idempotency guard (session.step.ended/failed). Observable proxy (Bug 40 idiom):
+  // after s0 is evicted, re-open its round (an evicted root degrades to a fresh root —
+  // the documented re-registration degradation) and redeliver the ended step's
+  // terminal. A live turn is required for emission (emitChatSpan bails without one),
+  // so the re-opened round makes the two states visible: a lingering set drops the
+  // redelivery silently; a purged set lets it re-emit degraded (model "unknown", zero
+  // duration — the step state died with the first terminal) under the live round.
+  const { spans, builder } = makeHarness()
+  // s0 completes a chat step: endedSteps[s0] = {a1}
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s0" }))
+  builder.handlePrompt("s0", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s0", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 1_300, { sessionID: "s0", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_400, { sessionID: "s0" }))
+  await settle()
+
+  // 2048 root registrations trip MAX_SESSIONS (2048); tier 1 (idle root, oldest-first)
+  // evicts s0 — exactly one eviction (Bug 29 idiom)
+  for (let i = 0; i < 2048; i++) {
+    builder.handleEvent(event("session.created", 2_000 + i, { sessionID: `s_${i}`, agent: "build" }))
+  }
+
+  // s0 re-opens a round (post-eviction: a degraded but live root), then the ended
+  // step's terminal is redelivered under it
+  builder.handlePrompt("s0", "m2", "again")
+  builder.handleEvent(event("session.step.started", 6_000, { sessionID: "s0", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 6_100, { sessionID: "s0", assistantMessageID: "a1", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }),
+  )
+
+  const chatSpans = spans.filter((s) => s.spanId === hash("opencode-chat:a1", 8))
+  assert.strictEqual(
+    chatSpans.length,
+    2,
+    "the evicted session's endedSteps was purged — the redelivered terminal re-emits degraded instead of being dropped by a lingering set (pre-fix: 1)",
+  )
+  assert.strictEqual(chatSpans[0].traceId, hash("opencode-turn:s0:m1", 16), "the original Round 1 emission is untouched")
+  assert.strictEqual(chatSpans[1].name, "chat unknown", "the re-emission is degraded — the step state was forgotten with the session")
+  assert.strictEqual(chatSpans[1].traceId, hash("opencode-turn:s0:m2", 16), "the forgotten session's redelivered terminal lands on the live round (re-registration degradation)")
+})
+
+test("Bug 40 follow-up: evicting a session purges its unconsumed pendingWakes entry — no stale wakeup on a later round", async () => {
+  // A wake stashed while the session is idle belongs to the round it woke; if the
+  // session is evicted before that round arrives, the wake describes a session the
+  // registry has forgotten. Pre-fix it lingered and was consumed by the FIRST round
+  // after re-registration — misattributing the stale wakeup text (opencode.turn.wakeup
+  // "synthetic" + input.value) onto a turn root that has nothing to do with it.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s0" }))
+  // Idle-session wake (Bug 25 idiom: subagent-completion synthetic inbox item), never
+  // consumed — no round opens before the eviction
+  builder.handleEvent(
+    event("session.inbox.enqueued", 1_050, { sessionID: "s0", item: { type: "synthetic", payload: { text: "subagent finished: stale report" } } }),
+  )
+
+  // 2048 root registrations trip MAX_SESSIONS (2048); tier 1 (idle root, oldest-first)
+  // evicts s0 — exactly one eviction (Bug 29 idiom)
+  for (let i = 0; i < 2048; i++) {
+    builder.handleEvent(event("session.created", 2_000 + i, { sessionID: `s_${i}`, agent: "build" }))
+  }
+
+  // Re-registration (the documented degraded path), then a cold NEW round — no prompt
+  // hook, no fresh wakeup event
+  builder.handleEvent(event("session.created", 5_000, { sessionID: "s0" }))
+  builder.handleEvent(event("session.step.started", 6_000, { sessionID: "s0", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 6_100, { sessionID: "s0", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 6_200, { sessionID: "s0" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s0:auto:6000", 8))
+  assert.ok(root, "the new round's turn root must emit")
+  assert.strictEqual(
+    root.attributes.find(([key]) => key === "opencode.turn.wakeup")?.[1],
+    "unknown",
+    "the evicted session's stale wake must not label the new round synthetic (pre-fix: 'synthetic' from the pre-eviction wake)",
+  )
+  assert.ok(
+    !root.attributes.some(([key]) => key === "input.value"),
+    "the stale wake's text must not be misattributed as the new round's input",
+  )
+})
+
+test("Bug 40 follow-up: a throwing onSessionEvicted subscriber is swallowed and logged — the state machine stays healthy", async () => {
+  // The hook runs synchronously on the live event path; a misbehaving subscriber must
+  // degrade to one warn log, never break event processing for the sessions after it.
+  const spans: SpanRecord[] = []
+  const logs: Array<{ msg: string; data?: unknown }> = []
+  const builder = createSpanBuilder(
+    {
+      gates: GATES,
+      contentMaxLength: -1,
+      agentNameTemplate: "opencode/{agent}",
+      consumeWire: () => undefined,
+      getSessionInfo: async () => ({ agent: "build", title: "T", directory: "/w/p" }),
+      onSessionEvicted: () => {
+        throw new Error("subscriber boom")
+      },
+    },
+    (span) => spans.push(span),
+    (msg, data) => logs.push({ msg, data }),
+  )
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s0" }))
+  // 2048 root registrations trip the cap; tier 1 evicts s0 → the hook runs and throws
+  for (let i = 0; i < 2048; i++) {
+    builder.handleEvent(event("session.created", 2_000 + i, { sessionID: `s_${i}`, agent: "build" }))
+  }
+  assert.ok(
+    logs.some(({ msg, data }) => msg === "onSessionEvicted hook failed" && String((data as { error?: string } | undefined)?.error).includes("subscriber boom")),
+    "the swallowed exception must leave a warn log naming the failure",
+  )
+
+  // Healthy after the throw: a surviving session's round still emits end to end
+  builder.handlePrompt("s_0", "m1", "still alive")
+  builder.handleEvent(event("session.step.started", 6_000, { sessionID: "s_0", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 6_100, { sessionID: "s_0", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 6_200, { sessionID: "s_0" }))
+  await settle()
+  assert.ok(spans.some((span) => span.spanId === hash("opencode-turn-span:s_0:m1", 8)), "event processing after the throwing subscriber is unaffected")
+})

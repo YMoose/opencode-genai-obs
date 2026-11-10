@@ -270,6 +270,15 @@ export interface SpanBuilderOptions {
   readonly observe?: (obs: MetricObservation) => void
   /** GenAI-semconv message events (user/system/tool/choice); undefined disables the logs lane */
   readonly emitLogEvent?: (obs: LogObservation) => void
+  /**
+   * Notified when a session is evicted at the registry cap (MAX_SESSIONS). Contract:
+   * invoked synchronously inside the event that triggered the eviction — it runs on
+   * the live event path, so it must be cheap; exceptions are swallowed and logged,
+   * never propagated (a throwing subscriber must not break event processing). Lets
+   * per-session state owned outside this module (index.ts annotation guards) apply
+   * the same eviction = forgetting rule (Bug 40 follow-up).
+   */
+  readonly onSessionEvicted?: (sessionID: string) => void
 }
 
 export interface SpanBuilder {
@@ -305,7 +314,10 @@ export function createSpanBuilder(
    * Wakeup stash (Bug 25): text of the last synthetic wakeup for a session — from
    * `session.synthetic` or a synthetic `session.inbox.enqueued` item — held until
    * step.started opens the round it woke. Last-write-wins; consumed (deleted) by the
-   * first turn it opens, and a stashed user prompt wins the round instead.
+   * first turn it opens, and a stashed user prompt wins the round instead. Also
+   * deleted at session.deleted, at turn close (a mid-round continuation must not
+   * leak into the next round, Bug 26), and at registry-cap eviction (Bug 40
+   * follow-up: eviction = forgetting the session).
    */
   const pendingWakes = new Map<string, { text: string }>()
   /** Transient step state: assistantMessageID → StepState */
@@ -315,7 +327,12 @@ export function createSpanBuilder(
    * step.ended/failed. opencode V2 may fan the same event out to multiple plugin
    * instances (see DEVtheOPS AGENTS.md) — without this, a duplicate step.ended would
    * re-emit the span and double-count metrics/logs (Bug 13). Nested by sessionID so
-   * session.deleted can purge it (terminal registries grow monotonically until purged).
+   * session.deleted can purge it (terminal registries grow monotonically until
+   * purged). The endedSteps twin of endedTools' growth trait (Bug 33/40 reviews):
+   * bounded by the session lifecycle, purged at session.deleted AND registry-cap
+   * eviction (Bug 40 follow-up); one string per step — LARGER in magnitude than
+   * endedTools (a step per round vs a tool call per tool). Sessions that stay
+   * registered still grow their sets monotonically by design.
    */
   const endedSteps = new Map<string, Set<string>>()
   /**
@@ -382,15 +399,30 @@ export function createSpanBuilder(
     }
     const victim = pickVictim(true, true) ?? pickVictim(true, false) ?? pickVictim(false, false)
     if (victim !== undefined) {
+      // Eviction = forgetting the session (Bug 40, user decision 2026-11-10 "驱逐时清";
+      // extended to the whole per-session family in the Bug 40 follow-up, user decision
+      // "全清" the same day): every entry this factory keys by sessionID dies with the
+      // registry entry, and owners outside it are notified via onSessionEvicted. An
+      // evicted-but-undeleted session that re-registers takes the documented degraded
+      // path (fresh identity, degraded re-emissions) — consistent with Bug 29/40
+      // semantics.
       sessions.delete(victim)
-      // The victim's endedTools set must not outlive its registry entry (Bug 40):
-      // eviction is forgetting the session — purge here too, else an evicted-but-
-      // undeleted session's set lingers forever (user decision 2026-11-10 "驱逐时清";
-      // a numeric per-set cap was considered and declined the same day)
+      endedSteps.delete(victim) // else the victim's terminal history lingers forever
       endedTools.delete(victim)
+      // A lingering wake could be consumed by the session's NEXT round after
+      // re-registration, misattributing the old round's wakeup text onto the new
+      // turn root (opencode.turn.wakeup + input.value)
+      pendingWakes.delete(victim)
       // Retained tool state (Bug 32) must not outlive its session's registry entry:
       // the victim's tools die here too, else they linger until MAX_IN_FLIGHT_TOOLS
       for (const [id, tool] of tools) if (tool.sessionID === victim) tools.delete(id)
+      // Cross-module per-session state (index.ts annotation guards). Swallowed: a
+      // throwing subscriber must never break the live event path
+      try {
+        options.onSessionEvicted?.(victim)
+      } catch (error) {
+        log("onSessionEvicted hook failed", { sessionID: victim, error: String(error) })
+      }
       log("session registry cap reached, evicted session", { sessionID: victim })
     }
   }

@@ -199,6 +199,12 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       },
       observe: metrics?.observe,
       emitLogEvent: logs?.emit,
+      // Eviction = forgetting the session (Bug 40 follow-up): the post-span annotation
+      // guard and a still-pending timer are index-owned per-session state — drop both
+      // when the spans registry evicts the session. Arrow, not a direct reference:
+      // cancelPostSpanAnnotate is declared below and only read at call time (the pump
+      // delivers events after setup returns, so the binding is initialized)
+      onSessionEvicted: (sessionID) => cancelPostSpanAnnotate(sessionID),
     },
     emitSpan,
     log,
@@ -233,7 +239,9 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
   let stopped = false
   // One delayed annotation per session (Bug 11); the guard and any pending timer are
   // purged on session.deleted so deleted ids pin no memory and a later terminal for the
-  // same id (redelivery, recreated session) schedules a fresh annotation (Bug 29)
+  // same id (redelivery, recreated session) schedules a fresh annotation (Bug 29), and
+  // on registry-cap eviction via onSessionEvicted (Bug 40 follow-up: eviction =
+  // forgetting the session)
   const postSpanAnnotated = new Set<string>()
   const postSpanTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const schedulePostSpanAnnotate = (sessionID: string): void => {
@@ -248,7 +256,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
     postSpanTimers.set(sessionID, timer)
   }
 
-  /** session.deleted: drop the annotation guard and cancel a still-pending timer (Bug 29) */
+  /** session.deleted / registry-cap eviction: drop the annotation guard and cancel a still-pending timer (Bug 29; Bug 40 follow-up) */
   const cancelPostSpanAnnotate = (sessionID: string): void => {
     postSpanAnnotated.delete(sessionID)
     const timer = postSpanTimers.get(sessionID)

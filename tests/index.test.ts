@@ -330,6 +330,76 @@ test("Bug 29: session.deleted cancels the pending post-span annotation and purge
   assert.strictEqual(annotationRequests(server).length, 2, "exactly one fresh post-span annotation after the purge")
 })
 
+test("Bug 40 follow-up: registry-cap eviction purges the post-span annotation guard and cancels its pending timer", async (t) => {
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-evict-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(
+    configPath,
+    JSON.stringify({ tracing: { enabled: true, endpoint: server.url, project: "t" } }),
+    "utf-8",
+  )
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+
+  // Titles only for the victim and the drain marker: storm sessions get empty info →
+  // annotate() posts nothing (no fields), so every /v1/session_annotations request is
+  // attributable by session id even after 2048+ session.created events
+  const mock = makeCtx({
+    sessionGet: async (input) =>
+      input.sessionID === "s1" || input.sessionID === "s_marker"
+        ? { parentID: undefined, agent: "build", title: "victim title", location: { directory: "/home/u/proj" } }
+        : {},
+  })
+  const unload = await setup(mock.ctx)
+  t.after(() => unload?.())
+
+  const requestsFor = (sid: string) =>
+    annotationRequests(server).filter((request) => annotationEntries(request.body).some((entry) => entry.session_id === sid))
+
+  const feed = mock.feeds[0]!
+  const now = Date.now()
+  feed.push({ type: "session.created", created: now, data: { sessionID: "s1", title: "early title" } })
+  await waitFor(() => requestsFor("s1").length === 1, 5_000)
+  const scheduledAt = Date.now()
+  feed.push({ type: "session.execution.succeeded", created: now + 1, data: { sessionID: "s1" } }) // schedules the delayed annotation
+
+  // 2048 registrations trip MAX_SESSIONS; tier 1 evicts s1 (the oldest idle root) →
+  // the onSessionEvicted hook must cancel the pending timer and purge the one-shot guard
+  for (let i = 0; i < 2048; i++) {
+    feed.push({ type: "session.created", created: now + 2 + i, data: { sessionID: `storm_${i}` } })
+  }
+  // Trailing marker with a title: when its immediate annotation lands, the serial pump
+  // has drained the whole storm, so the eviction (and its hook) has already run
+  feed.push({ type: "session.created", created: now + 3_000, data: { sessionID: "s_marker" } })
+  await waitFor(() => requestsFor("s_marker").length === 1, 10_000)
+
+  // The post-span delay is 3s: once it passes, the CANCELLED annotation must NOT have
+  // fired (pre-fix: the eviction left the timer untouched and it fired → 2 requests)
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, 3_500 - (Date.now() - scheduledAt))))
+  await new Promise((resolve) => setTimeout(resolve, 100)) // settle any in-flight POST
+  assert.strictEqual(
+    requestsFor("s1").length,
+    1,
+    "eviction must cancel the still-pending post-span annotation for the evicted session",
+  )
+
+  // The one-shot guard was purged as well: a later terminal for the evicted id
+  // schedules a fresh annotation instead of being suppressed forever
+  feed.push({ type: "session.execution.succeeded", created: now + 4_000, data: { sessionID: "s1" } })
+  await waitFor(() => requestsFor("s1").length === 2, 8_000)
+  await new Promise((resolve) => setTimeout(resolve, 300)) // leave a window for an unexpected third POST
+  assert.strictEqual(requestsFor("s1").length, 2, "exactly one fresh post-span annotation after the eviction purge")
+})
+
 test("Bug 12: startup backfill annotates every existing session across list pages", async (t) => {
   const snapshot = snapshotEnv()
   t.after(() => restoreEnv(snapshot))

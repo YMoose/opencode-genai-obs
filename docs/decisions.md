@@ -103,3 +103,17 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   `endedSteps` (spans.ts) and `postSpanAnnotated` (index.ts) still linger past
   eviction; `pendingWakes` lingers only for an unconsumed wake; `postSpanTimers`
   self-heals when the timer fires — left for later adjudication.
+- 2026-11-10: Bug 40 follow-up "evict-forget sweep" fixed (user decision "全清"
+  2026-11-10) — full-family application of the eviction=forgetting ruling to the three
+  remaining evict-linger collections from the Bug 40 recon: registry-cap eviction now
+  also purges the victim's `endedSteps` set (the larger-magnitude twin: one string per
+  step vs per tool call) and `pendingWakes` entry (spans.ts, at the victim-removal
+  site), and a new synchronous `onSessionEvicted` factory option notifies index.ts to
+  drop `postSpanAnnotated[sid]` and cancel/clear a pending `postSpanTimers` entry —
+  exceptions from the hook are swallowed and logged, so a throwing subscriber can never
+  break the live event path. The pendingWakes purge also closes a small
+  misattribution path: a lingering wake could be consumed by the session's next round
+  after re-registration, attaching stale wakeup text (`opencode.turn.wakeup` +
+  `input.value`) to a turn root it never woke. `postSpanTimers` already self-heals
+  when the timer fires; the cancel is belt-and-suspenders (promptness, no stray POST
+  after eviction).
