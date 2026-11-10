@@ -137,7 +137,8 @@ aggregate token counts or cost.
 | `gen_ai.usage.output_tokens` | `tokens.output + tokens.reasoning` | Correct for OpenCode: `output` is visible output only, separate from reasoning |
 | `gen_ai.usage.reasoning.output_tokens` | `tokens.reasoning` | |
 | `gen_ai.usage.cache_read.input_tokens` | `tokens.cache.read` | |
-| `gen_ai.usage.cache_write.input_tokens` | `tokens.cache.write` | Actual emitted key; nonstandard spelling. OTel uses `gen_ai.usage.cache_creation.input_tokens` |
+| `gen_ai.usage.cache_creation.input_tokens` | `tokens.cache.write` | standard key (semantic-conventions 1.43.0, `ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS`); Bug 41 |
+| `gen_ai.usage.cache_write.input_tokens` | `tokens.cache.write` | **legacy/transitional** — nonstandard self-invented spelling, dual-emitted with `cache_creation` (same value) for existing dashboards; removal deferred to a future release decision (Bug 41, 2026-11-10) |
 | `gen_ai.output.messages` | `[{role:'assistant', parts:[{type:'reasoning', content}…, {type:'text', content}…]}]` JSON | **Gate: `assistantResponses`**; reasoning parts precede text (`reasoning.ended` has no ordinal — no fabricated interleaving); tool calls stay on `execute_tool` spans, never `tool_call` parts |
 | `opencode.cost.usd` | `data.cost` | USD per step |
 | `opencode.reasoning` | concatenated reasoning chunks | **Gate: `assistantResponses`**; flat mirror of the reasoning parts for attribute-table UIs |
@@ -219,7 +220,7 @@ child tool span hangs under its issuing chat span.
 | `gen_ai.conversation.id` | `sessionID` | |
 | `opencode.compaction.reason` | `compaction.started`'s `data.reason` (default `"unknown"`) | |
 | `opencode.compaction.native` | `data.native` boolean | OpenCode's native vs plugin summarizer flag |
-| `gen_ai.usage.input_tokens` / `output_tokens` / `reasoning.output_tokens` / `cache_read.input_tokens` / `cache_write.input_tokens` | `data.tokens` | same composition as chat spans |
+| `gen_ai.usage.input_tokens` / `output_tokens` / `reasoning.output_tokens` / `cache_read.input_tokens` / `cache_creation.input_tokens` / `cache_write.input_tokens` | `data.tokens` | same composition as chat spans; cache-write tokens are dual-emitted (Bug 41): standard `cache_creation` plus legacy/transitional `cache_write` (same value, removal deferred) |
 | `opencode.cost.usd` | `data.cost` | |
 | `openinference.span.kind` | `"LLM"` | |
 | `llm.model_name` / `llm.token_count.prompt` / `.completion` / `.total` / `llm.total_cost` | mirrors | same shape as chat |

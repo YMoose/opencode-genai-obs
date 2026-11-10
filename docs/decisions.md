@@ -117,3 +117,11 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   `input.value`) to a turn root it never woke. `postSpanTimers` already self-heals
   when the timer fires; the cancel is belt-and-suspenders (promptness, no stray POST
   after eviction).
+- 2026-11-10: Bug 41 (semconv gap #1, user decision: dual-emit transition) —
+  cache-write tokens now emit the standard `gen_ai.usage.cache_creation.input_tokens`
+  (verified in @opentelemetry/semantic-conventions 1.43.0; no `cache_write` variant
+  exists) on both chat and compaction spans, alongside the legacy self-invented
+  `gen_ai.usage.cache_write.input_tokens` with the same value. The legacy key is
+  retained temporarily for existing dashboards; its removal is deferred to a future
+  release decision. `gen_ai.usage.cache_read.input_tokens` was already
+  standard-conformant and is untouched.
