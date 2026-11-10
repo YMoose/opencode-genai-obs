@@ -125,3 +125,15 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   retained temporarily for existing dashboards; its removal is deferred to a future
   release decision. `gen_ai.usage.cache_read.input_tokens` was already
   standard-conformant and is untouched.
+- 2026-11-10: Bug 42 (semconv gap #2, user decision option A: one-time breaking type
+  change, no mirror/transition — one-field-one-source) —
+  `gen_ai.response.finish_reasons` now emits as a true `string[]` attribute
+  (`[finish]`; previously a JSON-encoded string like `'["stop"]'`). `AttrValue`
+  (src/otlp.ts) widened with flat homogeneous scalar-array branches mirroring
+  @opentelemetry/api's `AttributeValue`, so the adapter passes arrays through
+  uncast. Transformer probe on the pinned otlp-transformer 0.219.0: `toAnyValue`'s
+  `Array.isArray` branch precedes its `Object.keys` branch, so the NATIVE arrayValue
+  path was used — no manual construction needed. The exact protobuf byte signature
+  (key + KeyValue wrapper + arrayValue{values:[{stringValue}]}) is pinned in
+  tests/otlp.test.ts (Bug 28 precedent) so a future dependency bump cannot silently
+  regress arrays into a kvlist with numeric keys.

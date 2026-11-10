@@ -12,8 +12,10 @@ follow-ups; the documentation correction does not change emitted data or frozen 
   `gen_ai.usage.cache_creation.input_tokens` plus the legacy self-invented
   `gen_ai.usage.cache_write.input_tokens` (kept temporarily for existing dashboards;
   its removal is a future release decision).
-- `gen_ai.response.finish_reasons` is currently a JSON string. Standard typing is `string[]`,
-  which requires widening `AttrValue` and verifying actual OTLP encoding with a regression test.
+- `gen_ai.response.finish_reasons` is a true `string[]` since Bug 42 (2026-11-10):
+  `AttrValue` was widened to flat scalar arrays and the OTLP `arrayValue` encoding is
+  pinned by a byte-signature regression test. Breaking type change from the previous
+  JSON-string form (user decision option A — no mirror, one-field-one-source).
 - `gen_ai.response.model` duplicates the requested model; use independently observed response
   identity when available rather than implying that the duplicate is a provider observation.
 - Chat duration includes step settlement. Evaluate `session.step.streamed` and request-start

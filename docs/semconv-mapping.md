@@ -132,7 +132,7 @@ aggregate token counts or cost.
 | `gen_ai.provider.name` | `step.model.providerID` | |
 | `gen_ai.request.model` / `gen_ai.response.model` | `step.model.id` | request model is copied to both; no independent response-model observation |
 | `gen_ai.conversation.id` | `sessionID` | |
-| `gen_ai.response.finish_reasons` | `data.finish` (string) | emitted as a JSON string containing `["<finish>"]`; semconv expects a string-array attribute (implementation gap) |
+| `gen_ai.response.finish_reasons` | `data.finish` (string) | true `string[]` attribute (`[finish]`); breaking type change — was a JSON string `["<finish>"]` (user decision option A, no mirror; Bug 42, 2026-11-10) |
 | `gen_ai.usage.input_tokens` | `tokens.input + cache.read + cache.write` | semconv totals |
 | `gen_ai.usage.output_tokens` | `tokens.output + tokens.reasoning` | Correct for OpenCode: `output` is visible output only, separate from reasoning |
 | `gen_ai.usage.reasoning.output_tokens` | `tokens.reasoning` | |

@@ -1843,3 +1843,56 @@ test("Bug 41 regression pin: cache_read keeps the standard gen_ai.usage.cache_re
     assert.equal(readKeys[0][1], span.name === "chat gpt" ? 11 : 10, "cache_read value unchanged")
   }
 })
+
+// ---------------------------------------------- Bug 42 (semconv gap #2: finish_reasons typing)
+
+// The GenAI semconv types gen_ai.response.finish_reasons as string[] (Go definitions
+// 1.44.0 / model v1.40.0). Breaking type change (user decision option A, 2026-11-10):
+// emit a true string array — no JSON-string mirror, no transition dual-emit.
+
+test("Bug 42: chat span finish reason emits gen_ai.response.finish_reasons as a true string array", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      finish: "stop",
+      tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat, "must emit the chat span")
+  assert.deepEqual(
+    chat.attributes.find(([key]) => key === "gen_ai.response.finish_reasons")?.[1],
+    ["stop"],
+    'finish_reasons must be the string array ["stop"], not a JSON-encoded string (pre-fix: \'["stop"]\')',
+  )
+})
+
+test("Bug 42: absent finish reason omits the finish_reasons attribute entirely", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(
+    event("session.step.ended", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const chat = spans.find((span) => span.name === "chat gpt")
+  assert.ok(chat, "must emit the chat span")
+  assert.ok(
+    !chat.attributes.some(([key]) => key === "gen_ai.response.finish_reasons"),
+    "no finish reason → no finish_reasons attribute",
+  )
+})

@@ -1070,7 +1070,9 @@ export function createSpanBuilder(
         ["gen_ai.request.model", model.id],
         ["gen_ai.response.model", model.id],
         ["gen_ai.conversation.id", sid],
-        ["gen_ai.response.finish_reasons", finish ? JSON.stringify([finish]) : undefined],
+        // Bug 42 (semconv): string[] per the GenAI semconv — a true array attribute,
+        // not a JSON-encoded string (breaking type change, user decision option A, 2026-11-10)
+        ["gen_ai.response.finish_reasons", finish ? [finish] : undefined],
         ["gen_ai.usage.input_tokens", inputTokens],
         ["gen_ai.usage.output_tokens", outputTokens],
         ["gen_ai.usage.reasoning.output_tokens", tokens?.reasoning],
