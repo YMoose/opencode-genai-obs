@@ -86,3 +86,40 @@ test("Bug 2 (exporter path): a hung peer resolves by timeout instead of pending 
   assert.ok(elapsed < 3_000, `must settle promptly after the timeout (actual: ${elapsed}ms)`)
   await exporter.close()
 })
+
+// ---------------------------------------------------------------- Bug 42 (array-valued attributes)
+
+// gen_ai.response.finish_reasons is string[] per the GenAI semconv (Bug 42). OTLP protobuf
+// byte signatures pinned on the real encode path (Bug 28 precedent): after each attribute
+// key comes the KeyValue wrapper (\u0012 <len>) then the AnyValue — field 1 stringValue
+// (\u000A), field 3 intValue (\u0018), field 5 arrayValue (\u002A); a kvlist mis-encoding
+// would be field 6 (\u0032). The pinned otlp-transformer 0.219.0 was probed before this
+// landed: toAnyValue's Array.isArray branch precedes its Object.keys branch, so arrays
+// encode NATIVELY as arrayValue — these signatures guard that behavior forever.
+const FINISH_ARRAY_VALUE =
+  "gen_ai.response.finish_reasons\u0012\u000A\u002A\u0008\u000A\u0006\u000A\u0004stop"
+const STRING_SCALAR = "test.string\u0012\u0007\u000A\u0005value"
+const INT_SCALAR = "test.int\u0012\u0002\u0018\u0007"
+
+test("Bug 42: an array attribute serializes as OTLP arrayValue, not a kvlist or JSON string; scalars keep their forms", async (t) => {
+  const server: TestServer = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+  const exporter = createTraceExporter({ endpoint: server.url })
+  await exporter.exportBatch([
+    { ...span, attributes: [["gen_ai.response.finish_reasons", ["stop"]], ["test.string", "value"], ["test.int", 7]] },
+  ])
+  await exporter.close()
+  assert.strictEqual(server.requests.length, 1)
+  const body = server.requests[0]!.body
+  // arrayValue{values:[{stringValue:"stop"}]} — the full byte sequence is pinned, so a
+  // kvlist-with-numeric-keys or plain-stringValue encoding cannot satisfy it
+  assert.ok(body.includes(FINISH_ARRAY_VALUE), "must serialize as arrayValue holding stringValue \"stop\"")
+  // the pre-Bug-42 form: a JSON-encoded string carrying the literal text ["stop"]
+  assert.ok(!body.includes('["stop"]'), "must NOT serialize as a JSON-encoded string")
+  // scalar guards: encodings unchanged by the AttrValue widening
+  assert.ok(body.includes(STRING_SCALAR), "string scalars still encode as stringValue")
+  assert.ok(body.includes(INT_SCALAR), "int scalars still encode as intValue")
+})

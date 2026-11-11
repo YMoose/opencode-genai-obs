@@ -79,7 +79,9 @@ provide one), `N > 0` = first N UTF-8 bytes (character-boundary safe) with a
 `[TRUNCATED original_length=<original UTF-8 bytes>]` marker plus `*_original_length`.
 The default is `61440` (60 KiB) of retained content; the suffix is extra. OTel defines no universal
 64 KB attribute ceiling, and this budget does not guarantee backend acceptance. Truncating
-JSON-valued strings can also make them invalid JSON.
+JSON-valued strings can also make them invalid JSON — truncated JSON-valued attributes may
+be unparseable prefix excerpts while still declaring `application/json` (record-only
+decision 2026-11-10).
 All attributes are skipped when their value is `null`/`undefined`/`""` (`src/spans.ts`).
 
 Every span kind also carries these ungated observation attributes:
@@ -130,9 +132,10 @@ aggregate token counts or cost.
 |---|---|---|
 | `gen_ai.operation.name` | `"chat"` | |
 | `gen_ai.provider.name` | `step.model.providerID` | |
-| `gen_ai.request.model` / `gen_ai.response.model` | `step.model.id` | request model is copied to both; no independent response-model observation |
+| `gen_ai.request.model` | `step.model.id` | |
+| `gen_ai.response.model` | — not emitted | not independently observed in the response; clean absence until wire-derived observation lands (Bug 43, user decision 2026-11-10) |
 | `gen_ai.conversation.id` | `sessionID` | |
-| `gen_ai.response.finish_reasons` | `data.finish` (string) | emitted as a JSON string containing `["<finish>"]`; semconv expects a string-array attribute (implementation gap) |
+| `gen_ai.response.finish_reasons` | `data.finish` (string) | true `string[]` attribute (`[finish]`); breaking type change — was a JSON string `["<finish>"]` (user decision option A, no mirror; Bug 42, 2026-11-10) |
 | `gen_ai.usage.input_tokens` | `tokens.input + cache.read + cache.write` | semconv totals |
 | `gen_ai.usage.output_tokens` | `tokens.output + tokens.reasoning` | Correct for OpenCode: `output` is visible output only, separate from reasoning |
 | `gen_ai.usage.reasoning.output_tokens` | `tokens.reasoning` | |
@@ -170,7 +173,10 @@ Legacy JSONL records have no `captureID` and cannot be uniquely joined across re
 Chat duration follows `session.step.started` → `session.step.ended/failed`. Upstream step
 settlement includes tool settlement and snapshot work; `session.step.streamed` marks the
 provider response-body boundary separately but is not consumed here. Reported chat duration
-is therefore a step interval, not pure model-request latency.
+is therefore a step interval, not pure model-request latency. Record-only decision
+(2026-11-10): this wall-clock interval is kept as-is, and
+`gen_ai.client.operation.duration{operation=chat}` shares it — read both as step wall-clock
+including post-response settlement, not as pure model-request latency.
 
 ### 3.3 Tool call (`execute_tool <name>`) — `src/spans.ts`
 
@@ -216,7 +222,8 @@ child tool span hangs under its issuing chat span.
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | `"compaction"` | |
-| `gen_ai.provider.name` / `gen_ai.request.model` / `gen_ai.response.model` | `session.compaction.ended`'s `data.model` | |
+| `gen_ai.provider.name` / `gen_ai.request.model` | `session.compaction.ended`'s `data.model` | |
+| `gen_ai.response.model` | — not emitted | not independently observed; clean absence until wire-derived observation lands (Bug 43, user decision 2026-11-10) |
 | `gen_ai.conversation.id` | `sessionID` | |
 | `opencode.compaction.reason` | `compaction.started`'s `data.reason` (default `"unknown"`) | |
 | `opencode.compaction.native` | `data.native` boolean | OpenCode's native vs plugin summarizer flag |
@@ -277,7 +284,10 @@ start timestamp, and synthetic/unknown turns may use an `auto:<created>` key.
   present-but-empty kvlist entry — Bug 28), and every record whose non-empty content was
   withheld or shortened by the budget carries the log-record attribute
   `opencode.content.truncated = true` (envelope-level marker; spans use the
-  `*_original_length` markers above instead).
+  `*_original_length` markers above instead). The legacy event names (`gen_ai.user.message`,
+  `gen_ai.system.message`, `gen_ai.tool.message`, `gen_ai.choice`) are retained despite
+  their upstream `@deprecated` status in semantic-conventions 1.43.0 (record-only decision
+  2026-11-10).
 
 ## 7. Cross-references
 

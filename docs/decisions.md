@@ -125,3 +125,39 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   retained temporarily for existing dashboards; its removal is deferred to a future
   release decision. `gen_ai.usage.cache_read.input_tokens` was already
   standard-conformant and is untouched.
+- 2026-11-10: Bug 42 (semconv gap #2, user decision option A: one-time breaking type
+  change, no mirror/transition — one-field-one-source) —
+  `gen_ai.response.finish_reasons` now emits as a true `string[]` attribute
+  (`[finish]`; previously a JSON-encoded string like `'["stop"]'`). `AttrValue`
+  (src/otlp.ts) widened with flat homogeneous scalar-array branches mirroring
+  @opentelemetry/api's `AttributeValue`, so the adapter passes arrays through
+  uncast. Transformer probe on the pinned otlp-transformer 0.219.0: `toAnyValue`'s
+  `Array.isArray` branch precedes its `Object.keys` branch, so the NATIVE arrayValue
+  path was used — no manual construction needed. The exact protobuf byte signature
+  (key + KeyValue wrapper + arrayValue{values:[{stringValue}]}) is pinned in
+  tests/otlp.test.ts (Bug 28 precedent) so a future dependency bump cannot silently
+  regress arrays into a kvlist with numeric keys.
+- 2026-11-10: Bug 43 (semconv gap #3, user decision "A + B 记档": stop emitting now,
+  record the wire-derived option as conditional backlog) — chat and compaction spans no
+  longer emit `gen_ai.response.model`; it duplicated the requested `model.id`, a false
+  implication of provider confirmation (data-honesty: fake confirmation is worse than
+  absence — same family as the Bug 25 "(auto)" fabricated-user-message removal).
+  `gen_ai.request.model` is untouched: the requested identity is genuinely observed.
+  Option B (derive the served model identity from the wire capture, e.g. Anthropic's
+  response `model` field) is recorded in TODO.md as a conditional backlog item
+  (trigger: alias-vs-served-model comparison needed; provider-specific parsing and
+  timing coupling noted there).
+- 2026-11-10: semconv gap #4 adjudicated record-only — chat duration keeps the current
+  step wall-clock measurement (settlement included); the `session.step.streamed`
+  provider-boundary marker stays unconsumed; TTFT declined. Facts and future-fix
+  prerequisites preserved in TODO.md (semconv gaps list).
+- 2026-11-10: semconv gap #5 adjudicated record-only — truncated JSON-valued attributes
+  (`input.value`+`input.mime_type`, `gen_ai.output.messages`, tool
+  `gen_ai.tool.call.result`/`output.value`) keep the prefix+marker form; the four
+  representation alternatives (degrade-to-text / structural trim / sentinel object /
+  clean omission) were evaluated and declined. Rationale and re-evaluation trigger
+  preserved in TODO.md (semconv gaps list).
+- 2026-11-10: semconv gap #6 adjudicated record-only — the four legacy log event names
+  (`gen_ai.user.message`/`system.message`/`tool.message`/`choice`) stay despite
+  semantic-conventions 1.43.0 `@deprecated` status; migration options and re-evaluation
+  triggers preserved in TODO.md (semconv gaps list).

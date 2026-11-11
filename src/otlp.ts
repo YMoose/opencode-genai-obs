@@ -16,7 +16,10 @@ import { ExportResultCode, type InstrumentationScope } from "@opentelemetry/core
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base"
 import { PLUGIN_VERSION } from "./version.js"
 
-export type AttrValue = string | number | boolean
+// Flat scalar arrays ride AttrValue for array-valued semconv attributes (Bug 42:
+// gen_ai.response.finish_reasons is string[]); homogeneous branches mirror
+// @opentelemetry/api's AttributeValue so the adapter below needs no casts.
+export type AttrValue = string | number | boolean | string[] | number[] | boolean[]
 
 export interface SpanRecord {
   readonly traceId: string // 32 hex chars

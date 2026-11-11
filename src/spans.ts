@@ -1068,9 +1068,13 @@ export function createSpanBuilder(
         ["gen_ai.operation.name", "chat"],
         ["gen_ai.provider.name", model.providerID],
         ["gen_ai.request.model", model.id],
-        ["gen_ai.response.model", model.id],
+        // Bug 43 (semconv gap #3): no gen_ai.response.model — the model identity is
+        // not independently observed in the response; clean absence until a
+        // wire-derived observation lands (conditional backlog). User decision 2026-11-10.
         ["gen_ai.conversation.id", sid],
-        ["gen_ai.response.finish_reasons", finish ? JSON.stringify([finish]) : undefined],
+        // Bug 42 (semconv): string[] per the GenAI semconv — a true array attribute,
+        // not a JSON-encoded string (breaking type change, user decision option A, 2026-11-10)
+        ["gen_ai.response.finish_reasons", finish ? [finish] : undefined],
         ["gen_ai.usage.input_tokens", inputTokens],
         ["gen_ai.usage.output_tokens", outputTokens],
         ["gen_ai.usage.reasoning.output_tokens", tokens?.reasoning],
@@ -1299,7 +1303,9 @@ export function createSpanBuilder(
         ["gen_ai.operation.name", "compaction"],
         ["gen_ai.provider.name", model.providerID],
         ["gen_ai.request.model", model.id],
-        ["gen_ai.response.model", model.id],
+        // Bug 43 (semconv gap #3): no gen_ai.response.model — the model identity is
+        // not independently observed in the response; clean absence until a
+        // wire-derived observation lands (conditional backlog). User decision 2026-11-10.
         ["gen_ai.conversation.id", sid],
         ["opencode.compaction.reason", state.reason],
         ["opencode.compaction.native", data.native as boolean | undefined],
