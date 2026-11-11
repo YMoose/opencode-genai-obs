@@ -49,11 +49,19 @@ Kinds below use OTLP numbers (`CLIENT = 3`, `INTERNAL = 1`). The JS API uses `CL
 
 | Span name | `kind` | Semconv `gen_ai.operation.name` | OpenInference `openinference.span.kind` | Trigger |
 |---|---|---|---|---|
-| `<40-char prompt/wakeup preview>` (fall back to session title, then the turn's `userMessageID`, then `"(empty)"`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`src/spans.ts`) |
+| `<40-char prompt/wakeup preview>` (fall back to session title, then `turn <userMessageID>`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`src/spans.ts`) |
 | `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`src/spans.ts`) |
 | `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`src/spans.ts`) |
 | `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`src/spans.ts`) |
 | `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`src/spans.ts`) |
+
+The turn-root name's prompt preview is **content** and answers to the same gate as
+`input.value`: with `contentGates.userPrompts` off — or `contentMaxLength: 0`
+(metadata-only) — the name collapses to the opaque turn identity `turn <userMessageID>`,
+and a positive `contentMaxLength` budget bounds the preview to the same byte count
+(Bug 47). The session title is deliberately NOT used as the gated fallback: hosts
+auto-generate it from the prompt, so it would leak the same text. With capture on, the
+title remains the fallback for rounds with no prompt text at all (Bug 3).
 
 Span status: every span closes `code 1` (`OK`, not `UNSET`; `UNSET = 0`) on success and `code 2` (error) on
 failure, with `status.message = "<error.type>: <error.message>"` from the triggering

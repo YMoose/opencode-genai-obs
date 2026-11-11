@@ -106,6 +106,16 @@ function preview(text: string | null | undefined): string | undefined {
 }
 
 /**
+ * Name-side content budget (Bug 47): the span name is content, so a positive
+ * contentMaxLength bound applies to it too — the name must never disclose more bytes
+ * than the same budget allows in input.value. Character-boundary safe via cutUtf8Bytes.
+ */
+function nameWithin(text: string | undefined, byteBudget: number): string | undefined {
+  if (text === undefined || byteBudget < 0) return text
+  return cutUtf8Bytes(text, byteBudget) || undefined
+}
+
+/**
  * Resolve the tracing.agentName template for one span: `{agent}` occurrences are
  * replaced with the raw role name, "" omits the attribute (the spec's guidance when
  * there is no meaningful name), and a missing raw name also omits it — a rendered
@@ -580,11 +590,18 @@ export function createSpanBuilder(
     const limit = options.contentMaxLength
     const inputTrunc = options.gates.userPrompts ? truncate(turn.inputText, limit) : undefined
     const outputTrunc = options.gates.assistantResponses && turn.lastAnswer ? truncate(turn.lastAnswer, limit) : undefined
+    // Bug 47: the span NAME is content — a 40-char prompt preview discloses as much
+    // as input.value, so it answers to the same gates. The session title is no safe
+    // substitute: hosts auto-generate it FROM the prompt, so it would leak the same
+    // text whenever content capture is off. A gated name carries the opaque turn
+    // identity instead (metadata only, no content in any byte).
+    const nameIsContent = options.gates.userPrompts && limit !== 0
+    const opaqueName = `turn ${turn.key}`
 
     const span: SpanRecord = {
       traceId: turn.traceId,
       spanId: turn.spanId,
-      name: preview(turn.inputText) ?? merged.title ?? turn.key ?? "(empty)",
+      name: nameIsContent ? nameWithin(preview(turn.inputText), limit) ?? merged.title ?? opaqueName : opaqueName,
       kind: KIND_CLIENT,
       startTimeUnixNano: turn.startedNano,
       endTimeUnixNano: endNano > turn.startedNano ? endNano : turn.lastEndNano,

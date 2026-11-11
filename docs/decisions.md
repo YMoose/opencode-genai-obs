@@ -161,3 +161,10 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   (`gen_ai.user.message`/`system.message`/`tool.message`/`choice`) stay despite
   semantic-conventions 1.43.0 `@deprecated` status; migration options and re-evaluation
   triggers preserved in TODO.md (semconv gaps list).
+- 2026-11-11: Bug 47 fixed — the turn-root span name took a 40-char prompt preview and
+  bypassed every content gate (with all five off it still shipped the raw prompt text).
+  The name is content and now answers to `contentGates.userPrompts` + a non-zero
+  `contentMaxLength`; when gated it degrades to the opaque `turn <userMessageID>`, and a
+  positive budget bounds the preview to the same byte count. The session title is
+  deliberately not the gated fallback (hosts generate it FROM the prompt). Documented in
+  docs/semconv-mapping.md §2 and both READMEs' gate rows.

@@ -41,7 +41,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 | Span | `gen_ai.operation.name` | Contents |
 |---|---|---|
-| Turn root | `invoke_agent` | User prompt preview, final answer, session title/directory and emitted step/tool count; token usage and cost are on chat/compaction spans |
+| Turn root | `invoke_agent` | User prompt preview (gated by `userPrompts`; `turn <messageID>` when off), final answer, session title/directory and emitted step/tool count; token usage and cost are on chat/compaction spans |
 | `chat <model>` | `chat` | Provider/model, input/output/reasoning/cache token counts, cost, output messages (text + reasoning parts), wire-body `input.value` |
 | `execute_tool <name>` | `execute_tool` | Tool name/call id, arguments, result, duration, sub-agent attachment |
 | `invoke_agent <agent>` | `invoke_agent` | Child-session container span, linked under the parent tool span |
@@ -171,7 +171,7 @@ Config lookup order: `OCG_OBS_CONFIG` > `OPENCODE_CONFIG_DIR/ocg-obs.json` > `$X
     "headers": {},                        // shared header base for all signals and session annotations; per-signal headers override
     "content": true,                      // coarse gate: false defaults toolDetails & toolContent to false
     "contentGates": {                     // fine-grained gates (each overrides `content`)
-      "userPrompts": true,                //   turn root input.value
+      "userPrompts": true,                //   turn root input.value + the prompt preview in its span name
       "assistantResponses": true,         //   root/chat output.value, gen_ai.output.messages, opencode.reasoning, compaction text
       "toolDetails": true,                //   gen_ai.tool.call.arguments & tool input.value
       "toolContent": true,                //   gen_ai.tool.call.result & tool output.value

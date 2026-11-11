@@ -171,6 +171,71 @@ test("user_prompt.length: not affected by the userPrompts gate; always lands on 
   assert.ok(!root.attributes.some(([key]) => key === "input.value"), "input.value must not appear when the gate is off")
 })
 
+// ------------------------------------------------------------------ Bug 47 (span-name privacy leak)
+
+test("Bug 47: with every content gate off the turn-root name carries no prompt text", async () => {
+  const secret = "my AWS password is hunter2 and my coworker key is 8f3a9c"
+  const { spans, builder } = makeHarness({
+    gates: { userPrompts: false, assistantResponses: false, toolDetails: false, toolContent: false, wireBody: false },
+  })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", secret)
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "must emit the turn root span")
+  assert.ok(!root.name.includes("hunter2"), "the span name is content: prompt text must not leak with userPrompts off")
+  assert.notStrictEqual(root.name, "T", "the host title is auto-generated from the prompt — not a safe gated fallback")
+  assert.strictEqual(root.name, "turn m1", "gated name degrades to the opaque turn identity")
+})
+
+test("Bug 47: with prompt capture on the turn-root name still previews the prompt (40 chars)", async () => {
+  const secret = "my AWS password is hunter2 and my coworker key is 8f3a9c"
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", secret)
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "must emit the turn root span")
+  assert.strictEqual(root.name, "my AWS password is hunter2 and my cowork…", "gate on → 40-char prompt preview")
+})
+
+test("Bug 47: contentMaxLength=0 (metadata-only) also suppresses the prompt preview in the name", async () => {
+  const { spans, builder } = makeHarness({ contentMaxLength: 0 })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hunter2 lives here")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "must emit the turn root span")
+  assert.strictEqual(root.name, "turn m1", "metadata-only budget means no content in the name either")
+})
+
+test("Bug 47: contentMaxLength=N>0 bounds the name to the same byte budget", async () => {
+  const { spans, builder } = makeHarness({ contentMaxLength: 10 })
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hunter2 password lives right here")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "must emit the turn root span")
+  assert.ok(Buffer.byteLength(root.name, "utf-8") <= 10, `name must respect the 10-byte budget, got ${JSON.stringify(root.name)}`)
+  assert.ok(!root.name.includes("password"), "the budget cuts the preview short of the secret tail")
+})
+
 test("opencode.session.parent_id: child-agent chat span carries the parent session id; root session does not", async () => {
   const { spans, builder } = makeHarness()
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))

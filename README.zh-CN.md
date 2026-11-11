@@ -41,7 +41,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 | Span | `gen_ai.operation.name` | 内容 |
 |---|---|---|
-| 轮根（用户提问预览） | `invoke_agent` | 用户输入预览、最终回答、会话标题/目录、已发出的模型步与工具 span 数；token 与成本位于 chat/compaction span |
+| 轮根（用户提问预览） | `invoke_agent` | 用户输入预览（受 `userPrompts` 门控；关闭时为 `turn <messageID>`）、最终回答、会话标题/目录、已发出的模型步与工具 span 数；token 与成本位于 chat/compaction span |
 | `chat <model>` | `chat` | 厂商/模型、输入/输出/推理/缓存 token、成本、输出消息（text + reasoning parts）、wire 帧 `input.value` |
 | `execute_tool <name>` | `execute_tool` | 工具名/调用 ID、参数、结果、耗时、子代理挂载 |
 | `invoke_agent <agent>` | `invoke_agent` | 子会话容器 span，直接挂在父级工具 span 下 |
@@ -171,7 +171,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
     "headers": {},                        // 所有信号和会话标注的请求头基础值；各信号专用配置可覆盖
     "content": true,                      // 粗粒度隐私门：false 时 toolDetails 与 toolContent 默认关闭
     "contentGates": {                     // 细粒度隐私门（均可单独覆盖 content）
-      "userPrompts": true,                //   轮根 Span 的 input.value（用户提问）
+      "userPrompts": true,                //   轮根 Span 的 input.value 及其 Span 名称中的提问预览
       "assistantResponses": true,         //   轮根/chat output.value、gen_ai.output.messages、opencode.reasoning、compaction 摘要
       "toolDetails": true,                //   gen_ai.tool.call.arguments 与工具 input.value
       "toolContent": true,                //   gen_ai.tool.call.result 与工具 output.value
