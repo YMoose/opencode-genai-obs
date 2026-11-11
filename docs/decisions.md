@@ -168,3 +168,15 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   positive budget bounds the preview to the same byte count. The session title is
   deliberately not the gated fallback (hosts generate it FROM the prompt). Documented in
   docs/semconv-mapping.md §2 and both READMEs' gate rows.
+- 2026-11-11: wire→span FIFO attribution labeled and registered (review report reviewed,
+  fix order approved): the oldest unconsumed `kind === "primary"` frame per session is
+  attached to whichever chat span emits next. The OpenCode event stream publishes no
+  request→step correlation id, so this is positional inference from a side channel.
+  Decision: KEEP the FIFO attribution; fallback policy stays "attach the oldest frame"
+  (never fabricate a body, never leave a consumed frame unattached). Blast radius
+  accepted: any step producing no frame (retry, non-wire provider, PENDING_CAP drop)
+  shifts later frames by one, silently misattributing bodies — trace/span ids are
+  unaffected. Labeled at `src/wire.ts` · `consumePending` (full label) and
+  `src/spans.ts` · `emitChatSpan` (pointer); governance.md gains the standing-heuristic
+  row and a known-limitations entry, and its table anchors switch from rot-prone line
+  numbers to symbol names.

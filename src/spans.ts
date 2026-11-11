@@ -1089,6 +1089,9 @@ export function createSpanBuilder(
     const model = step?.model ?? { id: "unknown", providerID: "" }
     const texts = step ? orderedTexts(step.texts) : []
     const reasoning = step?.reasoning ?? []
+    // HEURISTIC(upstream-gap): take the oldest pending wire frame positionally — no
+    // request→step correlation id exists upstream. Label, gap, and blast radius:
+    // src/wire.ts consumePending + docs/governance.md.
     const wire = options.consumeWire(sid)
     // retry.scheduled arrived after the failed span was emitted — stamp this (retrying) span instead
     const retry = pendingRetries.get(sid)

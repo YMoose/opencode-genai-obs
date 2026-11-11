@@ -233,6 +233,13 @@ export function createWireRecorder(config: WireConfig, log: (msg: string, data?:
         .catch((error) => { log(`http.request body read error: ${error}`) })
     },
 
+    // HEURISTIC(upstream-gap): FIFO wire→chat-span attribution — the oldest unconsumed
+    // primary frame of the session goes to whichever chat span emits next. Upstream gap:
+    // the event stream publishes no request→step correlation id, so this is positional
+    // inference from a side channel. Blast radius: any step producing no frame (retry,
+    // non-wire provider, PENDING_CAP drop above) shifts later frames by one, silently
+    // attaching another step's request body to this span. Approved: user decision
+    // 2026-11-11; recorded in docs/governance.md.
     consumePending(sessionID) {
       const slot = pending.get(sessionID)
       if (!slot) return undefined
