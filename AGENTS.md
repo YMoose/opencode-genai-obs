@@ -36,7 +36,7 @@ dependencies (`node:test` + `node:assert`).
   (log-only diagnostics; never called in wire-only mode)
 - `src/wire.ts` — wire-body JSONL capture (`experimental.ws.send` + `http.request` hooks)
 - `src/annotations.ts` — Phoenix-compatible session annotations (toggleable extension)
-- `src/redact.ts`, `src/logger.ts`, `src/types.ts` — redaction, file logger, shared types
+- `src/redact.ts`, `src/logger.ts`, `src/types.ts`, `src/envelope.ts` — redaction, file logger, shared types, upstream event-envelope validation
 - `tests/` — `node:test` suite; `tests/helpers.ts` has the mock infrastructure
 
 ## Commands

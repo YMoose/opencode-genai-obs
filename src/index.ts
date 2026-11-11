@@ -42,7 +42,7 @@ interface Pipeline {
   readonly dispose: () => Promise<void>
   recordWsSend: (event: Record<string, unknown>) => void
   recordHttpRequest: (event: Record<string, unknown>) => void
-  handlePrompt: (sessionID: string, messageID: string, text: string) => void
+  handlePrompt: (sessionID: string, messageID: string, text: unknown) => void
   /** Inject a W3C traceparent into the outgoing model request's headers (no-op unless the provider is whitelisted and a step is in flight) */
   injectTraceContext: (event: {
     sessionID: string
@@ -500,8 +500,10 @@ export default Plugin.define({
     }
     if (config.tracing.enabled) {
       const promptReg = await ctx.session.hook("prompt", (event) => {
-        const promptEvent = event as unknown as { sessionID: string; messageID: string; prompt: { text: string } }
-        dispatch("prompt", (pipeline) => pipeline.handlePrompt(promptEvent.sessionID, promptEvent.messageID, promptEvent.prompt.text))
+        // prompt.text is absent for an attachment-only prompt (Bug 45): read it tolerantly here
+        // and let the span builder normalize it, instead of throwing on the cast
+        const promptEvent = event as unknown as { sessionID: string; messageID: string; prompt?: { text?: unknown } }
+        dispatch("prompt", (pipeline) => pipeline.handlePrompt(promptEvent.sessionID, promptEvent.messageID, promptEvent.prompt?.text))
       })
       disposers.push(() => { promptReg.dispose() })
 

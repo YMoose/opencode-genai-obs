@@ -46,6 +46,7 @@ import type { SpanRecord, AttrValue } from "./otlp.js"
 import type { MetricObservation } from "./metrics.js"
 import type { LogObservation } from "./logs.js"
 import type { CapturedWireFrame } from "./types.js"
+import { readCreated, readNumber, readString, readTokens, type TokenUsage } from "./envelope.js"
 
 const KIND_INTERNAL = 1
 const KIND_CLIENT = 3
@@ -113,11 +114,11 @@ function preview(text: string | null | undefined): string | undefined {
 const renderAgentName = (template: string, rawAgent: string | undefined): string | undefined =>
   rawAgent === undefined || rawAgent === "" || template === "" ? undefined : template.replaceAll("{agent}", rawAgent)
 
-interface TokenUsage {
-  readonly input: number
-  readonly output: number
-  readonly reasoning: number
-  readonly cache: { readonly read: number; readonly write: number }
+/** Warn once per terminal when the usage payload had to be degraded (Bug 45) */
+function readTokensOrWarn(value: unknown, eventType: string, log: (msg: string, data?: unknown) => void): TokenUsage | undefined {
+  const { tokens, degraded } = readTokens(value)
+  if (degraded.length > 0) log("malformed envelope: usage degraded to 0", { type: eventType, field: degraded })
+  return tokens
 }
 
 function totalTokens(t: TokenUsage): number {
@@ -292,8 +293,11 @@ export interface SpanBuilderOptions {
 export interface SpanBuilder {
   /** Handle one SSE event (session.* namespace) */
   readonly handleEvent: (event: EventBase) => void
-  /** Handle a prompt hook (user message submitted; stashed only, opens no turn) */
-  readonly handlePrompt: (sessionID: string, messageID: string, text: string) => void
+  /**
+   * Handle a prompt hook (user message submitted; stashed only, opens no turn).
+   * `text` is unknown because an attachment-only prompt publishes no text (Bug 45).
+   */
+  readonly handlePrompt: (sessionID: string, messageID: string, text: unknown) => void
   /** Finish: flush every in-flight turn/container (called on plugin unload; teardown marks them interrupted) */
   readonly flushAll: (reason?: string) => Promise<void>
   /**
@@ -678,6 +682,15 @@ export function createSpanBuilder(
     const data = (event.data ?? {}) as Record<string, unknown>
     const sid = data.sessionID as string | undefined
     if (!sid) return
+    // Bug 45: every timestamp below goes through nano(); a non-numeric created would throw a
+    // RangeError out of the live event path, so the one unsequencable event is dropped here.
+    // Blast radius: that single event's contribution is lost (spans it would have opened or
+    // closed degrade exactly as if it had never been delivered).
+    const created = readCreated(event.created)
+    if (created === undefined) {
+      log("malformed envelope: event dropped", { type: event.type, field: "created" })
+      return
+    }
     // High-water first, before the switch: the turn/container opened by this very
     // event must capture a high-water that already includes the event's own seq
     if (event.seq !== undefined) seqHighWater.set(sid, Math.max(seqHighWater.get(sid) ?? event.seq, event.seq))
@@ -688,12 +701,12 @@ export function createSpanBuilder(
           parentID: data.parentID as string | undefined,
           agent: data.agent as string | undefined,
         })
-        if (links.has(sid)) ensureContainer(sid, nano(event.created))
+        if (links.has(sid)) ensureContainer(sid, nano(created))
         return
       }
 
       case "session.deleted": {
-        dropSession(sid, nano(event.created))
+        dropSession(sid, nano(created))
         return
       }
 
@@ -729,7 +742,7 @@ export function createSpanBuilder(
           pendingPrompts.delete(sid) // unconsumed sub-agent prompt stashes are dropped
           // The child container may have been flushed at the previous execution close;
           // rebuild on demand
-          ensureContainer(sid, nano((data.started as number) ?? event.created))
+          ensureContainer(sid, nano(readNumber(data.started) ?? created))
         } else {
           const pending = pendingPrompts.get(sid)
           if (pending) {
@@ -739,9 +752,9 @@ export function createSpanBuilder(
             if (existing && existing.key !== pending.messageID) {
               // Previous execution stream never reached succeeded before the new prompt
               // took over: flush that turn root now
-              void flushTurnRoot(sid, nano(event.created), pluginEnd("new_prompt"))
+              void flushTurnRoot(sid, nano(created), pluginEnd("new_prompt"))
             }
-            openTurn(sid, pending.messageID, pending.text, event.created, "user", data.agent as string | undefined)
+            openTurn(sid, pending.messageID, pending.text, created, "user", data.agent as string | undefined)
           } else if (!openTurns.has(sid)) {
             // HEURISTIC(upstream-gap): invented semantics = the turn identity only:
             // this branch keys a turn root `auto:<created>` when a step.started arrives
@@ -762,7 +775,7 @@ export function createSpanBuilder(
             // Approved: user decision 2026-11-01.
             const wake = pendingWakes.get(sid)
             pendingWakes.delete(sid)
-            openTurn(sid, `auto:${event.created}`, wake?.text ?? "", event.created, wake ? "synthetic" : "unknown", data.agent as string | undefined)
+            openTurn(sid, `auto:${created}`, wake?.text ?? "", created, wake ? "synthetic" : "unknown", data.agent as string | undefined)
           }
         }
         const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
@@ -776,7 +789,7 @@ export function createSpanBuilder(
           sessionID: sid,
           agent: (data.agent as string) ?? "",
           model: { id: model.id ?? "unknown", providerID: model.providerID ?? "" },
-          startedNano: nano((data.started as number) ?? event.created),
+          startedNano: nano(readNumber(data.started) ?? created),
           traceId: binding.traceId,
           parentId: binding.parentId,
           texts: new Map(),
@@ -813,9 +826,9 @@ export function createSpanBuilder(
           return
         }
         const state: CompactionState = {
-          key: String(event.created),
+          key: String(created),
           reason: typeof data.reason === "string" ? data.reason : "unknown",
-          startedNano: nano(event.created),
+          startedNano: nano(created),
           seq: event.seq,
         }
         const previous = compactions.get(sid)
@@ -824,7 +837,7 @@ export function createSpanBuilder(
         // A redelivered started is NOT a predecessor — same created timestamp → same run key; a bare
         // flush would emit a premature span with the same deterministic id, and first-write-wins
         // backends would keep the bare one (Bug 17)
-        if (previous && previous.key !== state.key) emitCompactionSpan(sid, previous, {}, nano(event.created), false, pluginEnd("compaction_replaced"))
+        if (previous && previous.key !== state.key) emitCompactionSpan(sid, previous, {}, nano(created), false, pluginEnd("compaction_replaced"))
         return
       }
 
@@ -839,7 +852,7 @@ export function createSpanBuilder(
           return
         }
         compactions.delete(sid)
-        emitCompactionSpan(sid, state, data, nano(event.created), event.type === "session.compaction.failed", hostEnd(event.type))
+        emitCompactionSpan(sid, state, data, nano(created), event.type === "session.compaction.failed", hostEnd(event.type))
         return
       }
 
@@ -863,7 +876,7 @@ export function createSpanBuilder(
         }
         const step = assistantMessageID ? steps.get(assistantMessageID) : undefined
         if (assistantMessageID) steps.delete(assistantMessageID)
-        const endNano = nano(event.created)
+        const endNano = nano(created)
         const error = event.type === "session.step.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
         // malformed event (no assistantMessageID): skip the chat span — the
         // deterministic id would degrade to a hash of "undefined"
@@ -915,7 +928,7 @@ export function createSpanBuilder(
           assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
           name: data.name as string,
           traceId: prior?.traceId ?? resolveTraceId(sid),
-          startedNano: nano(event.created),
+          startedNano: nano(created),
         })
         return
       }
@@ -951,7 +964,7 @@ export function createSpanBuilder(
             assistantMessageID: typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined,
             input: data.input as Record<string, unknown>,
             traceId: resolveTraceId(sid),
-            startedNano: nano(event.created),
+            startedNano: nano(created),
           })
         }
         return
@@ -969,7 +982,7 @@ export function createSpanBuilder(
         endedTools.set(sid, seen)
         const tool = tools.get(callId)
         tools.delete(callId)
-        const endNano = nano(event.created)
+        const endNano = nano(created)
         const emittedTraceId = emitToolSpan(sid, callId, tool, data, endNano, event.type === "session.tool.failed", hostEnd(event.type))
         // Round accounting (Bug 32): only a tool that emitted under THIS turn's trace
         // counts on it — a late Round 1 terminal must not inflate the current round's
@@ -996,8 +1009,8 @@ export function createSpanBuilder(
         // live trace source — their late terminals still emit under this round (Bug 32)
         stampInFlightTools(sid)
         const error = event.type === "session.execution.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
-        if (isChild(sid)) void flushContainer(sid, nano(event.created), hostEnd(event.type), error)
-        else void flushTurnRoot(sid, nano(event.created), hostEnd(event.type), error)
+        if (isChild(sid)) void flushContainer(sid, nano(created), hostEnd(event.type), error)
+        else void flushTurnRoot(sid, nano(created), hostEnd(event.type), error)
         // Round over: a step still in flight at succeeded/failed is a missed terminal —
         // purge it (tools stay: their terminals can still land on the stamped trace)
         purgeInFlight(sid, "purge")
@@ -1012,8 +1025,8 @@ export function createSpanBuilder(
         }
         // Bind the round's in-flight tools to its trace BEFORE the flush (Bug 32)
         stampInFlightTools(sid)
-        if (isChild(sid)) void flushContainer(sid, nano(event.created), hostEnd(event.type), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
-        else void flushTurnRoot(sid, nano(event.created), hostEnd(event.type), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
+        if (isChild(sid)) void flushContainer(sid, nano(created), hostEnd(event.type), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
+        else void flushTurnRoot(sid, nano(created), hostEnd(event.type), { type: "interrupted", message: (data.reason as string) ?? "", interruptReason: typeof data.reason === "string" ? data.reason : undefined })
         // The interrupted step stays answerable to a late step.ended (its chat span still
         // emits), but its propagation coordinates die with the round (Bug 19); its tools
         // stay answerable to their own late terminals (Bug 32)
@@ -1051,8 +1064,10 @@ export function createSpanBuilder(
     const parentId = binding.parentId
     if (!traceId || !parentId) return undefined // no turn to attach to (steps should always start first; belt and braces)
 
-    const tokens = data.tokens as TokenUsage | undefined
-    const cost = data.cost as number | undefined
+    // Bug 45: a partial tokens payload ({input, output} without cache) used to throw here,
+    // after the step dedup had already committed — the chat span was then lost for good
+    const tokens = readTokensOrWarn(data.tokens, end.trigger, log)
+    const cost = readNumber(data.cost)
     const finish = data.finish as string | undefined
     const model = step?.model ?? { id: "unknown", providerID: "" }
     const texts = step ? orderedTexts(step.texts) : []
@@ -1227,7 +1242,8 @@ export function createSpanBuilder(
     const name = tool?.name ?? "unknown"
     const input = tool?.input ?? {}
     const isSubagent = name === "subagent" || name === "task"
-    const content = data.content as Array<{ type: string; text?: string }> | undefined
+    // Bug 45: upstream publishes an array; a bare string also has .length but no .map
+    const content = Array.isArray(data.content) ? (data.content as Array<{ type: string; text?: string }>) : undefined
     const result = content?.length
       ? JSON.stringify(content.map((item) => (item.type === "text" ? item.text ?? "" : item)))
       : undefined
@@ -1322,8 +1338,8 @@ export function createSpanBuilder(
     end: SpanEnd,
   ) => {
     const model = (data.model ?? {}) as { id?: string; providerID?: string }
-    const tokens = data.tokens as TokenUsage | undefined
-    const cost = data.cost as number | undefined
+    const tokens = readTokensOrWarn(data.tokens, end.trigger, log) // Bug 45: tolerant read, as on the chat span
+    const cost = readNumber(data.cost)
     const error = data.error as { type?: string; message?: string } | undefined
     const inputTokens = tokens ? tokens.input + tokens.cache.read + tokens.cache.write : undefined
     const outputTokens = tokens ? tokens.output + tokens.reasoning : undefined
@@ -1414,7 +1430,9 @@ export function createSpanBuilder(
   return {
     handleEvent,
     handlePrompt(sessionID, messageID, text) {
-      pendingPrompts.set(sessionID, { messageID, text })
+      // Bug 45: the hook payload's prompt.text is absent for image-only prompts; normalizing
+      // here keeps every downstream reader (truncate / Buffer.byteLength) on a real string
+      pendingPrompts.set(sessionID, { messageID, text: readString(text) })
     },
     async flushAll(reason = "plugin_unload") {
       const now = nano(Date.now())

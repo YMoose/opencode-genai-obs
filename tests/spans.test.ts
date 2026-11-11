@@ -2036,3 +2036,131 @@ test("Bug 44: a step.ended arriving after execution.interrupted still emits unde
   assert.strictEqual(chat.startTimeUnixNano, 1_100_000_000n, "the step keeps its real start time")
   assert.strictEqual(chat.endTimeUnixNano, 1_200_000_000n, "the step's duration reflects its own terminal, not the round's")
 })
+
+// ------------------------------------- Bug 45 (validate the upstream event envelope at the boundary)
+
+// Review findings (empirically verified): the prompt hook's text and the event envelope's
+// created/tokens are cast, never validated. An image-only prompt (prompt.text undefined)
+// threw a TypeError inside the voided flushTurnRoot → unhandled rejection → exit 1; a
+// partial tokens payload ({input, output} without cache) threw synchronously — after the
+// step dedup had already committed, so the chat span was lost permanently; a non-numeric
+// created threw a RangeError out of handleEvent.
+
+test("Bug 45: an image-only prompt (text undefined) still flushes the turn root, degraded to the session title", async () => {
+  const spans: SpanRecord[] = []
+  const builder = createSpanBuilder(
+    {
+      gates: GATES,
+      contentMaxLength: 61440,
+      agentNameTemplate: "opencode/{agent}",
+      consumeWire: () => undefined,
+      getSessionInfo: async () => ({ agent: "build", title: "T", directory: "/w/p" }),
+    },
+    (span) => spans.push(span),
+    () => {},
+  )
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  // The host's prompt hook carries prompt.text; an attachment-only prompt has none
+  builder.handlePrompt("s1", "m1", undefined as unknown as string)
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  assert.ok(root, "the turn root must still emit (pre-fix: Buffer.byteLength(undefined) threw inside the voided flush)")
+  assert.strictEqual(root.name, "T", "an absent prompt text degrades to the session title")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.user_prompt.length")?.[1],
+    0,
+    "an absent prompt text measures 0 bytes",
+  )
+  assert.ok(!root.attributes.some(([key]) => key === "input.value"), "no input.value is fabricated for an empty prompt")
+})
+
+test("Bug 45: a partial tokens payload on step.ended emits the chat span with degraded usage instead of throwing", async () => {
+  const spans: SpanRecord[] = []
+  const builder = createSpanBuilder(
+    {
+      gates: GATES,
+      contentMaxLength: -1,
+      agentNameTemplate: "opencode/{agent}",
+      consumeWire: () => undefined,
+      getSessionInfo: async () => ({ agent: "build", title: "T", directory: "/w/p" }),
+    },
+    (span) => spans.push(span),
+    () => {},
+  )
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  // No cache object: pre-fix tokens.cache.read threw after the dedup commit
+  assert.doesNotThrow(
+    () =>
+      builder.handleEvent(
+        event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 5, output: 6 } }),
+      ),
+    "a partial tokens payload must never throw out of the live event path",
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.name === "chat m")
+  assert.ok(chat, "the chat span must emit (pre-fix: the throw had already committed the step dedup, so it was lost for good)")
+  const attr = (name: string) => chat.attributes.find(([key]) => key === name)?.[1]
+  assert.equal(attr("gen_ai.usage.input_tokens"), 5, "the observed input tokens survive")
+  assert.equal(attr("gen_ai.usage.output_tokens"), 6, "the observed output tokens survive")
+  assert.equal(attr("gen_ai.usage.cache_read.input_tokens"), 0, "the missing cache leaf degrades to 0, not a throw")
+
+  // Dedup still applies exactly as before: a redelivered terminal stays a no-op
+  builder.handleEvent(
+    event("session.step.ended", 1_250, { sessionID: "s1", assistantMessageID: "a1", tokens: { input: 5, output: 6 } }),
+  )
+  assert.strictEqual(spans.filter((span) => span.name === "chat m").length, 1, "one chat span, never a duplicate")
+})
+
+test("Bug 45: a non-numeric created (ISO string) drops that event with a warning instead of a RangeError", async () => {
+  const spans: SpanRecord[] = []
+  const logs: Array<{ msg: string; data?: unknown }> = []
+  const builder = createSpanBuilder(
+    {
+      gates: GATES,
+      contentMaxLength: -1,
+      agentNameTemplate: "opencode/{agent}",
+      consumeWire: () => undefined,
+      getSessionInfo: async () => ({ agent: "build", title: "T", directory: "/w/p" }),
+    },
+    (span) => spans.push(span),
+    (msg, data) => logs.push({ msg, data }),
+  )
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  // Pre-fix: BigInt(Math.floor(NaN)) → RangeError thrown out of handleEvent
+  assert.doesNotThrow(
+    () =>
+      builder.handleEvent(
+        event("session.step.started", "2026-01-01T00:00:00Z" as unknown as number, {
+          sessionID: "s1",
+          assistantMessageID: "a1",
+          model: { id: "m", providerID: "p" },
+        }),
+      ),
+    "a malformed created must never throw out of handleEvent",
+  )
+  assert.ok(
+    logs.some(
+      ({ msg, data }) =>
+        msg.includes("malformed envelope") &&
+        (data as { type?: string; field?: string } | undefined)?.type === "session.step.started" &&
+        (data as { field?: string } | undefined)?.field === "created",
+    ),
+    "the dropped event is logged once, naming the event type and the malformed field",
+  )
+
+  // The malformed event left no state; a well-formed round still works end to end
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 2_200, { sessionID: "s1", assistantMessageID: "a2" }))
+  builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "s1" }))
+  await settle()
+  assert.ok(spans.some((span) => span.spanId === hash("opencode-chat:a2", 8)), "event processing after the malformed event is unaffected")
+})

@@ -848,3 +848,43 @@ test("Bug 39 guard: a corrupt exported-sessions file degrades to an empty set wi
   await waitFor(() => logText(dir).includes("annotation backfill done"), 5_000)
   assert.ok(!logText(dir).includes("annotation backfill failed"), "a corrupt state file must not fail the backfill")
 })
+
+// ------------------------------------------------------------------ Bug 45 (envelope boundary)
+
+test("Bug 45: an image-only prompt hook (no prompt.text) does not crash the plugin and still emits the turn root", async (t) => {
+  // Pre-fix, the prompt hook cast prompt.text and the voided flushTurnRoot threw a TypeError
+  // (Buffer.byteLength(undefined)) → unhandled rejection → the host process exited with code 1.
+  const snapshot = snapshotEnv()
+  t.after(() => restoreEnv(snapshot))
+  const dir = tempDir("ocg-idx-imageprompt-")
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const configPath = join(dir, "ocg-obs.json")
+  writeFileSync(configPath, JSON.stringify({ tracing: { enabled: true, endpoint: server.url, annotations: { enabled: false } } }), "utf-8")
+  process.env.OCG_OBS_CONFIG = configPath
+  process.env.OPENCODE_LOG_DIR = join(dir, "logs")
+  process.env.OCG_OBS_EXPORTED_SESSIONS = join(dir, "exported-sessions.json")
+
+  const mock = makeCtx()
+  const unload = await setup(mock.ctx)
+  t.after(() => unload())
+
+  const now = Date.now()
+  mock.feeds[0]!.push({ type: "session.created", created: now, data: { sessionID: "s1", agent: "build" } })
+  // Attachment-only prompt: the hook payload carries no text at all
+  mock.fire("prompt", { sessionID: "s1", messageID: "m1", prompt: {} })
+  mock.feeds[0]!.push({ type: "session.step.started", created: now, data: { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } } })
+  mock.feeds[0]!.push({ type: "session.step.ended", created: now, data: { sessionID: "s1", assistantMessageID: "a1" } })
+  mock.feeds[0]!.push({ type: "session.execution.succeeded", created: now, data: { sessionID: "s1" } })
+
+  await waitFor(() => server.requests.some((request) => request.path === "/v1/traces" && request.body.length > 0), 5_000)
+  assert.ok(
+    server.requests.some((request) => request.path === "/v1/traces" && request.body.includes("invoke_agent")),
+    "the turn root still emits (pre-fix: the flush threw and took the process down)",
+  )
+})
