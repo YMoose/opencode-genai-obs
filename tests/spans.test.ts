@@ -2417,3 +2417,81 @@ test("Bug 49: a link registered after the round's trace froze is not named as th
   )
   assert.deepStrictEqual(danglingParents(spans), [], "no span may name a parent that lives in another trace")
 })
+
+// ---------------------------------------------- Bug 50 (a retry stamp must not survive its round)
+
+// session.retry.scheduled is stamped positionally onto "the next chat span". The stamp was
+// only cleared on consumption and at session.deleted, so a retry that never produced a
+// further step in its own round leaked into the NEXT round's first chat span.
+
+test("Bug 50: a retry scheduled in a round that then fails does not stamp the next round's chat span", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.failed", 1_200, { sessionID: "s1", assistantMessageID: "a1", error: { type: "rate_limit", message: "429" } }))
+  builder.handleEvent(event("session.retry.scheduled", 1_250, { sessionID: "s1", assistantMessageID: "a1", attempt: 2, error: { type: "rate_limit", message: "429" } }))
+  // The retry's own round ends without another step (attempt abandoned / backoff gave up)
+  builder.handleEvent(event("session.execution.failed", 1_300, { sessionID: "s1", error: { type: "rate_limit", message: "429" } }))
+  // …and a brand-new round opens later
+  builder.handlePrompt("s1", "m2", "try something else")
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "s1", assistantMessageID: "a2", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 2_200, { sessionID: "s1", assistantMessageID: "a2" }))
+  builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "s1" }))
+  await settle()
+
+  const next = spans.find((span) => span.spanId === hash("opencode-chat:a2", 8))
+  assert.ok(next, "must emit the next round's chat span")
+  assert.ok(
+    !next.attributes.some(([key]) => key === "opencode.retry.attempt"),
+    "the stamp died with its round — the next round's span must not inherit opencode.retry.attempt (pre-fix: 2)",
+  )
+  assert.ok(!next.attributes.some(([key]) => key === "opencode.retry.error"), "the kindred error stamp dies with the round too")
+})
+
+test("Bug 50: a retry scheduled mid-round still stamps that round's next chat span (expiry must not break the in-round case)", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.failed", 1_200, { sessionID: "s1", assistantMessageID: "a1", error: { type: "rate_limit", message: "429" } }))
+  builder.handleEvent(event("session.retry.scheduled", 1_250, { sessionID: "s1", assistantMessageID: "a1", attempt: 2, error: { type: "rate_limit", message: "429" } }))
+  // The retried step runs inside the SAME round (no execution terminal in between)
+  builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s1", assistantMessageID: "a2", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "s1", assistantMessageID: "a2" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_700, { sessionID: "s1" }))
+  await settle()
+
+  const retried = spans.find((span) => span.spanId === hash("opencode-chat:a2", 8))
+  assert.ok(retried, "must emit the retried chat span")
+  assert.equal(
+    retried.attributes.find(([key]) => key === "opencode.retry.attempt")?.[1],
+    2,
+    "the stamp still applies to the chat span it was scheduled for",
+  )
+})
+
+test("Bug 50: a sub-agent container close expires its retry stamp too", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "p1", agent: "build" }))
+  builder.handleEvent(event("session.created", 1_010, { sessionID: "c1", parentID: "p1", agent: "explore" }))
+  builder.handlePrompt("p1", "m1", "go")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "p1", assistantMessageID: "pa1", model: { id: "gpt", providerID: "p" } }))
+  // Child round 1: a step fails and a retry is scheduled, then the round ends without it
+  builder.handleEvent(event("session.step.started", 1_200, { sessionID: "c1", assistantMessageID: "ca1", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.failed", 1_250, { sessionID: "c1", assistantMessageID: "ca1", error: { type: "rate_limit", message: "429" } }))
+  builder.handleEvent(event("session.retry.scheduled", 1_260, { sessionID: "c1", attempt: 2, error: { type: "rate_limit", message: "429" } }))
+  builder.handleEvent(event("session.execution.failed", 1_300, { sessionID: "c1", error: { type: "rate_limit", message: "429" } }))
+  // Child round 2 on the same session
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "c1", assistantMessageID: "ca2", model: { id: "gpt", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 2_200, { sessionID: "c1", assistantMessageID: "ca2" }))
+  builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "c1" }))
+  await settle()
+
+  const next = spans.find((span) => span.spanId === hash("opencode-chat:ca2", 8))
+  assert.ok(next, "must emit the child's second-round chat span")
+  assert.ok(
+    !next.attributes.some(([key]) => key === "opencode.retry.attempt"),
+    "a container close expires the stamp exactly like a turn close (pre-fix: 2)",
+  )
+})

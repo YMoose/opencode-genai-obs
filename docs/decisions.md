@@ -216,3 +216,17 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   docs/governance.md with a standing-heuristic row and a known-limitations entry:
   upstream publishes the child's `parentID` but no trace/parent-span id, and the
   delegating tool terminal can arrive before the child's first step.
+- 2026-11-11: Bug 50 fixed — the retry stamp is now round-bounded. `session.retry.scheduled`
+  is applied to "the next chat span" (a positional ordering assumption: the event names the
+  failed step, not the attempt it is about to make, and `step.failed` is emitted first).
+  `pendingRetries` was cleared only on consumption and at `session.deleted`, so a retry
+  scheduled in a round that then failed (backoff gave up, attempt abandoned) survived and
+  stamped `opencode.retry.attempt` on the NEXT round's first chat span — fabricated
+  attribution, the same family as Bug 48. The stamp now expires exactly where the
+  same-round rule already expires `pendingWakes`: at turn close (`flushTurnRoot`) and at
+  sub-agent container close (`flushContainer`). The ordering assumption is labeled
+  `HEURISTIC(upstream-gap)` at the declaration and at the consumption site, and registered
+  in docs/governance.md (standing-heuristic row + known-limitations entry) with the
+  in-round residue (a continuation step emitting next) documented as its blast radius.
+  Rejected alternative: matching the stamp to the next `step.started`'s round identity —
+  the same heuristic with more state, and it would still not name the retried attempt.

@@ -397,7 +397,16 @@ export function createSpanBuilder(
   const turnCounters = new Map<string, number>()
   /** Open compaction runs per session */
   const compactions = new Map<string, CompactionState>()
-  /** Retry stamps per session: applied to the next chat span (step.failed emits before retry.scheduled arrives) */
+  /**
+   * Retry stamps per session: applied to the next chat span (step.failed emits before
+   * retry.scheduled arrives). HEURISTIC(upstream-gap): "the next chat span" is an
+   * ORDERING assumption — retry.scheduled carries the failed step's `assistantMessageID`
+   * but no id for the attempt it is about to make, so the stamp is attached positionally.
+   * The claim only holds inside one round, so the stamp dies with its round (Bug 50:
+   * flushTurnRoot / flushContainer delete it, the pendingWakes rule) — otherwise a retry
+   * that never ran leaked `opencode.retry.attempt` onto the next round's first span.
+   * Gap, blast radius, and migration: docs/governance.md.
+   */
   const pendingRetries = new Map<string, { attempt: number; error?: { type?: string; message?: string } }>()
   /**
    * Per-session durable high-water (Bug 23): the newest durable.seq seen for the
@@ -616,6 +625,10 @@ export function createSpanBuilder(
     // the delete is inert there. Child sessions need no twin in flushContainer: their
     // step.started opens containers, never a turn, so they never consume wakes.
     pendingWakes.delete(sid)
+    // Bug 50: a retry stamp describes the round that scheduled it; carrying it past the
+    // round close mislabels the next round's first chat span. The ordering assumption
+    // ("the next chat span is the retried attempt") simply does not span rounds.
+    pendingRetries.delete(sid)
 
     // Refresh title/directory at close (the title may have just been generated)
     const info = options.getSessionInfo ? await options.getSessionInfo(sid) : undefined
@@ -1134,7 +1147,9 @@ export function createSpanBuilder(
     // request→step correlation id exists upstream. Label, gap, and blast radius:
     // src/wire.ts consumePending + docs/governance.md.
     const wire = options.consumeWire(sid)
-    // retry.scheduled arrived after the failed span was emitted — stamp this (retrying) span instead
+    // retry.scheduled arrived after the failed span was emitted — stamp this (retrying)
+    // span instead. HEURISTIC(upstream-gap): positional, round-bounded — see the
+    // pendingRetries declaration (Bug 50).
     const retry = pendingRetries.get(sid)
     if (retry) pendingRetries.delete(sid)
     const retryError = retry?.error ? `${retry.error.type ?? "error"}: ${retry.error.message ?? ""}` : undefined
@@ -1462,6 +1477,9 @@ export function createSpanBuilder(
     const container = containers.get(sid)
     if (!container) return // nothing ever produced a step/tool (empty session) — skip
     containers.delete(sid)
+    // Bug 50: the sub-agent twin of the turn-close expiry — a round's retry stamp must
+    // not outlive the round (sub-agent sessions run retries too)
+    pendingRetries.delete(sid)
     const link = links.get(sid)
     // Bug 49: the round's frozen identity wins over a link that arrived later — the
     // chat spans already emitted there, and a container in another trace would leave

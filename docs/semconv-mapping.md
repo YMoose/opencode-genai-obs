@@ -38,7 +38,7 @@ YAML model under `model/`) — the former opentelemetry.io gen-ai pages are tomb
 | `session.tool.called` | Register tool `input` (merges with prior `tool.input.started`) |
 | `session.tool.success` / `.failed` | Emit `execute_tool` span; register sub-agent attachment if `name ∈ {subagent, task}` + `metadata.sessionID` |
 | `session.compaction.started` / `.ended` / `.failed` | Open/close compaction run (one standalone trace per run; predecessor flushed bare on a second `started`) |
-| `session.retry.scheduled` | Stamp `opencode.retry.*` onto the **next** `chat` span in the same session |
+| `session.retry.scheduled` | Stamp `opencode.retry.*` onto the **next** `chat` span in the same session, within the round that scheduled it (expired at round close, Bug 50) |
 | `session.execution.succeeded` / `.failed` / `.interrupted` | Flush turn root (or sub-agent container) with terminal status |
 
 ## 2. Span inventory
@@ -167,8 +167,8 @@ aggregate token counts or cost.
 | `opencode.message.id` | `assistantMessageID` | deterministic-id input |
 | `opencode.agent` | `step.agent` | raw role name, ungated; the template-independent query key |
 | `opencode.session.parent_id` | parent session's ID (from the subagent/task link or session registry) | sub-agent sessions only; same key as the invoke_agent container span |
-| `opencode.retry.attempt` | stamped from prior `session.retry.scheduled` in the same session | consumed once |
-| `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | |
+| `opencode.retry.attempt` | stamped from prior `session.retry.scheduled` in the same session | consumed once; also expired when its round closes, so a retry that never ran cannot label the next round's span (Bug 50) |
+| `opencode.retry.error` | stamped `"<type>: <message>"` from the same event | same round-bounded lifetime |
 | `opencode.wire.capture_id` | consumed frame's recorder-instance UUID (`captureID` in JSONL) | ungated; identifies the recorder, not a host request |
 | `opencode.wire.seq` | `wire.seq` of the consumed frame | ungated; correlate to JSONL using `(captureID, seq)`, never `seq` alone across restarts |
 
