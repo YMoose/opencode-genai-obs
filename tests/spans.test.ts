@@ -2331,3 +2331,89 @@ test("Bug 48: turn root and sub-agent container do not claim 'opencode' as the i
   // Framework identity still exists — on the resource, not in the provider slot
   assert.ok(root.attributes.some(([key]) => key === "gen_ai.agent.name"), "gen_ai.agent.name still carries the framework agent identity")
 })
+
+// ------------------------------------- Bug 49 (a child span must never name a parent in another trace)
+
+// Container trace identity was re-resolved at flush time while the child's chat spans had
+// resolved it earlier (or vice versa), so a sub-agent round could straddle two traces and
+// the chat's parentSpanId pointed at a span id living in a different trace — a dangling
+// parent, i.e. a parent claim the backend cannot resolve.
+
+/** Every parentSpanId must either resolve inside its own trace or name no emitted span at all. */
+function danglingParents(spans: SpanRecord[]): string[] {
+  const spanIdsByTrace = new Map<string, Set<string>>()
+  for (const span of spans) {
+    const ids = spanIdsByTrace.get(span.traceId) ?? new Set<string>()
+    ids.add(span.spanId)
+    spanIdsByTrace.set(span.traceId, ids)
+  }
+  const dangling: string[] = []
+  for (const span of spans) {
+    if (!span.parentSpanId) continue
+    for (const [traceId, ids] of spanIdsByTrace) {
+      if (traceId === span.traceId) continue
+      if (ids.has(span.parentSpanId)) dangling.push(`${span.name} (${span.spanId}) → ${span.parentSpanId} in ${traceId}`)
+    }
+  }
+  return dangling
+}
+
+test("Bug 49: a sub-agent round whose parent turn closes before the container flush keeps chat and container in ONE trace", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "p1", agent: "build" }))
+  // parentID only — no task-tool link was ever registered (plugin attached mid-flight)
+  builder.handleEvent(event("session.created", 1_010, { sessionID: "c1", parentID: "p1", agent: "explore" }))
+  builder.handlePrompt("p1", "m1", "go")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "p1", assistantMessageID: "pa1", model: { id: "m", providerID: "p" } }))
+  // Child round runs while the parent turn is open → its spans legitimately belong to the parent trace
+  builder.handleEvent(event("session.step.started", 1_200, { sessionID: "c1", assistantMessageID: "ca1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "c1", assistantMessageID: "ca1" }))
+  // The parent round closes FIRST (its flush deletes the only live trace source)
+  builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "p1", assistantMessageID: "pa1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_500, { sessionID: "p1" }))
+  // …then the child round closes
+  builder.handleEvent(event("session.execution.succeeded", 1_600, { sessionID: "c1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.spanId === hash("opencode-chat:ca1", 8))
+  const container = spans.find((span) => span.spanId === hash("opencode-session:c1", 8))
+  assert.ok(chat && container, "both the child chat span and its container must emit")
+  assert.strictEqual(
+    container.traceId,
+    chat.traceId,
+    "the container must live in the trace its children already emitted under (pre-fix: the container landed in the fabricated orphan trace)",
+  )
+  assert.strictEqual(chat.parentSpanId, container.spanId, "the chat span still chains to its container")
+  assert.deepStrictEqual(danglingParents(spans), [], "no span may name a parent that lives in another trace")
+})
+
+test("Bug 49: a link registered after the round's trace froze is not named as the parent (no dangling parentSpanId)", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "p1", agent: "build" }))
+  builder.handleEvent(event("session.created", 1_010, { sessionID: "c1", parentID: "p1", agent: "explore" }))
+  // The child round runs before the parent turn ever opened → its round trace has no parent
+  // to inherit (the documented orphan fallback)
+  builder.handleEvent(event("session.step.started", 1_200, { sessionID: "c1", assistantMessageID: "ca1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "c1", assistantMessageID: "ca1" }))
+  // …then the parent turn opens and its task-tool terminal registers an attachment point
+  // whose trace is the (different) parent trace
+  builder.handlePrompt("p1", "m1", "go")
+  builder.handleEvent(event("session.step.started", 1_400, { sessionID: "p1", assistantMessageID: "pa1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_450, { sessionID: "p1", assistantMessageID: "pa1", id: "t1", name: "task" }))
+  builder.handleEvent(
+    event("session.tool.success", 1_500, { sessionID: "p1", assistantMessageID: "pa1", id: "t1", metadata: { sessionID: "c1" }, content: [] }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 1_600, { sessionID: "c1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.spanId === hash("opencode-chat:ca1", 8))
+  const container = spans.find((span) => span.spanId === hash("opencode-session:c1", 8))
+  assert.ok(chat && container, "both the child chat span and its container must emit")
+  assert.strictEqual(container.traceId, chat.traceId, "the container stays with the round's frozen trace, not the late link's")
+  assert.strictEqual(
+    container.parentSpanId,
+    undefined,
+    "the late link names a span in ANOTHER trace, so it must not be claimed as the parent (pre-fix: dangling parentSpanId emitted)",
+  )
+  assert.deepStrictEqual(danglingParents(spans), [], "no span may name a parent that lives in another trace")
+})

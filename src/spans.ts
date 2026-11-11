@@ -385,8 +385,14 @@ export function createSpanBuilder(
   const tools = new Map<string, ToolState>()
   /** Sub-agent attachment points: child sessionID → { toolSpanId, traceId, parentSid } */
   const links = new Map<string, { toolSpanId: string; traceId: string; parentSid: string }>()
-  /** Container-span bookkeeping per sub-agent session (emitted only at close); roundSeq = durable high-water at creation (Bug 23) */
-  const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint; roundSeq?: number }>()
+  /**
+   * Container-span bookkeeping per sub-agent session (emitted only at close); roundSeq =
+   * durable high-water at creation (Bug 23). `traceId` is the round's frozen trace
+   * identity (Bug 49), the sub-agent twin of TurnState.traceId: every span of the round
+   * — container, chat, tool — resolves through this one value, so the container can
+   * never land in a different trace than the children that already emitted.
+   */
+  const containers = new Map<string, { startedNano: bigint; lastEndNano: bigint; roundSeq?: number; traceId: string }>()
   /** Turn counters per root session */
   const turnCounters = new Map<string, number>()
   /** Open compaction runs per session */
@@ -510,17 +516,38 @@ export function createSpanBuilder(
     return info?.parentID !== undefined
   }
 
-  /** Sub-agent trace inheritance: use the link when known; otherwise the parent's open turn (last resort: open an independent trace) */
-  const childTrace = (sid: string): { traceId: string; containerId: string } => {
-    const containerId = sessionSpanId(sid)
+  /**
+   * Where a sub-agent round's trace comes from: the attachment link when known, else the
+   * parent's open turn, else — when neither exists — an independent trace.
+   *
+   * HEURISTIC(upstream-gap): the orphan branch INVENTS trace identity from the child
+   * session id (`orphanTraceId`). Upstream gap: `session.created` carries the child's
+   * parentID but no trace/parent span id, and the delegating tool's terminal (the only
+   * event that names the child) may arrive before or after the child's first step, so a
+   * sub-agent that starts before its parent turn opens has nothing to inherit. Blast
+   * radius: the round lands in its own single-span-rooted trace, disconnected from the
+   * parent's; the alternative (attaching to a trace that does not exist yet) is not
+   * representable. Label, gap, and migration: docs/governance.md.
+   */
+  const childTraceSource = (sid: string): string => {
     const link = links.get(sid)
-    if (link) return { traceId: link.traceId, containerId }
+    if (link) return link.traceId
     const info = sessions.get(sid)
     const parentTurn = info?.parentID ? openTurns.get(info.parentID) : undefined
-    if (parentTurn) return { traceId: parentTurn.traceId, containerId }
-    // Fallback: parent turn already closed and no link registered (abnormal ordering) —
-    // open our own trace with the container as root
-    return { traceId: orphanTraceId(sid), containerId }
+    if (parentTurn) return parentTurn.traceId
+    return orphanTraceId(sid)
+  }
+
+  /**
+   * The round's trace for a sub-agent: the container's frozen identity once the round is
+   * open (Bug 49), otherwise the live source. Re-resolving mid-round is what split a
+   * round across two traces — a link registered after the chat spans had frozen the
+   * orphan trace moved only the container, leaving the chat's parentSpanId pointing at a
+   * span id that lives in a different trace.
+   */
+  const childTrace = (sid: string): { traceId: string; containerId: string } => {
+    const containerId = sessionSpanId(sid)
+    return { traceId: containers.get(sid)?.traceId ?? childTraceSource(sid), containerId }
   }
 
   /**
@@ -563,10 +590,11 @@ export function createSpanBuilder(
     log("in-flight tool state evicted at cap", { callId: oldest, sessionID: victim?.sessionID })
   }
 
+  /** Open the round's container, freezing its trace identity at creation (Bug 49) */
   const ensureContainer = (sid: string, nowNano: bigint) => {
     let c = containers.get(sid)
     if (!c) {
-      c = { startedNano: nowNano, lastEndNano: nowNano, roundSeq: seqHighWater.get(sid) }
+      c = { startedNano: nowNano, lastEndNano: nowNano, roundSeq: seqHighWater.get(sid), traceId: childTraceSource(sid) }
       containers.set(sid, c)
     }
     return c
@@ -1435,13 +1463,18 @@ export function createSpanBuilder(
     if (!container) return // nothing ever produced a step/tool (empty session) — skip
     containers.delete(sid)
     const link = links.get(sid)
-    const traceId = link?.traceId ?? childTrace(sid).traceId
+    // Bug 49: the round's frozen identity wins over a link that arrived later — the
+    // chat spans already emitted there, and a container in another trace would leave
+    // their parentSpanId dangling.
+    const traceId = container.traceId
     const info = options.getSessionInfo ? await options.getSessionInfo(sid) : sessions.get(sid)
 
     emit({
       traceId,
       spanId: sessionSpanId(sid),
-      parentSpanId: link?.toolSpanId,
+      // The delegating tool span is only a usable parent inside the same trace; a link
+      // naming another trace is a claim the backend can never resolve (Bug 49)
+      parentSpanId: link?.traceId === traceId ? link.toolSpanId : undefined,
       name: `invoke_agent ${info?.agent ?? "opencode"}`,
       kind: KIND_CLIENT,
       startTimeUnixNano: container.startedNano,

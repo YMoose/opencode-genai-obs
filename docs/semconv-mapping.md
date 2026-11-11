@@ -222,8 +222,16 @@ including post-response settlement, not as pure model-request latency.
 | `openinference.span.kind` | `"AGENT"` | |
 
 The container's parent is the `execute_tool {subagent,task}` span that registered the attachment
-(`src/spans.ts`) when a link is available. Child chat spans hang under the container; each
-child tool span hangs under its issuing chat span.
+(`src/spans.ts`) when a link is available **and lives in the same trace as the round**. Child chat
+spans hang under the container; each child tool span hangs under its issuing chat span.
+
+The round's trace identity is frozen when the container opens (Bug 49), the sub-agent twin of
+`TurnState.traceId` for root turns. Before that, every chat/tool/container emission of a round
+re-resolved the trace live, so a link or parent turn that appeared mid-round moved only the
+container — splitting one round across two traces and leaving the chat's `parentSpanId`
+pointing at a span id in a *different* trace (a dangling parent, i.e. an unresolvable parent
+claim). A link whose trace differs from the round's is now not used as the parent at all:
+`parentSpanId` is omitted rather than asserted.
 
 ### 3.5 Compaction — `src/spans.ts`
 
@@ -266,6 +274,7 @@ Instrumentation scope: `{ name: "opencode-genai-obs", version: PLUGIN_VERSION }`
 | Sub-agent container spanId | child `sessionID` |
 | Compaction traceId / spanId | `sessionID × compaction.started timestamp` |
 | Orphan trace (sub-agent with no parent link) | child `sessionID` |
+| Sub-agent round trace | container's frozen `traceId` (Bug 49): the whole round — container, chat, tool spans — resolves through the one value frozen when the round opened, so a container can never land in a trace other than its children's |
 
 The offline replay lane is not implemented yet. Matching IDs can support reconciliation if
 the backend supports it; OTLP does not guarantee upsert or deduplication. The shared pipeline

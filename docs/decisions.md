@@ -200,3 +200,19 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   fabricated one is a claim they cannot detect. The metrics/logs lanes follow the same
   rule (an unobserved `gen_ai.provider.name`/`gen_ai.request.model`/tool name is omitted
   rather than sent empty).
+- 2026-11-11: Bug 49 fixed — a sub-agent round can no longer straddle two traces. The
+  round's trace identity was re-resolved on every emission (`childTrace` re-read the live
+  link / parent open turn), while the chat and tool spans froze theirs at creation. A
+  link or parent turn that appeared mid-round therefore moved only the container: the
+  chat span landed in the parent trace with a `parentSpanId` naming the container, and
+  the container landed in the fabricated orphan trace — a dangling parent reference, a
+  parent claim no backend can resolve. The container now freezes its `traceId` when the
+  round opens (`containers.traceId`), the sub-agent twin of `TurnState.traceId`, and all
+  of the round's spans resolve through it; a link naming a different trace is not used
+  as `parentSpanId` (omitted rather than asserted). Consistent with the Bug 43/48
+  data-honesty rule: a dangling parent reference is a fabricated claim. The remaining
+  orphan-trace fabrication (a child that starts before its parent turn exists) is now
+  labeled `HEURISTIC(upstream-gap)` at `childTraceSource`, registered in
+  docs/governance.md with a standing-heuristic row and a known-limitations entry:
+  upstream publishes the child's `parentID` but no trace/parent-span id, and the
+  delegating tool terminal can arrive before the child's first step.
