@@ -197,6 +197,14 @@ interface StepState {
   readonly agent: string
   readonly model: { readonly id: string; readonly providerID: string }
   readonly startedNano: bigint
+  /**
+   * The round this step ran in (Bug 44): frozen at creation from the turn/container it
+   * opened, mirroring ToolState.traceId — a terminal arriving after its round closed
+   * must not re-resolve against whatever round is open by then.
+   */
+  readonly traceId?: string
+  /** Parent turn root (root sessions) / container span (sub-agents) of that same round (Bug 44) */
+  readonly parentId?: string
   /** text segments keyed by their protocol ordinal — reassembled in ordinal order, not arrival order */
   texts: Map<number, string>
   reasoning: string[]
@@ -504,6 +512,17 @@ export function createSpanBuilder(
     isChild(sid) ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
 
   /**
+   * Round identity frozen onto a new step (Bug 44), mirroring ToolState.traceId: the same
+   * pair emitChatSpan used to re-resolve live, captured once so a terminal arriving after
+   * the round's flush still binds to the round that created the step.
+   */
+  const resolveStepBinding = (sid: string): { traceId?: string; parentId?: string } => {
+    if (!isChild(sid)) return { traceId: openTurns.get(sid)?.traceId, parentId: openTurns.get(sid)?.spanId }
+    const child = childTrace(sid)
+    return { traceId: child.traceId, parentId: child.containerId }
+  }
+
+  /**
    * Backfill the round trace onto this session's still-unstamped in-flight tools
    * BEFORE the round's flush (flushTurnRoot deletes the open turn — the trace source
    * for root sessions): a tool whose creation raced ahead of the turn opening (or
@@ -749,12 +768,17 @@ export function createSpanBuilder(
         const assistantMessageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : ""
         if (!assistantMessageID) return // malformed event: skip the step (an "undefined" key would cross-corrupt sessions)
         const model = (data.model ?? {}) as { id?: string; providerID?: string }
+        // Freeze the round identity at creation (Bug 44), mirroring ToolState.traceId: the
+        // turn/container opened for this step is only resolvable live right now.
+        const binding = resolveStepBinding(sid)
         steps.set(assistantMessageID, {
           assistantMessageID,
           sessionID: sid,
           agent: (data.agent as string) ?? "",
           model: { id: model.id ?? "unknown", providerID: model.providerID ?? "" },
           startedNano: nano((data.started as number) ?? event.created),
+          traceId: binding.traceId,
+          parentId: binding.parentId,
           texts: new Map(),
           reasoning: [],
         })
@@ -843,9 +867,14 @@ export function createSpanBuilder(
         const error = event.type === "session.step.failed" ? (data.error as { type?: string; message?: string } | undefined) : undefined
         // malformed event (no assistantMessageID): skip the chat span — the
         // deterministic id would degrade to a hash of "undefined"
-        if (assistantMessageID) emitChatSpan(sid, assistantMessageID, step, data, endNano, hostEnd(event.type), error)
+        const emittedTraceId = assistantMessageID
+          ? emitChatSpan(sid, assistantMessageID, step, data, endNano, hostEnd(event.type), error)
+          : undefined
+        // Round accounting (Bug 44, mirroring Bug 32 for tools): only a chat span that
+        // emitted under THIS turn's trace counts on it — a late Round 1 terminal must not
+        // inflate the current round's message count or end time
         const turn = openTurns.get(sid)
-        if (turn) {
+        if (turn && emittedTraceId === turn.traceId) {
           if (endNano > turn.lastEndNano) turn.lastEndNano = endNano
           turn.spanCount += 1
         }
@@ -999,6 +1028,11 @@ export function createSpanBuilder(
 
   // ----------------------------------------------------------------- emitters
 
+  /**
+   * Emit the chat span; returns the traceId it emitted under (undefined when nothing
+   * emitted). Callers use the return for round accounting (Bug 44), mirroring the
+   * emitToolSpan contract: the span may land on a round other than the open one.
+   */
   const emitChatSpan = (
     sid: string,
     assistantMessageID: string,
@@ -1007,12 +1041,15 @@ export function createSpanBuilder(
     endNano: bigint,
     end: SpanEnd,
     error?: { type?: string; message?: string },
-  ) => {
-    if (!assistantMessageID) return // defensive: deterministic hashes would collide without ids
+  ): string | undefined => {
+    if (!assistantMessageID) return undefined // defensive: deterministic hashes would collide without ids
     const child = isChild(sid)
-    const traceId = child ? childTrace(sid).traceId : openTurns.get(sid)?.traceId
-    const parentId = child ? childTrace(sid).containerId : openTurns.get(sid)?.spanId
-    if (!traceId || !parentId) return // no turn to attach to (steps should always start first; belt and braces)
+    // The step's own round binding (Bug 44) — frozen at creation, mirroring
+    // ToolState.traceId — wins over the live lookup, which only covers never-stamped state
+    const binding = step?.traceId && step.parentId ? { traceId: step.traceId, parentId: step.parentId } : resolveStepBinding(sid)
+    const traceId = binding.traceId
+    const parentId = binding.parentId
+    if (!traceId || !parentId) return undefined // no turn to attach to (steps should always start first; belt and braces)
 
     const tokens = data.tokens as TokenUsage | undefined
     const cost = data.cost as number | undefined
@@ -1157,6 +1194,8 @@ export function createSpanBuilder(
         })
       }
     }
+
+    return traceId
   }
 
   /**
@@ -1425,7 +1464,10 @@ export function createSpanBuilder(
         // An interrupted round's leftover step must not advertise coordinates: its chat
         // span id would be injected as a phantom traceparent under the next turn's trace
         if (step.interrupted) continue
-        const traceId = isChild(sessionID) ? childTrace(sessionID).traceId : openTurns.get(sessionID)?.traceId
+        // Bug 44: advertise the step's own frozen round binding (live fallback for the
+        // unstamped case) so the traceparent always matches where the chat span emits
+        const binding = step.traceId ? { traceId: step.traceId } : resolveStepBinding(sessionID)
+        const traceId = binding.traceId
         if (!traceId) return undefined
         return {
           traceId,

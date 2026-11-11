@@ -1959,3 +1959,80 @@ test("Bug 43: compaction span must NOT emit gen_ai.response.model copied from th
     "gen_ai.request.model stays — the requested model is genuinely observed",
   )
 })
+
+// ---------------------------------------------- Bug 44 (late step terminals bind to their creation round)
+
+// Review finding: emitChatSpan resolved traceId/parentId from the LIVE openTurns/childTrace
+// at emission time, and step state is only MARKED on interrupt (purged on succeed/fail). So a
+// Round 1 step.ended arriving after Round 2 opened emitted a full chat span under Round 2's
+// trace and inflated its opencode.turn.messages — the tool-side Bug 32/33 failure class, which
+// ToolState.traceId already fixed by freezing the round identity at creation.
+
+test("Bug 44: a late Round 1 step.ended arriving after Round 2 opened emits under Round 1's trace and does not inflate Round 2's opencode.turn.messages", async () => {
+  // Pre-fix, the interrupted round's flush deleted the open turn (the only trace source),
+  // so the late terminal re-resolved against Round 2's live turn: the chat span landed on
+  // Round 2's trace and counted on Round 2's turn root.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.interrupted", 1_300, { sessionID: "s1", reason: "user" }))
+  // Round 2 takes over with a fresh prompt while Round 1's step has not settled
+  builder.handlePrompt("s1", "m2", "again")
+  builder.handleEvent(event("session.step.started", 2_100, { sessionID: "s1", assistantMessageID: "a2", model: { id: "m", providerID: "p" } }))
+  // Round 1's step terminal arrives NOW, after Round 2 opened
+  builder.handleEvent(
+    event("session.step.ended", 2_150, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  builder.handleEvent(
+    event("session.step.ended", 2_200, {
+      sessionID: "s1",
+      assistantMessageID: "a2",
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "s1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
+  assert.ok(chat, "the late Round 1 step terminal must still emit its chat span")
+  assert.strictEqual(chat.traceId, hash("opencode-turn:s1:m1", 16), "attribution stays on Round 1's trace (pre-fix: Round 2's open turn)")
+  assert.strictEqual(chat.parentSpanId, hash("opencode-turn-span:s1:m1", 8), "the chat span stays parented to Round 1's turn root (pre-fix: Round 2's)")
+  assert.strictEqual(chat.startTimeUnixNano, 1_100_000_000n, "the Round 1 step keeps its real start time")
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m2", 8))
+  assert.ok(root, "Round 2's turn root must emit")
+  assert.equal(
+    root.attributes.find(([key]) => key === "opencode.turn.messages")?.[1],
+    1,
+    "Round 2 counts its own chat span only — the late Round 1 step must not inflate it (pre-fix: 2)",
+  )
+})
+
+test("Bug 44: a step.ended arriving after execution.interrupted still emits under its round's trace", async () => {
+  // Sibling of the Bug 32 late-tool case: after the interrupt flush deleted the open turn,
+  // the pre-fix live lookup found no trace source at all and dropped the chat span outright.
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "hello")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.execution.interrupted", 1_150, { sessionID: "s1", reason: "shutdown" }))
+  builder.handleEvent(
+    event("session.step.ended", 1_200, {
+      sessionID: "s1",
+      assistantMessageID: "a1",
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  await settle()
+
+  const chat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
+  assert.ok(chat, "the late step terminal must still emit its chat span (pre-fix: no trace source left, dropped)")
+  assert.strictEqual(chat.traceId, hash("opencode-turn:s1:m1", 16), "the step stays on its own round's trace")
+  assert.strictEqual(chat.parentSpanId, hash("opencode-turn-span:s1:m1", 8), "parented to its own round's turn root")
+  assert.strictEqual(chat.startTimeUnixNano, 1_100_000_000n, "the step keeps its real start time")
+  assert.strictEqual(chat.endTimeUnixNano, 1_200_000_000n, "the step's duration reflects its own terminal, not the round's")
+})
