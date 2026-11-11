@@ -13,6 +13,7 @@ import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics"
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto"
 import type { Attributes } from "@opentelemetry/api"
 import { PLUGIN_VERSION } from "./version.js"
+import { SIGNAL_SHUTDOWN_BUDGET_MS, shutdownWithin } from "./shutdown.js"
 
 /** One metric observation reported by the span state machine */
 export type MetricObservation =
@@ -44,6 +45,8 @@ export interface MetricsOptions {
   readonly resourceAttributes?: Record<string, string>
   /** Export interval in ms, default 60s */
   readonly intervalMs?: number
+  /** Diagnostics sink (default silent) */
+  readonly log?: (msg: string, data?: unknown) => void
 }
 
 export interface Metrics {
@@ -97,7 +100,9 @@ export function createMetrics(options: MetricsOptions): Metrics {
       operationDuration.record(Number(obs.durationNano) / 1e9, attrs)
     },
     async shutdown() {
-      await provider.shutdown() // flushes the reader (final export), then shuts the exporter down
+      // Bug 46: the SDK shutdown waits out the exporter's own HTTP timeout (136 s measured
+      // against a blackholed endpoint); the unload baseline bounds it instead.
+      await shutdownWithin("metrics", SIGNAL_SHUTDOWN_BUDGET_MS, () => provider.shutdown(), options.log ?? (() => {}))
     },
   }
 }

@@ -150,6 +150,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
         headers: config.metrics.headers,
         resourceAttributes: config.tracing.resourceAttributes,
         intervalMs: config.metrics.intervalMs,
+        log,
       })
     : undefined
 
@@ -160,6 +161,7 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
         resourceAttributes: config.tracing.resourceAttributes,
         contentMaxLength: config.tracing.contentMaxLength,
         intervalMs: config.logs.intervalMs,
+        log,
       })
     : undefined
 
@@ -398,10 +400,12 @@ async function buildPipeline(ctx: PipelineCtx, config: Config): Promise<Pipeline
       postSpanAnnotated.clear()
       await eventIterator.return?.()
       await spanBuilder.flushAll()
+      // Bug 46: the metrics/logs lane is bounded separately (500 ms each); running it alongside
+      // the sender keeps the unload bound at max(1.5 s, 0.5 s) instead of summing the two
+      const signals = Promise.all([metrics?.shutdown(), logs?.shutdown()])
       await sender.drain()
       await sender.close()
-      await metrics?.shutdown()
-      await logs?.shutdown()
+      await signals
       await wire.dispose()
     },
     recordWsSend: (event) => wire.recordWsSend(event as unknown as Parameters<typeof wire.recordWsSend>[0]),

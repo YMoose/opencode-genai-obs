@@ -74,3 +74,26 @@ test("OTEL_SERVICE_NAME override: resourceAttributes service.name reaches the ex
 
   await metrics.shutdown()
 })
+
+// ------------------------------------------------------------------ Bug 46 (bounded shutdown)
+
+test("Bug 46: metrics.shutdown() against a non-responsive endpoint resolves within its budget", async (t) => {
+  // A blackholed endpoint accepts the POST and never answers: the SDK's provider.shutdown()
+  // then waits out the exporter's own timeout (10 s default; 136 s measured on a real
+  // blackholed Phoenix endpoint), which would hang the host's unload.
+  const server = await startServer(() => {
+    /* never respond */
+  })
+  t.after(() => server.close())
+
+  const logs: string[] = []
+  const metrics = createMetrics({ endpoint: server.url, intervalMs: 50, log: (msg) => logs.push(msg) })
+  metrics.observe({ metric: "token", tokenType: "input", value: 1, provider: "p", model: "m" })
+  await waitFor(() => server.requests.length >= 1, 5_000)
+
+  const started = Date.now()
+  await metrics.shutdown()
+  const took = Date.now() - started
+  assert.ok(took < 1_500, `metrics shutdown must return within its budget, took ${took}ms`)
+  assert.ok(logs.some((line) => line.includes("metrics shutdown exceeded")), "the abandoned shutdown is logged")
+})

@@ -276,7 +276,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
 
 - **插件日志**：`~/.local/share/opencode/log/ocg-obs.<timestamp>-<pid>.log`（保留 7 天，敏感凭据自动脱敏）。
 - **启动探测**：tracing 开启时，启动阶段对每个去重后的已配置 OTLP 端点（traces/metrics/logs）做一次 TCP 连接，记录 `otlp endpoint reachable` 或 `otlp endpoint UNREACHABLE — spans will queue/retry until the backend comes up` —— 纯诊断日志，导出行为由 sender 的重试/退避负责。wire-only 模式永不探测（零网络出流量）。
-- **关机**：插件卸载始终遵守规范规定的有界预算 —— 最终 flush 最多约 1.5 s（1 s drain 预算 + 0.5 s close 预算）；预算耗尽时仍在队列中的 span 被丢弃，关机阶段不再重试。在此之上，`tracing.fastShutdown`（默认 `true`）附加 CLI 快速失败捷径：150 ms TCP 预探测（端点无人监听时立刻丢弃队列并记录 `otlp drain: endpoint not reachable`）以及上次导出失败后跳过最终 flush。设 `tracing.fastShutdown: false` 可同时关闭两条捷径 —— drain/close 预算仍然生效，但关机始终会在预算内尝试最终 flush（严格远程/代理 collector 场景）。
+- **关机**：插件卸载始终遵守规范规定的有界预算 —— 总计最多约 1.5 s。traces 通道为 1 s drain 预算 + 0.5 s close 预算；metrics 与 logs 通道与它并发执行，各自受 500 ms 上限约束（超时则记录一条警告后放弃等待，绝不挂起宿主），因此总耗时为约 1.5 s 而非三路信号相加。预算耗尽时仍留在队列中的 span / 样本 / 日志批次被丢弃，关机阶段不再重试。在此之上，`tracing.fastShutdown`（默认 `true`）附加 CLI 快速失败捷径：150 ms TCP 预探测（端点无人监听时立刻丢弃队列并记录 `otlp drain: endpoint not reachable`）以及上次导出失败后跳过最终 flush。设 `tracing.fastShutdown: false` 可同时关闭两条捷径 —— drain/close 预算仍然生效，但关机始终会在预算内尝试最终 flush（严格远程/代理 collector 场景）。
 - **属性映射**：[docs/semconv-mapping.md](docs/semconv-mapping.md) —— 从 OpenCode 采集到的数据如何一一对应到 GenAI semconv / OpenInference。
 - **源码核查**：[docs/source-audit.md](docs/source-audit.md)——相对源码路径、核查版本和实现限制。
 - **路线图**：[TODO.md](TODO.md)

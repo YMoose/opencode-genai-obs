@@ -26,6 +26,7 @@ import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs"
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto"
 import { PLUGIN_VERSION } from "./version.js"
 import { cutUtf8Bytes } from "./truncate.js"
+import { SIGNAL_SHUTDOWN_BUDGET_MS, shutdownWithin } from "./shutdown.js"
 
 /**
  * One message-event observation. `content: undefined` = the gate is off → metadata-only.
@@ -69,6 +70,8 @@ export interface LogsOptions {
   readonly contentMaxLength: number
   /** BatchLogRecordProcessor scheduledDelayMillis (default 2000, from logs.intervalMs) */
   readonly intervalMs?: number
+  /** Diagnostics sink (default silent) */
+  readonly log?: (msg: string, data?: unknown) => void
 }
 
 export interface Logs {
@@ -213,7 +216,9 @@ export function createLogs(options: LogsOptions): Logs {
       }
     },
     async shutdown() {
-      await provider.shutdown()
+      // Bug 46: same unload baseline as metrics — the final batch export may otherwise wait out
+      // the exporter's own HTTP timeout (>90 s measured), hanging the host's unload
+      await shutdownWithin("logs", SIGNAL_SHUTDOWN_BUDGET_MS, () => provider.shutdown(), options.log ?? (() => {}))
     },
   }
 }

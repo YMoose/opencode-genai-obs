@@ -19,6 +19,8 @@ export interface TestServer {
   readonly url: string
   readonly requests: CapturedRequest[]
   readonly close: () => Promise<void>
+  /** Force-close still-open sockets (a blackholed endpoint keeps a never-answered request in flight) */
+  readonly closeAllConnections: () => void
 }
 
 /** Start a local HTTP server recording every request; handle decides the response (may branch on the n-th request) */
@@ -46,7 +48,12 @@ export async function startServer(
   return {
     url: `http://127.0.0.1:${port}`,
     requests,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+    closeAllConnections: () => server.closeAllConnections(),
   }
 }
 

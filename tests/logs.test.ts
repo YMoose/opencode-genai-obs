@@ -161,3 +161,25 @@ test("Bug 28: no opencode.content.truncated when content fits, is empty, is gate
   await capped.shutdown()
   await unlimited.shutdown()
 })
+
+// ------------------------------------------------------------------ Bug 46 (bounded shutdown)
+
+test("Bug 46: logs.shutdown() against a non-responsive endpoint resolves within its budget", async (t) => {
+  // Same blackhole as the metrics twin: the batch processor's final export never completes,
+  // so the unbounded SDK shutdown hangs the host's unload (>90 s measured live).
+  const server = await startServer(() => {
+    /* never respond */
+  })
+  t.after(() => server.close())
+
+  const lines: string[] = []
+  const logs = createLogs({ endpoint: server.url, contentMaxLength: 100, intervalMs: 50, log: (msg) => lines.push(msg) })
+  logs.emit({ event: "user", sessionID: "s1", timeMs: 1_000, ...CTX, content: "x" })
+  await waitFor(() => server.requests.length >= 1, 5_000)
+
+  const started = Date.now()
+  await logs.shutdown()
+  const took = Date.now() - started
+  assert.ok(took < 1_500, `logs shutdown must return within its budget, took ${took}ms`)
+  assert.ok(lines.some((line) => line.includes("logs shutdown exceeded")), "the abandoned shutdown is logged")
+})
