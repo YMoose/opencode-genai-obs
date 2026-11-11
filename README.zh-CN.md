@@ -55,7 +55,7 @@ compaction (auto)                    12,400 → 620 tok · $0.021 [LLM · standa
 
 | 指标 | 类型 | 属性 |
 |---|---|---|
-| `gen_ai.client.token.usage` | Histogram（`{token}`） | `gen_ai.provider.name`、`gen_ai.request.model`、`gen_ai.token.type` = `input` / `output`（input 含可计费缓存读写） |
+| `gen_ai.client.token.usage` | Histogram（`{token}`） | `gen_ai.token.type` = `input` / `output`（input 含可计费缓存读写）；`gen_ai.provider.name` / `gen_ai.request.model` 仅在该身份被观测到时才带（否则省略，绝不用占位值） |
 | `gen_ai.client.operation.duration` | Histogram（`s`） | `gen_ai.operation.name`（`chat` / `execute_tool`）、chat 带厂商与模型、工具带 `gen_ai.tool.name`、失败带 `error.type` |
 
 ### 日志事件（可选开启）

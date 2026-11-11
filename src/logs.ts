@@ -42,7 +42,8 @@ export type LogObservation =
       readonly traceId: string
       readonly spanId: string
       readonly callId: string
-      readonly tool: string
+      /** Omitted when the tool name was never observed (Bug 48) */
+      readonly tool?: string
       readonly content: string | undefined
       readonly failed: boolean
       readonly errorType?: string
@@ -53,8 +54,9 @@ export type LogObservation =
       readonly timeMs: number
       readonly traceId: string
       readonly spanId: string
-      readonly provider: string
-      readonly model: string
+      /** Omitted when the model/provider identity was never observed (Bug 48) */
+      readonly provider?: string
+      readonly model?: string
       readonly finishReason: string | undefined
       readonly content: string | undefined
     }
@@ -194,7 +196,7 @@ export function createLogs(options: LogsOptions): Logs {
           emitRecord(
             obs,
             "gen_ai.tool.message",
-            { role: "tool", id: obs.callId, name: obs.tool, ...(content !== undefined ? { content } : {}) },
+            { role: "tool", id: obs.callId, ...(obs.tool ? { name: obs.tool } : {}), ...(content !== undefined ? { content } : {}) },
             { ...(obs.failed ? { "error.type": obs.errorType || "tool_error" } : {}), ...truncatedAttr(truncated) },
           )
           return
@@ -209,7 +211,12 @@ export function createLogs(options: LogsOptions): Logs {
               index: 0,
               message: { role: "assistant", ...(content !== undefined ? { content } : {}) },
             },
-            { "gen_ai.provider.name": obs.provider, "gen_ai.request.model": obs.model, ...truncatedAttr(truncated) },
+            {
+              // Bug 48: omit an unobserved identity rather than publishing an empty value
+              ...(obs.provider ? { "gen_ai.provider.name": obs.provider } : {}),
+              ...(obs.model ? { "gen_ai.request.model": obs.model } : {}),
+              ...truncatedAttr(truncated),
+            },
           )
           return
         }

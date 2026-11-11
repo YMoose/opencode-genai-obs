@@ -97,3 +97,22 @@ test("Bug 46: metrics.shutdown() against a non-responsive endpoint resolves with
   assert.ok(took < 1_500, `metrics shutdown must return within its budget, took ${took}ms`)
   assert.ok(logs.some((line) => line.includes("metrics shutdown exceeded")), "the abandoned shutdown is logged")
 })
+
+test("Bug 48: an unobserved provider/model is omitted from token datapoints, not sent as an empty attribute", async (t) => {
+  const server = await startServer((_req, res) => {
+    res.statusCode = 200
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const metrics = createMetrics({ endpoint: server.url, intervalMs: 100 })
+  t.after(() => metrics.shutdown()) // a failing assertion must not leave the periodic reader holding the process open
+  metrics.observe({ metric: "token", tokenType: "input", value: 7 })
+  await waitFor(() => server.requests.some((r) => r.path === "/v1/metrics"), 5_000)
+  const body = server.requests.find((r) => r.path === "/v1/metrics")!.body
+  assert.ok(body.includes("gen_ai.client.token.usage"), "the datapoint still exports — only the identity attributes are gone")
+  assert.ok(body.includes("gen_ai.token.type"), "the token type survives")
+  assert.ok(!body.includes("gen_ai.request.model"), "no model attribute when no model was observed")
+  assert.ok(!body.includes("gen_ai.provider.name"), "no provider attribute when no provider was observed")
+  await metrics.shutdown()
+})

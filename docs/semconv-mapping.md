@@ -50,8 +50,8 @@ Kinds below use OTLP numbers (`CLIENT = 3`, `INTERNAL = 1`). The JS API uses `CL
 | Span name | `kind` | Semconv `gen_ai.operation.name` | OpenInference `openinference.span.kind` | Trigger |
 |---|---|---|---|---|
 | `<40-char prompt/wakeup preview>` (fall back to session title, then `turn <userMessageID>`) | CLIENT (3) | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a root session (`src/spans.ts`) |
-| `chat <model.id>` | CLIENT | `chat` | `LLM` | `step.ended/failed` (`src/spans.ts`) |
-| `execute_tool <name>` | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`src/spans.ts`) |
+| `chat <model.id>`, or bare `chat` when no model was observed (Bug 48) | CLIENT | `chat` | `LLM` | `step.ended/failed` (`src/spans.ts`) |
+| `execute_tool <name>`, or bare `execute_tool` when no name was observed (Bug 48) | INTERNAL (1) | `execute_tool` | `TOOL` | `tool.success/failed` (`src/spans.ts`) |
 | `invoke_agent <agent>` (child session container) | CLIENT | `invoke_agent` | `AGENT` | `execution.succeeded/failed/interrupted` on a sub-agent session (`src/spans.ts`) |
 | `compaction` | CLIENT | `compaction` | `LLM` | `compaction.ended/failed` (`src/spans.ts`) |
 
@@ -112,7 +112,7 @@ Older spans without these attributes have unknown observation provenance.
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | const `"invoke_agent"` | semconv |
-| `gen_ai.provider.name` | const `"opencode"` | semconv |
+| `gen_ai.provider.name` | — not emitted | this slot is the **inference** provider (`openai` / `anthropic` / …), which is not known at turn-root scope; framework identity lives in `service.name` + `gen_ai.agent.name` (Bug 48) |
 | `gen_ai.agent.name` | rendered from the `tracing.agentName` template (`{agent}` → turn's `agent` ∪ session registry), default `"opencode/{agent}"` | semconv; omitted when the raw role name is missing or the template is `""` |
 | `opencode.agent` | turn's `agent` ∪ session registry | raw role name, ungated; the template-independent query key |
 | `gen_ai.conversation.id` | `sessionID` | semconv; also duplicated as `session.id` and `opencode.session.id` for Phoenix |
@@ -139,8 +139,8 @@ aggregate token counts or cost.
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | `"chat"` | |
-| `gen_ai.provider.name` | `step.model.providerID` | |
-| `gen_ai.request.model` | `step.model.id` | |
+| `gen_ai.provider.name` | `step.model.providerID` | omitted when the step event carried no provider (Bug 48) |
+| `gen_ai.request.model` | `step.model.id` | omitted when the step event carried no model id — `gen_ai.request.model` is `Conditionally Required` "*If available*" in the GenAI semconv, and a fabricated `"unknown"` claimed a model nobody requested (Bug 48) |
 | `gen_ai.response.model` | — not emitted | not independently observed in the response; clean absence until wire-derived observation lands (Bug 43, user decision 2026-11-10) |
 | `gen_ai.conversation.id` | `sessionID` | |
 | `gen_ai.response.finish_reasons` | `data.finish` (string) | true `string[]` attribute (`[finish]`); breaking type change — was a JSON string `["<finish>"]` (user decision option A, no mirror; Bug 42, 2026-11-10) |
@@ -154,7 +154,7 @@ aggregate token counts or cost.
 | `opencode.cost.usd` | `data.cost` | USD per step |
 | `opencode.reasoning` | concatenated reasoning chunks | **Gate: `assistantResponses`**; flat mirror of the reasoning parts for attribute-table UIs |
 | `openinference.span.kind` | `"LLM"` | |
-| `llm.model_name` | `step.model.id` | mirror |
+| `llm.model_name` | `step.model.id` | mirror; omitted with the model id (Bug 48) |
 | `llm.token_count.prompt` | `input_tokens` above | mirror |
 | `llm.token_count.completion` | `output_tokens` above | mirror |
 | `llm.token_count.total` | `sum(input, output, reasoning, cache.read, cache.write)` | mirror |
@@ -191,9 +191,9 @@ including post-response settlement, not as pure model-request latency.
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | `"execute_tool"` | |
-| `gen_ai.tool.name` | `tool.name` (from `tool.input.started`) | falls back to `"unknown"` |
+| `gen_ai.tool.name` | `tool.name` (from `tool.input.started` / `tool.called`) | omitted when no start/called event was observed — `Required` in the semconv, but `"unknown"` is not a tool name: the deviation is preferred over a fabricated value (Bug 48) |
 | `gen_ai.tool.call.id` | `toolCallId` | deterministic-id input |
-| `gen_ai.tool.type` | `"function"` | |
+| `gen_ai.tool.type` | — not emitted | the upstream event publishes no tool type; the former constant `"function"` was a guess that would mislabel `datastore`/`extension` tools (`Recommended` "*If available*", Bug 48) |
 | `gen_ai.conversation.id` | `sessionID` | |
 | `gen_ai.agent.name` | rendered from the `tracing.agentName` template (`{agent}` → `input.agent`), only when `name ∈ {subagent, task}` | identifies the child agent role; default template `"opencode/{agent}"`; omitted when the raw role name is missing or the template is `""` |
 | `opencode.agent` | `input.agent` — only when `name ∈ {subagent, task}` | raw role name, ungated; the template-independent query key |
@@ -211,7 +211,7 @@ including post-response settlement, not as pure model-request latency.
 | Attribute | Source | Notes |
 |---|---|---|
 | `gen_ai.operation.name` | `"invoke_agent"` | |
-| `gen_ai.provider.name` | `"opencode"` | |
+| `gen_ai.provider.name` | — not emitted | same ruling as the turn root: the inference provider is not known at container scope (Bug 48) |
 | `gen_ai.agent.name` | rendered from the `tracing.agentName` template (`{agent}` → child session's `agent` field), default `"opencode/{agent}"` | omitted when the raw role name is missing or the template is `""` |
 | `opencode.agent` | child session's `agent` field | raw role name, ungated; the template-independent query key |
 | `gen_ai.conversation.id` | child `sessionID` | |

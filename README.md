@@ -55,7 +55,7 @@ Turn roots, sub-agent `execute_tool` spans, and `invoke_agent` containers set `g
 
 | Metric | Type | Attributes |
 |---|---|---|
-| `gen_ai.client.token.usage` | Histogram (`{token}`) | `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` = `input` / `output` (input includes billable cache read/write) |
+| `gen_ai.client.token.usage` | Histogram (`{token}`) | `gen_ai.token.type` = `input` / `output` (input includes billable cache read/write), plus `gen_ai.provider.name` / `gen_ai.request.model` when that identity was observed (both omitted otherwise — never a placeholder) |
 | `gen_ai.client.operation.duration` | Histogram (`s`) | `gen_ai.operation.name` (`chat` / `execute_tool`), provider & model for chat, `gen_ai.tool.name` for tools, `error.type` on failure |
 
 ### Log events (opt-in, legacy vocabulary)

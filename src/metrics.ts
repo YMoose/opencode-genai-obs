@@ -22,8 +22,9 @@ export type MetricObservation =
       /** input includes cache read/write (billable input, same aggregation as the chat span) */
       readonly tokenType: "input" | "output"
       readonly value: number
-      readonly provider: string
-      readonly model: string
+      /** Omitted when the model/provider identity was never observed (Bug 48) */
+      readonly provider?: string
+      readonly model?: string
     }
   | {
       readonly metric: "duration"
@@ -84,11 +85,11 @@ export function createMetrics(options: MetricsOptions): Metrics {
   return {
     observe(obs) {
       if (obs.metric === "token") {
-        const attrs: Attributes = {
-          "gen_ai.provider.name": obs.provider,
-          "gen_ai.request.model": obs.model,
-          "gen_ai.token.type": obs.tokenType,
-        }
+        // Bug 48: an unobserved identity is omitted, never rendered as an empty or
+        // placeholder value — the datapoint stays usable for token aggregation
+        const attrs: Attributes = { "gen_ai.token.type": obs.tokenType }
+        if (obs.provider) attrs["gen_ai.provider.name"] = obs.provider
+        if (obs.model) attrs["gen_ai.request.model"] = obs.model
         tokenUsage.record(obs.value, attrs)
         return
       }

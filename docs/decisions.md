@@ -180,3 +180,23 @@ the policy itself is AGENTS.md §"Heuristic policy: upstream contracts come firs
   `src/spans.ts` · `emitChatSpan` (pointer); governance.md gains the standing-heuristic
   row and a known-limitations entry, and its table anchors switch from rot-prone line
   numbers to symbol names.
+- 2026-11-11: Bug 48 fixed — stop fabricating semconv attribute values. Bug 43 removed
+  `gen_ai.response.model` under the data-honesty rule ("fake confirmation is worse than
+  absence"); the same rule now applies to the placeholders left behind elsewhere:
+  `gen_ai.request.model` is omitted when the step event carried no model id (was
+  `"unknown"`, and the span name degrades to the bare `chat`); `gen_ai.tool.name` is
+  omitted when no start/called event was observed (was `"unknown"`; span name degrades to
+  `execute_tool`); `gen_ai.tool.type` is no longer emitted at all (the constant
+  `"function"` was a guess that mislabels `datastore`/`extension` tools); and
+  `gen_ai.provider.name` no longer carries the constant `"opencode"` on turn roots and
+  sub-agent containers — that slot is the *inference* provider
+  (`openai`/`anthropic`/…), and semconv uses it as the discriminator for
+  provider-specific attribute flavors, so a framework name there reads as a provider that
+  does not exist. Framework identity stays on `service.name` and `gen_ai.agent.name`.
+  Requirement-level notes: `gen_ai.request.model`, `gen_ai.tool.type` are
+  `Conditionally Required`/`Recommended` "*If available*" — omission is conformant;
+  `gen_ai.tool.name` and (on `invoke_agent`) `gen_ai.provider.name` are `Required`, so
+  those two are conscious deviations: an absent value is a gap a reader can see, a
+  fabricated one is a claim they cannot detect. The metrics/logs lanes follow the same
+  rule (an unobserved `gen_ai.provider.name`/`gen_ai.request.model`/tool name is omitted
+  rather than sent empty).

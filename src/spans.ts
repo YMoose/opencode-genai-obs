@@ -58,8 +58,9 @@ const MAX_SESSIONS = 2048
 // across round close so late terminals can still emit, which also means sessions that
 // never deliver terminals would grow the registry unbounded. Bound: 1024 entries,
 // oldest-first eviction. Blast radius: the evicted call's eventual terminal degrades
-// to name "unknown" with zero duration and may find no trace — the pre-Bug-32
-// behavior, bounded to that single call; no fabricated span is ever emitted.
+// to a nameless `execute_tool` (Bug 48: no "unknown" placeholder) with zero duration
+// and may find no trace — the pre-Bug-32 behavior, bounded to that single call; no
+// fabricated span is ever emitted.
 const MAX_IN_FLIGHT_TOOLS = 1024
 
 function nano(ms: number): bigint {
@@ -206,6 +207,11 @@ interface StepState {
   readonly assistantMessageID: string
   readonly sessionID: string
   readonly agent: string
+  /**
+   * Model identity as published by the upstream step event — "" when the event carried
+   * no model (Bug 48): a placeholder id would be re-emitted as gen_ai.request.model,
+   * a made-up claim about identity nobody observed.
+   */
   readonly model: { readonly id: string; readonly providerID: string }
   readonly startedNano: bigint
   /**
@@ -360,7 +366,7 @@ export function createSpanBuilder(
   /**
    * Terminal-tool registry: toolCallIds that already emitted their execute_tool span.
    * The endedSteps twin (Bug 16): a redelivered tool.success/failed would emit a
-   * degraded second span (same deterministic id, name "unknown", zero duration) plus a
+   * degraded second span (same deterministic id, nameless, zero duration) plus a
    * non-dedupable log record (log record ids are SDK-generated). Nested by sessionID
    * so session.deleted can purge it. Also read at the tool-start re-creation entries
    * (Bug 33 and its tool.called follow-up).
@@ -608,7 +614,12 @@ export function createSpanBuilder(
       attributes: attrs(
         ...observationAttrs(end),
         ["gen_ai.operation.name", "invoke_agent"],
-        ["gen_ai.provider.name", "opencode"],
+        // Bug 48: no gen_ai.provider.name here. That slot is the INFERENCE provider
+        // (openai / anthropic / ...), and semconv uses it as the discriminator for
+        // provider-specific attribute flavors — "opencode" is framework identity and
+        // would read as a provider that does not exist. Framework identity lives on
+        // service.name and gen_ai.agent.name. Semconv marks the attribute Required on
+        // invoke_agent spans: we accept the deviation rather than publish a false value.
         ["gen_ai.agent.name", renderAgentName(options.agentNameTemplate, turn.agent ?? merged.agent)],
         // Raw role name, ungated: the template-independent query key (see tracing.agentName)
         ["opencode.agent", turn.agent ?? merged.agent],
@@ -805,7 +816,9 @@ export function createSpanBuilder(
           assistantMessageID,
           sessionID: sid,
           agent: (data.agent as string) ?? "",
-          model: { id: model.id ?? "unknown", providerID: model.providerID ?? "" },
+          // Bug 48: no placeholder model id — "" means "not observed" and the span
+          // omits gen_ai.request.model instead of claiming a model named "unknown"
+          model: { id: model.id ?? "", providerID: model.providerID ?? "" },
           startedNano: nano(readNumber(data.started) ?? created),
           traceId: binding.traceId,
           parentId: binding.parentId,
@@ -1086,7 +1099,7 @@ export function createSpanBuilder(
     const tokens = readTokensOrWarn(data.tokens, end.trigger, log)
     const cost = readNumber(data.cost)
     const finish = data.finish as string | undefined
-    const model = step?.model ?? { id: "unknown", providerID: "" }
+    const model = step?.model ?? { id: "", providerID: "" }
     const texts = step ? orderedTexts(step.texts) : []
     const reasoning = step?.reasoning ?? []
     // HEURISTIC(upstream-gap): take the oldest pending wire frame positionally — no
@@ -1131,7 +1144,9 @@ export function createSpanBuilder(
       traceId,
       spanId: chatSpanId(assistantMessageID),
       parentSpanId: parentId,
-      name: `chat ${model.id}`,
+      // semconv: `{gen_ai.operation.name} {gen_ai.request.model}`; with no observed model the
+      // name carries the bare operation rather than a fabricated "chat unknown" (Bug 48)
+      name: model.id ? `chat ${model.id}` : "chat",
       kind: KIND_CLIENT,
       startTimeUnixNano: step?.startedNano ?? endNano,
       endTimeUnixNano: endNano,
@@ -1259,7 +1274,9 @@ export function createSpanBuilder(
     if (!assistantMessageID) return undefined
     // The tool span's parent is the chat span that issued it (deterministic id, so emit order does not matter)
     const parentId = chatSpanId(assistantMessageID)
-    const name = tool?.name ?? "unknown"
+    // Bug 48: undefined when no input.started/called was ever observed — the span omits
+    // gen_ai.tool.name and the name degrades to the bare operation, no "unknown" placeholder
+    const name = tool?.name || undefined
     const input = tool?.input ?? {}
     const isSubagent = name === "subagent" || name === "task"
     // Bug 45: upstream publishes an array; a bare string also has .length but no .map
@@ -1291,7 +1308,7 @@ export function createSpanBuilder(
       traceId,
       spanId,
       parentSpanId: parentId,
-      name: `execute_tool ${name}`,
+      name: name ? `execute_tool ${name}` : "execute_tool",
       kind: KIND_INTERNAL,
       startTimeUnixNano: tool?.startedNano ?? endNano,
       endTimeUnixNano: endNano,
@@ -1300,7 +1317,9 @@ export function createSpanBuilder(
         ["gen_ai.operation.name", "execute_tool"],
         ["gen_ai.tool.name", name],
         ["gen_ai.tool.call.id", callId],
-        ["gen_ai.tool.type", "function"],
+        // Bug 48: no gen_ai.tool.type. The upstream event publishes no tool type, and
+        // "function" was a constant guess; semconv marks it Recommended "If available".
+        // A datastore/extension tool would be mislabeled by that guess.
         ["gen_ai.conversation.id", sid],
         ["gen_ai.agent.name", renderAgentName(options.agentNameTemplate, isSubagent ? (input.agent as string | undefined) : undefined)],
         // Raw role name, ungated: the template-independent query key (see tracing.agentName)
@@ -1430,7 +1449,8 @@ export function createSpanBuilder(
       attributes: attrs(
         ...observationAttrs(end),
         ["gen_ai.operation.name", "invoke_agent"],
-        ["gen_ai.provider.name", "opencode"],
+        // Bug 48: same ruling as the turn root — see the note in flushTurnRoot. The
+        // child session's inference provider is not known at container scope.
         ["gen_ai.agent.name", renderAgentName(options.agentNameTemplate, info?.agent)],
         // Raw role name, ungated: the template-independent query key (see tracing.agentName)
         ["opencode.agent", info?.agent],

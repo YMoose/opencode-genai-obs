@@ -527,7 +527,7 @@ test("retry: invalid attempt (string/missing/<=0) is silently ignored", async ()
   builder.handleEvent(event("session.step.started", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
   builder.handleEvent(event("session.step.ended", 1_300, { sessionID: "s1", assistantMessageID: "a1" }))
   await settle()
-  const chat = spans.find((span) => span.name === "chat unknown")
+  const chat = spans.find((span) => span.name === "chat") // Bug 48: no fabricated "chat unknown"
   assert.ok(chat)
   assert.ok(!chat.attributes.some(([key]) => key === "opencode.retry.attempt"), "an invalid attempt must not stamp")
 })
@@ -839,7 +839,7 @@ test("Bug 16: duplicate tool terminal delivery must not emit a degraded span, do
   await settle()
 
   const toolSpans = spans.filter((s) => s.name.startsWith("execute_tool"))
-  assert.strictEqual(toolSpans.length, 1, "duplicate tool.success must not emit a second (degraded 'unknown') span")
+  assert.strictEqual(toolSpans.length, 1, "duplicate tool.success must not emit a second (degraded, nameless) span")
   assert.strictEqual(toolSpans[0].name, "execute_tool grep", "the surviving span keeps the recorded name, not the degraded fallback")
   assert.strictEqual(logEvents.filter((e) => e.event === "tool").length, 1, "duplicate tool.success must not double the tool message log event (log record ids are SDK-generated — not backend-dedupable)")
   const root = spans.find((s) => s.spanId === hash("opencode-turn-span:s1:m1", 8))
@@ -1616,8 +1616,8 @@ test("Bug 40: evicting a session from the registry cap purges its endedTools set
   // re-registration degradation) and redeliver the ended callId's terminal. A live
   // trace source is required for emission (emitToolSpan bails without one), so the
   // re-opened round makes the two states visible: a lingering set drops the
-  // redelivery silently; a purged set lets it emit degraded (name "unknown" — the
-  // tool state died with the terminal), landing on the live round's trace.
+  // redelivery silently; a purged set lets it emit degraded (bare `execute_tool` — the
+  // tool state died with the terminal, Bug 48), landing on the live round's trace.
   const { spans, builder } = makeHarness()
   // s0 completes a tool call: endedTools[s0] = {t1}
   builder.handleEvent(event("session.created", 1_000, { sessionID: "s0" }))
@@ -1651,7 +1651,7 @@ test("Bug 40: evicting a session from the registry cap purges its endedTools set
     "the evicted session's endedTools was purged — the redelivered terminal re-emits degraded instead of being dropped by a lingering set (pre-fix: 1)",
   )
   assert.strictEqual(toolSpans[0].traceId, hash("opencode-turn:s0:m1", 16), "the original Round 1 emission is untouched")
-  assert.strictEqual(toolSpans[1].name, "execute_tool unknown", "the re-emission is degraded — the session (and its tool state) was forgotten with eviction")
+  assert.strictEqual(toolSpans[1].name, "execute_tool", "the re-emission is degraded to the bare operation — the session (and its tool state) was forgotten with eviction (Bug 48: no \"unknown\" placeholder)")
   assert.strictEqual(toolSpans[1].traceId, hash("opencode-turn:s0:m2", 16), "the forgotten session's redelivered terminal lands on the live round (re-registration degradation)")
 })
 
@@ -1695,7 +1695,7 @@ test("Bug 40 regression pin: a non-evicted session's endedTools set survives the
     "one emission per session (s0 and s_keep each ran t1) — s_keep's surviving set drops its redelivery (a wrongful purge would emit a third, degraded)",
   )
   assert.ok(
-    !toolSpans.some((s) => s.name === "execute_tool unknown"),
+    !toolSpans.some((s) => s.name === "execute_tool"),
     "no degraded re-emission for the surviving session — its endedTools entry was not purged",
   )
 })
@@ -1743,7 +1743,7 @@ test("Bug 40 follow-up: evicting a session from the registry cap purges its ende
     "the evicted session's endedSteps was purged — the redelivered terminal re-emits degraded instead of being dropped by a lingering set (pre-fix: 1)",
   )
   assert.strictEqual(chatSpans[0].traceId, hash("opencode-turn:s0:m1", 16), "the original Round 1 emission is untouched")
-  assert.strictEqual(chatSpans[1].name, "chat unknown", "the re-emission is degraded — the step state was forgotten with the session")
+  assert.strictEqual(chatSpans[1].name, "chat", "the re-emission is degraded to the bare operation — the step state was forgotten with the session (Bug 48)")
   assert.strictEqual(chatSpans[1].traceId, hash("opencode-turn:s0:m2", 16), "the forgotten session's redelivered terminal lands on the live round (re-registration degradation)")
 })
 
@@ -2228,4 +2228,106 @@ test("Bug 45: a non-numeric created (ISO string) drops that event with a warning
   builder.handleEvent(event("session.execution.succeeded", 2_300, { sessionID: "s1" }))
   await settle()
   assert.ok(spans.some((span) => span.spanId === hash("opencode-chat:a2", 8)), "event processing after the malformed event is unaffected")
+})
+
+// ---------------------------------------------- Bug 48 (no fabricated semconv attribute values)
+
+// Bug 43 removed gen_ai.response.model because "fake confirmation is worse than absence".
+// The same data-honesty rule applies to the values we still invented when the upstream
+// event carried nothing: "unknown" as a model id / tool name, the constant tool type, and
+// "opencode" as an inference provider. Each fabricated value must be absent post-fix.
+
+test("Bug 48: a step with no model id omits gen_ai.request.model and the model mirrors instead of fabricating 'unknown'", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  // No model in the step.started payload at all — nothing was observed
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.step.ended", 1_200, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_300, { sessionID: "s1" }))
+  await settle()
+
+  const chat = spans.find((span) => span.spanId === hash("opencode-chat:a1", 8))
+  assert.ok(chat, "must emit the chat span")
+  assert.strictEqual(chat.name, "chat", "no model → the semconv name is the bare operation, not 'chat unknown'")
+  assert.ok(
+    !chat.attributes.some(([key]) => key === "gen_ai.request.model"),
+    "gen_ai.request.model must be absent — 'unknown' claims a model identity nobody observed (pre-fix: \"unknown\")",
+  )
+  assert.ok(!chat.attributes.some(([key]) => key === "llm.model_name"), "the OpenInference mirror is absent too (pre-fix: \"unknown\")")
+  assert.ok(!chat.attributes.some(([key]) => key === "gen_ai.provider.name"), "no provider was observed either — clean absence")
+})
+
+test("Bug 48: a tool span with no recorded name omits gen_ai.tool.name / gen_ai.tool.type and is named 'execute_tool'", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  // Terminal without any prior input.started/called: the tool name was never observed
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", assistantMessageID: "a1", id: "t1" }))
+  await settle()
+
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.ok(tool, "must emit the tool span")
+  assert.strictEqual(tool.name, "execute_tool", "no name → the semconv name is the bare operation, not 'execute_tool unknown'")
+  assert.ok(
+    !tool.attributes.some(([key]) => key === "gen_ai.tool.name"),
+    "gen_ai.tool.name must be absent — nobody observed a name, and 'unknown' is not a tool (pre-fix: \"unknown\")",
+  )
+  assert.ok(
+    !tool.attributes.some(([key]) => key === "gen_ai.tool.type"),
+    "gen_ai.tool.type must be absent — 'function' was a constant guess, not an observation (pre-fix: present)",
+  )
+  assert.equal(tool.attributes.find(([key]) => key === "gen_ai.tool.call.id")?.[1], "t1", "the observed call id still lands")
+})
+
+test("Bug 48: a known-name tool span omits gen_ai.tool.type (never a constant guess)", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "q")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "bash" }))
+  builder.handleEvent(event("session.tool.success", 1_200, { sessionID: "s1", assistantMessageID: "a1", id: "t1" }))
+  await settle()
+
+  const tool = spans.find((span) => span.spanId === hash("opencode-tool:a1:t1", 8))
+  assert.ok(tool, "must emit the tool span")
+  assert.equal(tool.name, "execute_tool bash", "the observed name still shapes the span name")
+  assert.equal(tool.attributes.find(([key]) => key === "gen_ai.tool.name")?.[1], "bash", "the observed name still lands")
+  assert.ok(
+    !tool.attributes.some(([key]) => key === "gen_ai.tool.type"),
+    "gen_ai.tool.type must be absent — the upstream event publishes no tool type (pre-fix: constant \"function\")",
+  )
+})
+
+test("Bug 48: turn root and sub-agent container do not claim 'opencode' as the inference provider", async () => {
+  const { spans, builder } = makeHarness()
+  builder.handleEvent(event("session.created", 1_000, { sessionID: "s1" }))
+  builder.handlePrompt("s1", "m1", "go")
+  builder.handleEvent(event("session.step.started", 1_100, { sessionID: "s1", assistantMessageID: "a1", model: { id: "m", providerID: "p" } }))
+  // Linked sub-agent round so the container span emits too
+  builder.handleEvent(event("session.tool.input.started", 1_150, { sessionID: "s1", assistantMessageID: "a1", id: "t1", name: "task" }))
+  builder.handleEvent(
+    event("session.tool.success", 1_200, { sessionID: "s1", assistantMessageID: "a1", id: "t1", metadata: { sessionID: "s2" }, content: [] }),
+  )
+  builder.handleEvent(event("session.step.started", 1_300, { sessionID: "s2", assistantMessageID: "c1", model: { id: "m", providerID: "p" } }))
+  builder.handleEvent(event("session.step.ended", 1_400, { sessionID: "s2", assistantMessageID: "c1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_500, { sessionID: "s2" }))
+  builder.handleEvent(event("session.step.ended", 1_600, { sessionID: "s1", assistantMessageID: "a1" }))
+  builder.handleEvent(event("session.execution.succeeded", 1_700, { sessionID: "s1" }))
+  await settle()
+
+  const root = spans.find((span) => span.spanId === hash("opencode-turn-span:s1:m1", 8))
+  const container = spans.find((span) => span.spanId === hash("opencode-session:s2", 8))
+  assert.ok(root && container, "both agent-operation spans must emit")
+  for (const span of [root, container]) {
+    const provider = span.attributes.find(([key]) => key === "gen_ai.provider.name")
+    assert.strictEqual(
+      provider,
+      undefined,
+      `gen_ai.provider.name is the inference provider slot (openai/anthropic/...), never framework identity (pre-fix: "opencode" on ${span.name})`,
+    )
+  }
+  // Framework identity still exists — on the resource, not in the provider slot
+  assert.ok(root.attributes.some(([key]) => key === "gen_ai.agent.name"), "gen_ai.agent.name still carries the framework agent identity")
 })

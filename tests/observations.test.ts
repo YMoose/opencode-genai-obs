@@ -209,3 +209,22 @@ test("Bug 37: recorder recreation keeps wire-to-span identity unique when seq re
     assert.equal(other[index].captureID, records[index].captureID)
   }
 })
+
+test("Bug 48: an unobserved tool name / chat model is omitted from the logs payload, never sent as a placeholder", async (t) => {
+  const records: LogRecord[] = []
+  t.mock.method(LoggerProvider.prototype, "getLogger", () => ({ emit: (record: LogRecord) => records.push(record) }))
+  const logs = createLogs({ endpoint: "http://unused.test", contentMaxLength: -1 })
+  t.after(() => logs.shutdown())
+
+  // Degraded emissions (Bug 48: the builder passes undefined instead of "unknown")
+  logs.emit({ event: "tool", sessionID: "s1", timeMs: 1_000, traceId: "a".repeat(32), spanId: "b".repeat(16), callId: "tc1", content: "x", failed: false })
+  logs.emit({ event: "choice", sessionID: "s1", timeMs: 1_100, traceId: "a".repeat(32), spanId: "b".repeat(16), finishReason: "stop", content: "y" })
+
+  const tool = records.find((record) => record.eventName === "gen_ai.tool.message")
+  const choice = records.find((record) => record.eventName === "gen_ai.choice")
+  assert.ok(tool && choice, "both events still fire (metadata-only is not the same as dropped)")
+  const body = (record: LogRecord | undefined): Record<string, unknown> => record?.body as Record<string, unknown>
+  assert.ok(!("name" in body(tool)), "gen_ai.tool.message carries no name key when the name was never observed")
+  assert.ok(!("gen_ai.request.model" in (choice?.attributes ?? {})), "gen_ai.choice omits an unobserved model")
+  assert.ok(!("gen_ai.provider.name" in (choice?.attributes ?? {})), "gen_ai.choice omits an unobserved provider")
+})
